@@ -17,7 +17,12 @@
 #import <Foundation/Foundation.h>
 #import <string.h>
 
-static NSString *const kPlistKey = @"CODMGateKey";
+static NSString *const kPlistKey    = @"CODMGateKey";
+static NSString *const kPlistDevice = @"CODMGateDevice";
+
+/* Donde queda guardada, en el equipo, la huella del primer telefono que valido
+   la llave. Vive en NSUserDefaults: se crea al vuelo, no va dentro de la IPA. */
+static NSString *const kStoreDevice = @"codmgate.devicehash.v1";
 
 /* ==================================================================== SHA-256 */
 
@@ -114,6 +119,41 @@ static BOOL secure_equals(NSString *a, NSString *b)
     return diff == 0;
 }
 
+/* ============================================================ atar al equipo */
+
+/* identifierForVendor no pide permiso ni entitlement y no se puede leer desde
+   fuera. Solo cambia si se borran TODAS las apps del mismo fabricante del
+   telefono, que para este caso es justo lo que se quiere. */
+static NSString *device_fingerprint(void)
+{
+    NSString *v = [UIDevice currentDevice].identifierForVendor;
+    if (v.length == 0) return nil;
+    return sha256_base64(v);
+}
+
+/* Devuelve nil si todo esta bien, o el motivo por el que hay que bloquear.
+   Si el equipo no se puede identificar no se bloquea nunca: es preferible
+   dejar pasar a dejar al usuario sin poder jugar. */
+static NSString *device_problem(void)
+{
+    NSString *now = device_fingerprint();
+    if (!now) return nil;                                   // no se puede comprobar
+    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kStoreDevice];
+    if (!saved || saved.length == 0) return nil;             // primer uso: se atara luego
+    if ([saved isEqualToString:now]) return nil;             // mismo equipo
+    return @"Esta llave ya se valido en otro equipo.";
+}
+
+/* Se llama justo despues de acertar la llave: fija el equipo. */
+static void device_bind(void)
+{
+    NSString *fp = device_fingerprint();
+    if (!fp) return;
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u setObject:fp forKey:kStoreDevice];
+    [u synchronize];
+}
+
 /* ==================================================================== UI */
 
 static UIWindow *active_window(void)
@@ -160,7 +200,7 @@ static void refuse(NSString *why)
                    dispatch_get_main_queue(), ^{ exit(0); });
 }
 
-static void ask(NSString *expected)
+static void ask(NSString *expected, BOOL bindDevice)
 {
     UIAlertController *a =
         [UIAlertController alertControllerWithTitle:@"CODM AIM"
@@ -185,7 +225,8 @@ static void ask(NSString *expected)
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (typed.length == 0) { refuse(@"No introdujiste ninguna llave."); return; }
         if (!secure_equals(sha256_base64(typed), expected)) { refuse(@"La llave no es correcta."); return; }
-        /* Correcta: la app sigue su curso normal. */
+        /* Correcta: se ata al equipo la primera vez y la app sigue su curso. */
+        if (bindDevice) device_bind();
     }]];
 
     [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
@@ -212,6 +253,16 @@ static void KeyGate_init(void)
             /* Sin llave configurada: esta build no va protegida. */
             return;
         }
-        ask(expected);
+
+        id dev = [[NSBundle mainBundle] objectForInfoDictionaryKey:kPlistDevice];
+        BOOL bindDevice = [dev isKindOfClass:[NSString class]] && [dev isEqualToString:@"1"];
+
+        /* Si ya se ató a otro equipo, no se llega ni a pedir la llave. */
+        if (bindDevice) {
+            NSString *bad = device_problem();
+            if (bad) { refuse(bad); return; }
+        }
+
+        ask(expected, bindDevice);
     });
 }
