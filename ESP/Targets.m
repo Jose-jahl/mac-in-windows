@@ -388,10 +388,28 @@ void esp_render_frame(void *cgctx, float width, float height)
 /* --------------------------------------------------------------------- */
 /* Calibrador                                                             */
 /* --------------------------------------------------------------------- */
+/* El informe va a Documents/, no a /tmp/.
+   /tmp esta dentro del sandbox y en un telefono sin jailbreak no hay manera de
+   sacarlo. Documents/ si se ve desde la app Archivos si el Info.plist lleva
+   UIFileSharingEnabled, que es lo que pone la herramienta cuando marca
+   calibrar. */
+static const char *calib_path(void)
+{
+    static char buf[512];
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *dir = paths.firstObject ?: NSTemporaryDirectory();
+    snprintf(buf, sizeof(buf), "%s/esp-calib.txt", [dir UTF8String]);
+    return buf;
+}
+
 void esp_targets_calib_dump(void)
 {
-    FILE *f = fopen("/tmp/esp-calib.txt", "w");
-    if (!f) return;
+    const char *path = calib_path();
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        NSLog(@"[ESP] no se pudo escribir el informe en %s", path);
+        return;
+    }
 
     fprintf(f, "# ESP calibracion\n");
     fprintf(f, "slide_base      = 0x%llx\n", (unsigned long long)g_slide);
@@ -431,6 +449,19 @@ void esp_targets_calib_dump(void)
     fprintf(f, "\n");
 
     fclose(f);
+
+    /* Lo mismo, pero por NSLog. Es la unica via si instalas idevicesyslog, y
+       de paso deja las cuatro cifras clave en el log del sistema sin tener que
+       abrir ningun fichero. */
+    NSLog(@"[ESP-CALIB] slide=0x%llx base=%d hooks=%d",
+          (unsigned long long)g_slide, g_base_ok ? 1 : 0, esp_hook_count());
+    NSLog(@"[ESP-CALIB] llamadas_AABB=%llu distintos=%llu objetos_vivos=%d",
+          (unsigned long long)g_calls_aabb, (unsigned long long)g_distinct_self, g_count);
+    NSLog(@"[ESP-CALIB] nombre=%llu muerto=%llu vida=%llu",
+          (unsigned long long)g_calls_name, (unsigned long long)g_calls_dead,
+          (unsigned long long)g_calls_health);
+    NSLog(@"[ESP-CALIB] disposicion=%d floats=%d  informe en %s",
+          (int)g_cfg.aabb_layout, g_last6_n, path);
 }
 
 int esp_targets_calib_aabb_candidates(void) { return (int)AABB__COUNT; }
