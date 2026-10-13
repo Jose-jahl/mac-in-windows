@@ -65,15 +65,35 @@ jobs:
           lipo -info ESP.dylib
           echo
           echo "--- simbolos que deben estar dentro ---"
-          # Si esto falla, el motor no se linko bien y la dylib no hara nada.
-          for s in ESP_init esp_hook_install esp_targets_start esp_render_frame; do
+          # OJO: ESP_init es static (los constructores lo son), asi que sale
+          # como simbolo LOCAL y nm -gU no lo ve. Lo que se comprueba aqui son
+          # las funciones publicas del motor, que si son globales.
+          fail=0
+          for s in esp_hook_install esp_targets_start esp_render_frame esp_config_load; do
             if nm -gU ESP.dylib | grep -q " T _$s"; then
               echo "  ok      _$s"
             else
               echo "  FALTA   _$s"
-              exit 1
+              fail=1
             fi
           done
+          [ "$fail" -eq 0 ] || { echo "FALTA LA API DEL MOTOR"; exit 1; }
+
+          echo
+          echo "--- constructor ---"
+          # Sin esto la dylib carga pero no arranca nada: ESP_init es static y
+          # su atributo __attribute__((constructor)) lo mete en __mod_init_func.
+          INITFUNC=$(otool -l ESP.dylib | awk '/__mod_init_func/{f=1} f&&/size/{print $2; exit}')
+          # otool imprime el tamano en hexadecimal (size 0x10), y
+          # [ "0x10" -gt 0 ] revienta con "integer expression expected".
+          # $(( )) lo convierte a aritmetica antes de comparar.
+          if [ -n "$INITFUNC" ] && [ $((INITFUNC)) -gt 0 ]; then
+            echo "  ok      __mod_init_func = $INITFUNC ($((INITFUNC)) B, el constructor corre)"
+          else
+            echo "  FALTA   __mod_init_func vacio: la dylib cargaria pero no haria nada"
+            exit 1
+          fi
+
           echo
           echo "--- tamano ---"
           ls -l ESP.dylib
@@ -81,7 +101,7 @@ jobs:
           file ESP.dylib | grep -q 'arm64'      || { echo "NO es arm64"; exit 1; }
           file ESP.dylib | grep -q 'shared'     || { echo "NO es una libreria compartida"; exit 1; }
           echo
-          echo "OK: es una dylib arm64 con el motor dentro"
+          echo "OK: dylib arm64, API del motor presente y constructor activo"
 
       - name: Subir el resultado
         uses: actions/upload-artifact@v4
