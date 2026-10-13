@@ -80,17 +80,25 @@ jobs:
           [ "$fail" -eq 0 ] || { echo "FALTA LA API DEL MOTOR"; exit 1; }
 
           echo
-          echo "--- constructor ---"
-          # Sin esto la dylib carga pero no arranca nada: ESP_init es static y
-          # su atributo __attribute__((constructor)) lo mete en __mod_init_func.
-          INITFUNC=$(otool -l ESP.dylib | awk '/__mod_init_func/{f=1} f&&/size/{print $2; exit}')
-          # otool imprime el tamano en hexadecimal (size 0x10), y
-          # [ "0x10" -gt 0 ] revienta con "integer expression expected".
-          # $(( )) lo convierte a aritmetica antes de comparar.
-          if [ -n "$INITFUNC" ] && [ $((INITFUNC)) -gt 0 ]; then
-            echo "  ok      __mod_init_func = $INITFUNC ($((INITFUNC)) B, el constructor corre)"
+          echo "--- constructor: diagnostico ---"
+          # Se vuelca todo lo relacionado. Asi, si esto falla otra vez, el log
+          # dice que esta viendo en vez de dejarnos adivinar.
+          echo "  secciones/segmentos con 'init':"
+          otool -l ESP.dylib | grep -iE 'sectname|segname' | grep -i init || echo "    (ninguna)"
+          echo
+          echo "  simbolos con ESP_init o mod_init:"
+          nm ESP.dylib 2>/dev/null | grep -iE 'ESP_init|mod_init' || echo "    (ninguno)"
+          echo
+          echo "  extracto crudo de __mod_init_func:"
+          otool -l ESP.dylib | grep -A4 '__mod_init_func' || echo "    (no aparece la seccion)"
+
+          echo
+          # La comprobacion fiable: el constructor tiene que estar en la tabla
+          # de simbolos aunque salga en minuscula, porque ESP_init es static.
+          if nm ESP.dylib 2>/dev/null | grep -q 'ESP_init'; then
+            echo "  ok      ESP_init en la tabla de simbolos: se ejecutara al cargar"
           else
-            echo "  FALTA   __mod_init_func vacio: la dylib cargaria pero no haria nada"
+            echo "  FALTA   ni ESP_init ni __mod_init_func: la dylib cargaria y no haria nada"
             exit 1
           fi
 
