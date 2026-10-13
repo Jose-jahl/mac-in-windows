@@ -180,9 +180,48 @@ static UIWindow *active_window(void)
     return nil;
 }
 
+/* ============================================================== estado de la puerta */
+
+static NSString *g_expected = nil;     /* hash esperado            */
+static BOOL     g_bind     = NO;       /* atar al equipo            */
+static BOOL     g_open     = NO;       /* llave correcta: no insistir */
+static BOOL     g_refused  = NO;       /* ya se respondio "no"      */
+static UIAlertController *g_alert = nil;
+static int      g_waits     = 0;       /* intentos de esperar ventana */
+
+/* Cuantos intentos de espera antes de rendirse. 0,5 s cada uno -> 60 s. */
+static const int kMaxWaits = 120;
+
+/* El controlador mas alto de la jerarquia de esa ventana. */
+static UIViewController *top_vc(UIWindow *w)
+{
+    UIViewController *vc = w.rootViewController;
+    int guard = 0;
+    while (vc.presentedViewController && guard++ < 64) vc = vc.presentedViewController;
+    return vc;
+}
+
+/* ¿Sigue el dialogo en pantalla? La app puede llevarselo al cambiar de escena. */
+static BOOL gate_visible(void)
+{
+    UIWindow *w = active_window();
+    if (!w || !g_alert) return NO;
+    UIViewController *vc = w.rootViewController;
+    int guard = 0;
+    while (vc && guard++ < 64) {
+        if (vc == g_alert) return YES;
+        vc = vc.presentedViewController;
+    }
+    return NO;
+}
+
 static void refuse(NSString *why)
 {
+    g_refused = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *w = active_window();
+        if (!w) { exit(0); return; }
+        UIViewController *top = top_vc(w);
         UIAlertController *a =
             [UIAlertController alertControllerWithTitle:@"Acceso denegado"
                                                message:why
@@ -190,9 +229,6 @@ static void refuse(NSString *why)
         [a addAction:[UIAlertAction actionWithTitle:@"Salir"
                                              style:UIAlertActionStyleDestructive
                                            handler:^(UIAlertAction *act) { exit(0); }]];
-        UIWindow *w = active_window();
-        UIViewController *top = w.rootViewController;
-        while (top.presentedViewController) top = top.presentedViewController;
         [top presentViewController:a animated:YES completion:nil];
     });
     /* Si el usuario no toca nada, se cierra solo. */
@@ -200,7 +236,7 @@ static void refuse(NSString *why)
                    dispatch_get_main_queue(), ^{ exit(0); });
 }
 
-static void ask(NSString *expected, BOOL bindDevice)
+static void build_alert(void)
 {
     UIAlertController *a =
         [UIAlertController alertControllerWithTitle:@"CODM AIM"
@@ -224,20 +260,51 @@ static void ask(NSString *expected, BOOL bindDevice)
         typed = [typed stringByTrimmingCharactersInSet:
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (typed.length == 0) { refuse(@"No introdujiste ninguna llave."); return; }
-        if (!secure_equals(sha256_base64(typed), expected)) { refuse(@"La llave no es correcta."); return; }
-        /* Correcta: se ata al equipo la primera vez y la app sigue su curso. */
-        if (bindDevice) device_bind();
+        if (!secure_equals(sha256_base64(typed), g_expected)) { refuse(@"La llave no es correcta."); return; }
+        /* Correcta: se ata al equipo la primera vez y el vigilante se detiene. */
+        if (g_bind) device_bind();
+        g_open = YES;
+        g_alert = nil;
     }]];
 
     [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
                                          style:UIAlertActionStyleCancel
                                        handler:^(UIAlertAction *act) { exit(0); }]];
+    g_alert = a;
+}
+
+static void gate_tick(void);
+
+/* El vigilante vuelve a mirar cada 0,6 s mientras la puerta este cerrada. */
+static void schedule_tick(double delay)
+{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ gate_tick(); });
+}
+
+static void gate_tick(void)
+{
+    if (g_open || g_refused) return;            /* ya resuelto */
+
+    /* Si el dialogo sigue en pantalla, solo seguimos vigilando. */
+    if (gate_visible()) { schedule_tick(0.6); return; }
 
     UIWindow *w = active_window();
-    if (!w) { refuse(@"No se pudo mostrar el diálogo."); return; }
-    UIViewController *top = w.rootViewController;
-    while (top.presentedViewController) top = top.presentedViewController;
-    [top presentViewController:a animated:YES completion:nil];
+    UIViewController *top = w ? top_vc(w) : nil;
+
+    /* Todavia no hay ventana estable, o hay algo en transicion encima:
+       el juego cambia de rootViewController al salir del splash y se lleva
+       consigo cualquier alerta que se haya presentado encima. Esperamos. */
+    if (!w || !w.isKeyWindow || !top || top.presentedViewController || top.view.window == nil) {
+        if (++g_waits > kMaxWaits) { refuse(@"No se pudo mostrar la pantalla de llave."); return; }
+        schedule_tick(0.5);
+        return;
+    }
+
+    g_waits = 0;
+    build_alert();
+    [top presentViewController:g_alert animated:YES completion:nil];
+    schedule_tick(0.6);
 }
 
 /* ================================================================ arranque */
@@ -245,8 +312,9 @@ static void ask(NSString *expected, BOOL bindDevice)
 __attribute__((constructor))
 static void KeyGate_init(void)
 {
-    /* Margen para que la app termine de arrancar y tenga ventana. */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+    /* Margen minimo para que la app cree su primera ventana. A partir de ahi
+       manda el vigilante, que va buscando el momento estable. */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         NSString *expected = [[NSBundle mainBundle] objectForInfoDictionaryKey:kPlistKey];
         if (![expected isKindOfClass:[NSString class]] || expected.length == 0) {
@@ -263,6 +331,9 @@ static void KeyGate_init(void)
             if (bad) { refuse(bad); return; }
         }
 
-        ask(expected, bindDevice);
+        g_expected = expected;
+        g_bind     = bindDevice;
+        gate_tick();
     });
 }
+
