@@ -132,16 +132,47 @@ int esp_targets_snapshot(esp_target_t *out, int max)
 /* --------------------------------------------------------------------- */
 /* Base de carga del 'cod'                                                */
 /* --------------------------------------------------------------------- */
-/* Los offsets de la tabla son VA-0x100000000. Para convertirlos en una
-   direccion real hay que sumarle el slide con el que dyld cargo la imagen.
-   Se saca de _dyld_get_image_header("cod"), no de MainExecutable: el juego
-   se llama 'cod', no como el proceso. */
-static int64_t g_slide = 0;
-static bool    g_base_ok = false;
+/* La tabla guarda los offsets como VA - 0x100000000, porque en el binario en
+   disco el file offset coincide con VA menos la base de __TEXT. En memoria NO.
+
+   En runtime, _dyld_get_image_vmaddr_slide() da el desplazamiento de la
+   imagen, y una funcion del file offset F vive en:
+
+       runtime = slide + vmaddr_de___TEXT + F
+
+   Ojo al signo: con slide 0 (caso normal en iOS sin ASLR de dylibs propias) la
+   funcion esta en 0x100000000 + F, no en F. Devolver solo slide + F apuntaba
+   4 GB mas abajo, y el hook escribia encima de memoria sin relacion: de ahi
+   el crash al arrancar. */
+static int64_t g_slide      = 0;
+static uint64_t g_text_vm   = 0;     /* vmaddr del segmento __TEXT */
+static uint64_t g_text_end  = 0;     /* vmaddr + tamano, para validar */
+static bool    g_base_ok    = false;
+
+static bool read_text_segment(const struct mach_header *mh)
+{
+    uint32_t ncmds = mh->ncmds;
+    const uint8_t *p = (const uint8_t *)mh + sizeof(mach_header_64);
+    for (uint32_t i = 0; i < ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
+            if (strncmp(sg->segname, "__TEXT", 7) == 0) {
+                g_text_vm  = sg->vmaddr;
+                g_text_end = sg->vmaddr + sg->vmsize;
+                return true;
+            }
+        }
+        p += lc->cmdsize;
+    }
+    return false;
+}
 
 static bool resolve_base(void)
 {
     uint32_t count = _dyld_image_count();
+    const struct mach_header *found = NULL;
+
     for (uint32_t i = 0; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
         if (!name) continue;
@@ -149,26 +180,45 @@ static bool resolve_base(void)
         base = base ? base + 1 : name;
         if (strcmp(base, "cod") == 0 || strcmp(base, "cod.debug.dylib") == 0) {
             g_slide = (int64_t)_dyld_get_image_vmaddr_slide(i);
-            g_base_ok = true;
-            return true;
+            found   = _dyld_get_image_header(i);
+            break;
         }
     }
-    /* Ultimo recurso: la primera imagen con la clase MH_EXECUTE que tenga
-       el segmento __TEXT mas grande. Normalmente es el juego. */
-    for (uint32_t i = 0; i < count; i++) {
-        const struct mach_header *mh = _dyld_get_image_header(i);
-        if (!mh || mh->filetype != MH_EXECUTE) continue;
-        g_slide = (int64_t)_dyld_get_image_vmaddr_slide(i);
-        g_base_ok = true;
-        return true;
+    if (!found) {
+        /* Reserva: la primera MH_EXECUTE. Puede no ser el juego, asi que luego
+           se comprueba que su __TEXT tenga un tamano razonable. */
+        for (uint32_t i = 0; i < count; i++) {
+            const struct mach_header *mh = _dyld_get_image_header(i);
+            if (!mh || mh->filetype != MH_EXECUTE) continue;
+            g_slide = (int64_t)_dyld_get_image_vmaddr_slide(i);
+            found   = mh;
+            break;
+        }
     }
-    return false;
+    if (!found) return false;
+
+    if (!read_text_segment(found)) return false;
+    /* El binario del juego tiene del orden de 200 MB de __TEXT. Si sale
+       pequeño, no estamos mirando al binario principal y enganchar ahi
+       escribiria sobre lo que sea. */
+    if (g_text_end - g_text_vm < (16u << 20)) {
+        NSLog(@"[ESP] __TEXT de 0x%llx es demasiado pequeno (0x%llx B): no engancho",
+              (unsigned long long)g_text_vm, (unsigned long long)(g_text_end - g_text_vm));
+        return false;
+    }
+
+    g_base_ok = true;
+    return true;
 }
 
+/* Convierte un offset de la tabla en direccion real. NULL si no resuelve o si
+   cae fuera de __TEXT, que es senal de que el offset es de otra build. */
 void *esp_resolve(int64_t off)
 {
     if (!g_base_ok || off < 0) return NULL;
-    return (void *)(g_slide + off);
+    uint64_t va = g_text_vm + (uint64_t)off;
+    if (va < g_text_vm || va >= g_text_end) return NULL;      /* fuera de __TEXT */
+    return (void *)(uint64_t)(g_slide + (int64_t)va);
 }
 
 /* --------------------------------------------------------------------- */
@@ -236,51 +286,44 @@ static const char *esp_detour_name(void *self)
 /* --------------------------------------------------------------------- */
 int esp_targets_start(const esp_config_t *cfg)
 {
-    char msg[160];
+    char msg[220];
     g_cfg = *cfg;
     if (!resolve_base()) {
-        esp_fmt(msg, sizeof(msg), "[!] ESP: no se encontro la imagen 'cod'");
-        NSLog(@"%s", msg);
+        NSLog(@"[ESP] no se resolvio la base de carga de 'cod': no se engancha nada.");
         return 0;
     }
+    esp_fmt(msg, sizeof(msg),
+            "[+] ESP: base slide=0x%llx __TEXT=0x%llx (%llu MB)",
+            (unsigned long long)g_slide, (unsigned long long)g_text_vm,
+            (unsigned long long)((g_text_end - g_text_vm) >> 20));
+    NSLog(@"%s", msg);
 
-    int installed = 0;
+/* Engancha un offset. Si esp_resolve devuelve NULL es que cae fuera de __TEXT,
+   o sea que el offset es de otra build: no se intenta parchear. */
+#define HOOK_ONE(label, field, detour, orig) do { \
+        void *p_ = esp_resolve(cfg->off.field); \
+        if (p_ && esp_hook_install(p_, (void *)detour, (void **)&orig, &why)) { \
+            installed++; \
+        } else if (cfg->off.field >= 0) { \
+            if (!p_) esp_fmt(msg, sizeof(msg), \
+                "[!] ESP: %s fuera de __TEXT: el offset 0x%llx no es de esta build.", \
+                label, (unsigned long long)cfg->off.field); \
+            else     esp_fmt(msg, sizeof(msg), "[!] ESP: hook %s fallo: %s", label, why ? why : "?"); \
+            NSLog(@"%s", msg); \
+        } \
+    } while (0)
+
     const char *why = NULL;
+    int installed = 0;
 
-    void *p = esp_resolve(cfg->off.player_aabb);
-    if (p && esp_hook_install(p, (void *)esp_detour_aabb, (void **)&g_orig_aabb, &why))
-        installed++;
-    else if (cfg->off.player_aabb >= 0) {
-        esp_fmt(msg, sizeof(msg), "[!] ESP: hook AABB fallo: %s", why ? why : "?");
-        NSLog(@"%s", msg);
-    }
+    HOOK_ONE("AABB",    player_aabb, esp_detour_aabb,    g_orig_aabb);
+    HOOK_ONE("is_dead", is_dead,     esp_detour_dead,    g_orig_dead);
+    HOOK_ONE("health",  health,      esp_detour_health,  g_orig_health);
+    HOOK_ONE("name",    player_name, esp_detour_name,    g_orig_name);
 
-    p = esp_resolve(cfg->off.is_dead);
-    if (p && esp_hook_install(p, (void *)esp_detour_dead, (void **)&g_orig_dead, &why))
-        installed++;
-    else if (cfg->off.is_dead >= 0) {
-        esp_fmt(msg, sizeof(msg), "[!] ESP: hook is_dead fallo: %s", why ? why : "?");
-        NSLog(@"%s", msg);
-    }
+#undef HOOK_ONE
 
-    p = esp_resolve(cfg->off.health);
-    if (p && esp_hook_install(p, (void *)esp_detour_health, (void **)&g_orig_health, &why))
-        installed++;
-    else if (cfg->off.health >= 0) {
-        esp_fmt(msg, sizeof(msg), "[!] ESP: hook health fallo: %s", why ? why : "?");
-        NSLog(@"%s", msg);
-    }
-
-    p = esp_resolve(cfg->off.player_name);
-    if (p && esp_hook_install(p, (void *)esp_detour_name, (void **)&g_orig_name, &why))
-        installed++;
-    else if (cfg->off.player_name >= 0) {
-        esp_fmt(msg, sizeof(msg), "[!] ESP: hook name fallo: %s", why ? why : "?");
-        NSLog(@"%s", msg);
-    }
-
-    esp_fmt(msg, sizeof(msg), "[+] ESP: %d hooks puestos sobre slide 0x%llx",
-            installed, (unsigned long long)g_slide);
+    esp_fmt(msg, sizeof(msg), "[+] ESP: %d hooks puestos de 4", installed);
     NSLog(@"%s", msg);
     return installed;
 }
@@ -413,7 +456,37 @@ void esp_targets_calib_dump(void)
 
     fprintf(f, "# ESP calibracion\n");
     fprintf(f, "slide_base      = 0x%llx\n", (unsigned long long)g_slide);
+    fprintf(f, "text_vmaddr     = 0x%llx\n", (unsigned long long)g_text_vm);
+    fprintf(f, "text_vmsize     = 0x%llx (%llu MB)\n",
+            (unsigned long long)(g_text_end - g_text_vm),
+            (unsigned long long)((g_text_end - g_text_vm) >> 20));
     fprintf(f, "base_resuelta   = %s\n", g_base_ok ? "si" : "no");
+
+    /* Cada offset: resuelto y a donde apunta. Si uno sale fuera de __TEXT es
+       que el offset es de otra build y por ahi no hay que enganchar. */
+    fprintf(f, "\n#Offsets\n");
+    {
+        const struct { const char *n; int64_t v; } offs[] = {
+            { "player_aabb",      g_cfg.off.player_aabb },
+            { "player_target",    g_cfg.off.player_target_point },
+            { "player_name",      g_cfg.off.player_name },
+            { "player_state",     g_cfg.off.player_state },
+            { "is_dead",          g_cfg.off.is_dead },
+            { "health",           g_cfg.off.health },
+            { "view_matrix",      g_cfg.off.view_matrix },
+            { "proj_matrix",      g_cfg.off.proj_matrix },
+        };
+        for (unsigned i = 0; i < sizeof(offs)/sizeof(offs[0]); i++) {
+            if (offs[i].v < 0) {
+                fprintf(f, "  %-16s sin resolver\n", offs[i].n);
+                continue;
+            }
+            void *r = esp_resolve(offs[i].v);
+            fprintf(f, "  %-16s off=0x%-9llx -> %s\n", offs[i].n,
+                    (unsigned long long)offs[i].v,
+                    r ? "dentro de __TEXT" : "FUERA de __TEXT (offset de otra build?)");
+        }
+    }
     fprintf(f, "hooks_puestos   = %d\n", esp_hook_count());
     fprintf(f, "llamadas AABB   = %llu\n", (unsigned long long)g_calls_aabb);
     fprintf(f, "llamadas name   = %llu\n", (unsigned long long)g_calls_name);
