@@ -229,7 +229,10 @@ static void esp_boot(void)
             esp_targets_calib_dump();
             if (++ticks >= 30) {
                 [tm invalidate];
-                NSLog(@"[ESP] calibracion terminada -> /tmp/esp-calib.txt");
+                /* La ruta real la dice esp_targets_calib_dump() por NSLog, porque la resuelve
+   en Documents/ y no es fija. Aqui no se pone a mano para no repetir el error
+   de anunciar /tmp cuando el informe va a Documents. */
+NSLog(@"[ESP] calibracion terminada");
             }
         }];
         (void)t;
