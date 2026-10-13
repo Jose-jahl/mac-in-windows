@@ -23,7 +23,6 @@ static esp_target_t g_targets[ESP_MAX_TARGETS];
 static int          g_count = 0;
 
 static esp_config_t g_cfg;
-static double       g_last_calib = 0;
 
 /* Estadisticas para el calibrador. */
 static uint64_t g_calls_aabb    = 0;

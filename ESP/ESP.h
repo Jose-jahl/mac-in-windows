@@ -24,7 +24,9 @@
 /* ------------------------------------------------------------------------ */
 /* Claves del Info.plist                                                     */
 /* ------------------------------------------------------------------------ */
-#define ESP_PLIST_CONFIG "CODMESPConfig"
+/* Es un NSString literal, no un char*: va directo a
+   -objectForInfoDictionaryKey:, que no acepta cadenas C. */
+#define ESP_PLIST_CONFIG @"CODMESPConfig"
 
 /* ------------------------------------------------------------------------ */
 /* Config                                                                    */

@@ -18,6 +18,11 @@ bool g_calibrate = false;
 /* --------------------------------------------------------------------- */
 /* Estado                                                                 */
 /* --------------------------------------------------------------------- */
+/* Las clases se declaran antes de los estaticos que las mencionan: en C el
+   orden importa y ESPOverlayView todavia no existe aqui. */
+@class ESPOverlayView;
+@class ESPOverlayController;
+
 static UIWindow           *g_win      = nil;
 static ESPOverlayView    *g_view     = nil;
 static CADisplayLink     *g_link     = nil;
@@ -76,6 +81,12 @@ uint64_t esp_overlay_frames(void) { return g_frames; }
     esp_render_frame(ctx, rect.size.width, rect.size.height);
 
     CGContextRestoreGState(ctx);
+}
+
+/* El CADisplayLink llama aqui; solo invalida para que se dispare drawRect. */
+- (void)onTick:(CADisplayLink *)link
+{
+    [self setNeedsDisplay];
 }
 
 @end
@@ -200,13 +211,14 @@ static void set_fill(CGContextRef c, uint32_t argb)
 /* --------------------------------------------------------------------- */
 /* Primitivas                                                             */
 /* --------------------------------------------------------------------- */
+/* CGContextStrokeRect y CGContextFillRect reciben un CGRect, no x/y/w/h. */
 void esp_draw_box(float x, float y, float w, float h, uint32_t argb, float thickness)
 {
     CGContextRef c = UIGraphicsGetCurrentContext();
     if (!c) return;
     set_stroke(c, argb);
     CGContextSetLineWidth(c, thickness);
-    CGContextStrokeRect(c, x, y, w, h);
+    CGContextStrokeRect(c, CGRectMake(x, y, w, h));
 }
 
 void esp_draw_corners(float x, float y, float w, float h, uint32_t argb,
@@ -253,7 +265,7 @@ void esp_draw_filled(float x, float y, float w, float h, uint32_t argb)
     CGContextRef c = UIGraphicsGetCurrentContext();
     if (!c) return;
     set_fill(c, argb);
-    CGContextFillRect(c, x, y, w, h);
+    CGContextFillRect(c, CGRectMake(x, y, w, h));
 }
 
 void esp_draw_circle(float cx, float cy, float r, uint32_t argb, float thickness)
@@ -276,6 +288,9 @@ void esp_draw_text(float x, float y, float size, uint32_t argb, bool centered,
     @autoreleasepool {
         CGContextRef c = UIGraphicsGetCurrentContext();
         if (!c) return;
+        /* ARC no deja castear un const char* a NSString*. Se crea el objeto. */
+        NSString *s = [NSString stringWithUTF8String:text];
+        if (!s) return;
         UIColor *col = [UIColor colorWithRed:((argb >> 16) & 0xFF) / 255.0
                                        green:((argb >>  8) & 0xFF) / 255.0
                                         blue:( argb        & 0xFF) / 255.0
@@ -284,13 +299,13 @@ void esp_draw_text(float x, float y, float size, uint32_t argb, bool centered,
                    ?: [UIFont systemFontOfSize:size weight:UIFontWeightBold];
         NSDictionary *attrs = @{ NSFontAttributeName: fnt,
                                  NSForegroundColorAttributeName: col };
-        CGSize sz = [(NSString *)text sizeWithAttributes:attrs];
+        CGSize sz = [s sizeWithAttributes:attrs];
         CGFloat px = centered ? x - sz.width / 2.0 : x;
 
         CGContextSaveGState(c);
         CGContextTranslateCTM(c, 0, y + sz.height);      /* y crece hacia abajo */
         CGContextScaleCTM(c, 1, -1);                     /* texto hacia arriba */
-        [(NSString *)text drawAtPoint:CGPointMake(px, 0) withAttributes:attrs];
+        [s drawAtPoint:CGPointMake(px, 0) withAttributes:attrs];
         CGContextRestoreGState(c);
     }
 }
@@ -309,10 +324,4 @@ void esp_fmt(char *dst, size_t n, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(dst, n, fmt, ap);
     va_end(ap);
-}
-
-/* El CADisplayLink llama aqui; solo invalida para que se dispare drawRect. */
-- (void)onTick:(CADisplayLink *)link
-{
-    [self setNeedsDisplay];
 }

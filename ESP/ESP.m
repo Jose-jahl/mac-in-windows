@@ -203,7 +203,7 @@ static void esp_boot(void)
     /* Sin config en el plist: esta build no lleva ESP. Se sale callado, que es
        lo correcto: el usuario no pidio ESP en esta IPA. */
     if (![json isKindOfClass:[NSString class]] || json.length == 0) {
-        NSLog(@"[ESP] sin " ESP_PLIST_CONFIG " en el Info.plist: no se activa nada.");
+        NSLog(@"[ESP] sin CODMESPConfig en el Info.plist: no se activa nada.");
         return;
     }
 

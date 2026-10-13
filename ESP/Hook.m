@@ -24,6 +24,7 @@
 #include "Hook.h"
 #include <mach/mach.h>
 #include <sys/mman.h>
+#include <unistd.h>      /* sysconf, para el tamano de pagina */
 #include <string.h>
 #include <stdio.h>
 #include <libkern/OScacheControl.h>
@@ -71,6 +72,44 @@ static inline uint32_t with_pc_rel_imm(uint32_t i, int32_t imm21_in_4s)
     uint32_t immlo = imm & 0x3u;
     uint32_t immhi = (imm >> 2) & 0x7FFFFu;
     return (i & 0x9F00001Fu) | (immlo << 29) | (immhi << 5);
+}
+
+/* --------------------------------------------------------------------- */
+/* Escritura del codigo enganchado                                          */
+/* --------------------------------------------------------------------- */
+
+/* sysprotect() no esta declarado en el SDK de iOS, asi que se usa mprotect(),
+   que es POSIX y si esta. La diferencia es que hay que alinear la pagina
+   entera: mprotect no acepta direcciones sueltas.
+   Devuelve false si la pagina no se deja poner en RW, que en iOS puede pasar
+   con paginas del binario principal. En ese caso NO se escribe nada. */
+static bool make_writable(void *addr, size_t len)
+{
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) ps = 4096;
+    uintptr_t start = ((uintptr_t)addr) & ~((uintptr_t)ps - 1);
+    uintptr_t end   = ((uintptr_t)addr + len + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
+    if (mprotect((void *)start, (size_t)(end - start), PROT_READ | PROT_WRITE) != 0)
+        return false;
+    return true;
+}
+
+static void make_executable(void *addr, size_t len)
+{
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) ps = 4096;
+    uintptr_t start = ((uintptr_t)addr) & ~((uintptr_t)ps - 1);
+    uintptr_t end   = ((uintptr_t)addr + len + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
+    mprotect((void *)start, (size_t)(end - start), PROT_READ | PROT_EXEC);
+}
+
+static bool patch_code(void *addr, size_t len, const void *bytes)
+{
+    if (!make_writable(addr, len)) return false;
+    memcpy(addr, bytes, len);
+    __builtin___clear_cache((char *)addr, (char *)addr + len);
+    make_executable(addr, len);
+    return true;
 }
 
 /* --------------------------------------------------------------------- */
@@ -215,10 +254,11 @@ bool esp_hook_install(void *target, void *detour, void **out_orig, const char **
 
     memcpy(h->patch, target, 16);
 
-    sysprotect(target, 16, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    memcpy(target, patch, 16);
-    sysprotect(target, 16, VM_PROT_READ | VM_PROT_EXECUTE);
-    __builtin___clear_cache((char *)target, (char *)target + 16);
+    if (!patch_code(target, 16, patch)) {
+        if (why) *why = "mprotect no dejo la pagina del cod en escritura";
+        h->installed = false;
+        return false;
+    }
 
     if (out_orig) *out_orig = h->trampoline;
     h->installed = true;
@@ -235,12 +275,7 @@ void esp_hook_remove(int slot)
     esp_hook_t *h = &g_hooks[slot];
     if (!h->installed) return;
 
-    sysprotect(h->target, h->patched_size,
-               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    memcpy(h->target, h->patch, 16);
-    sysprotect(h->target, h->patched_size, VM_PROT_READ | VM_PROT_EXECUTE);
-    __builtin___clear_cache((char *)h->target, (char *)h->target + 16);
-
+    patch_code(h->target, h->patched_size, h->patch);
     h->installed = false;
 }
 
