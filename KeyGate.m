@@ -118,17 +118,26 @@ static BOOL secure_equals(NSString *a, NSString *b)
 
 static UIWindow *active_window(void)
 {
-    UIWindow *w = nil;
-    id delegate = UIApplication.sharedApplication.delegate;
-    if ([delegate respondsToSelector:@selector(window)]) w = [delegate window];
-    if (!w) {
-        for (UIWindow *c in UIApplication.sharedApplication.windows)
-            if (c.isKeyWindow) { w = c; break; }
+    UIApplication *app = UIApplication.sharedApplication;
+
+    /* API de escenas: la que sigue en pie desde iOS 13. */
+    for (UIScene *sc in app.connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        if (sc.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *c in ((UIWindowScene *)sc).windows)
+            if (c.isKeyWindow) return c;
     }
-    if (!w) {
-        for (UIWindow *c in UIApplication.sharedApplication.windows) { w = c; break; }
+    /* Si ninguna escena esta en primer plano, sirve la primera ventana que haya. */
+    for (UIScene *sc in app.connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *c in ((UIWindowScene *)sc).windows)
+            return c;
     }
-    return w;
+    /* Reserva para apps que no usan escenas. */
+    id delegate = app.delegate;
+    if ([delegate respondsToSelector:@selector(window)])
+        return [delegate window];
+    return nil;
 }
 
 static void refuse(NSString *why)

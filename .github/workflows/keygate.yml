@@ -26,10 +26,15 @@ jobs:
           set -e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK: $SDK"
+          # -fobjc-arc es obligatorio: el fuente usa __weak, que sin ARC
+          # no compila ("cannot create __weak reference in file using
+          # manual reference counting").
           clang -dynamiclib \
                 -arch arm64 \
                 -isysroot "$SDK" \
                 -miphoneos-version-min=15.0 \
+                -fobjc-arc \
+                -Wall \
                 -framework UIKit \
                 -framework Foundation \
                 -o KeyGate.dylib \
