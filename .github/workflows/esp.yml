@@ -80,25 +80,18 @@ jobs:
           [ "$fail" -eq 0 ] || { echo "FALTA LA API DEL MOTOR"; exit 1; }
 
           echo
-          echo "--- constructor: diagnostico ---"
-          # Se vuelca todo lo relacionado. Asi, si esto falla otra vez, el log
-          # dice que esta viendo en vez de dejarnos adivinar.
-          echo "  secciones/segmentos con 'init':"
-          otool -l ESP.dylib | grep -iE 'sectname|segname' | grep -i init || echo "    (ninguna)"
-          echo
-          echo "  simbolos con ESP_init o mod_init:"
-          nm ESP.dylib 2>/dev/null | grep -iE 'ESP_init|mod_init' || echo "    (ninguno)"
-          echo
-          echo "  extracto crudo de __mod_init_func:"
-          otool -l ESP.dylib | grep -A4 '__mod_init_func' || echo "    (no aparece la seccion)"
-
-          echo
-          # La comprobacion fiable: el constructor tiene que estar en la tabla
-          # de simbolos aunque salga en minuscula, porque ESP_init es static.
-          if nm ESP.dylib 2>/dev/null | grep -q 'ESP_init'; then
-            echo "  ok      ESP_init en la tabla de simbolos: se ejecutara al cargar"
+          echo "--- constructor ---"
+          # OJO: con Xcode 26 y los toolchains actuales NO se usa
+          # __mod_init_func. Los punteros de constructor van en
+          # __TEXT,__init_offsets. Comprobado contra KeyGate.dylib, cuyo
+          # constructor si funciona: tampoco tiene __mod_init_func, y si
+          # __init_offsets de 4 B (un puntero).
+          INITSZ=$(otool -l ESP.dylib | awk '/sectname __init_offsets/{f=1} f&&/^ *size/{print $2; exit}')
+          if [ -n "$INITSZ" ] && [ $((INITSZ)) -gt 0 ]; then
+            echo "  ok      __init_offsets = $INITSZ ($((INITSZ)) B, hay constructor)"
           else
-            echo "  FALTA   ni ESP_init ni __mod_init_func: la dylib cargaria y no haria nada"
+            echo "  FALTA   sin __init_offsets: la dylib cargaria y no haria nada"
+            otool -l ESP.dylib | grep -iE 'sectname|segname' | grep -i init || true
             exit 1
           fi
 
