@@ -1,0 +1,437 @@
+/*=============================================================================
+ *  Targets.m
+ *============================================================================*/
+
+#include "Targets.h"
+#include "Overlay.h"
+
+#import <Foundation/Foundation.h>
+#import <QuartzCore/QuartzCore.h>   /* CACurrentMediaTime */
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <dlfcn.h>
+#include <string.h>
+#include <math.h>
+#include <stdio.h>
+#include <mach/mach_time.h>
+#include <QuartzCore/QuartzCore.h>
+
+/* --------------------------------------------------------------------- */
+/* Estado                                                                 */
+/* --------------------------------------------------------------------- */
+static esp_target_t g_targets[ESP_MAX_TARGETS];
+static int          g_count = 0;
+
+static esp_config_t g_cfg;
+static double       g_last_calib = 0;
+
+/* Estadisticas para el calibrador. */
+static uint64_t g_calls_aabb    = 0;
+static uint64_t g_calls_name    = 0;
+static uint64_t g_calls_dead    = 0;
+static uint64_t g_calls_health  = 0;
+static float    g_last6[8];       /* lo que devolvio el ultimo AABB */
+static int      g_last6_n = 0;
+static uint64_t g_distinct_self = 0;
+
+static double now_sec(void)
+{
+    return (double)CACurrentMediaTime();
+}
+
+/* --------------------------------------------------------------------- */
+/* Tabla                                                                  */
+/* --------------------------------------------------------------------- */
+static esp_target_t *find_or_add(uint64_t id, double now)
+{
+    for (int i = 0; i < g_count; i++)
+        if (g_targets[i].id == id && g_targets[i].valid) return &g_targets[i];
+
+    /* Reaprovecha una invalida antes de crecer. */
+    for (int i = 0; i < g_count; i++)
+        if (!g_targets[i].valid) {
+            memset(&g_targets[i], 0, sizeof(g_targets[i]));
+            g_targets[i].id = id;
+            g_targets[i].valid = true;
+            g_targets[i].last_seen = now;
+            return &g_targets[i];
+        }
+
+    if (g_count < ESP_MAX_TARGETS) {
+        esp_target_t *t = &g_targets[g_count++];
+        memset(t, 0, sizeof(*t));
+        t->id = id;
+        t->valid = true;
+        t->last_seen = now;
+        return t;
+    }
+    return NULL;
+}
+
+void esp_targets_feed(uint64_t self_ptr, const float *floats, int n_floats,
+                      double now)
+{
+    if (!self_ptr || !floats || n_floats < 3) return;
+
+    esp_target_t *t = find_or_add(self_ptr, now);
+    if (!t) return;
+    t->last_seen = now;
+    t->hits++;
+
+    if (t->hits == 1) g_distinct_self++;
+
+    /* Interpreta segun la disposicion configurada. */
+    switch (g_cfg.aabb_layout) {
+    case AABB_CENTER_SIZE:
+        for (int i = 0; i < 3; i++) {
+            t->center[i] = floats[i];
+            float h = floats[3 + i] * 0.5f;
+            t->min[i] = floats[i] - h;
+            t->max[i] = floats[i] + h;
+        }
+        break;
+    case AABB_ORIGIN_SIZE:
+        for (int i = 0; i < 3; i++) {
+            t->center[i] = floats[i];
+            float h = floats[3 + i] * 0.5f;
+            t->min[i] = floats[i] - h;
+            t->max[i] = floats[i] + h;
+        }
+        break;
+    case AABB_MINMAX8:
+    case AABB_MINMAX6:
+    default:
+        for (int i = 0; i < 3; i++) {
+            t->min[i] = floats[i];
+            t->max[i] = floats[3 + i];
+        }
+        t->center[0] = (t->min[0] + t->max[0]) * 0.5f;
+        t->center[1] = (t->min[1] + t->max[1]) * 0.5f;
+        t->center[2] = (t->min[2] + t->max[2]) * 0.5f;
+        break;
+    }
+
+    /* Guarda la muestra cruda para que el calibrador pueda compararla. */
+    int n = n_floats > 8 ? 8 : n_floats;
+    for (int i = 0; i < n; i++) g_last6[i] = floats[i];
+    g_last6_n = n;
+}
+
+int esp_targets_snapshot(esp_target_t *out, int max)
+{
+    double now = now_sec();
+    int n = 0;
+    for (int i = 0; i < g_count && n < max; i++) {
+        esp_target_t *t = &g_targets[i];
+        if (!t->valid) continue;
+        if (now - t->last_seen > ESP_AGE_TTL) { t->valid = false; continue; }
+        out[n++] = *t;
+    }
+    return n;
+}
+
+/* --------------------------------------------------------------------- */
+/* Base de carga del 'cod'                                                */
+/* --------------------------------------------------------------------- */
+/* Los offsets de la tabla son VA-0x100000000. Para convertirlos en una
+   direccion real hay que sumarle el slide con el que dyld cargo la imagen.
+   Se saca de _dyld_get_image_header("cod"), no de MainExecutable: el juego
+   se llama 'cod', no como el proceso. */
+static int64_t g_slide = 0;
+static bool    g_base_ok = false;
+
+static bool resolve_base(void)
+{
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        const char *base = strrchr(name, '/');
+        base = base ? base + 1 : name;
+        if (strcmp(base, "cod") == 0 || strcmp(base, "cod.debug.dylib") == 0) {
+            g_slide = (int64_t)_dyld_get_image_vmaddr_slide(i);
+            g_base_ok = true;
+            return true;
+        }
+    }
+    /* Ultimo recurso: la primera imagen con la clase MH_EXECUTE que tenga
+       el segmento __TEXT mas grande. Normalmente es el juego. */
+    for (uint32_t i = 0; i < count; i++) {
+        const struct mach_header *mh = _dyld_get_image_header(i);
+        if (!mh || mh->filetype != MH_EXECUTE) continue;
+        g_slide = (int64_t)_dyld_get_image_vmaddr_slide(i);
+        g_base_ok = true;
+        return true;
+    }
+    return false;
+}
+
+void *esp_resolve(int64_t off)
+{
+    if (!g_base_ok || off < 0) return NULL;
+    return (void *)(g_slide + off);
+}
+
+/* --------------------------------------------------------------------- */
+/* Detours                                                                */
+/* --------------------------------------------------------------------- */
+typedef void (*fn_aabb_t)(void *self, float *out, float *out2, float *out3);
+typedef float (*fn_f1_t)(void *self);
+typedef const char *(*fn_str_t)(void *self);
+
+static fn_aabb_t g_orig_aabb;
+static fn_f1_t   g_orig_dead;
+static fn_f1_t   g_orig_health;
+static fn_str_t  g_orig_name;
+
+/* El juego llama a GetPlayerAABB por jugador y por frame. Anotamos el self y
+   leemos los flotantes que deja en el segundo argumento. */
+static void esp_detour_aabb(void *self, float *out, float *out2, float *out3)
+{
+    g_calls_aabb++;
+    if (out) {
+        g_last6_n = 8;
+        memcpy(g_last6,     out,  sizeof(float) * 4);
+        if (out2) memcpy(g_last6 + 4, out2, sizeof(float) * 4);
+    }
+    if (g_orig_aabb) g_orig_aabb(self, out, out2, out3);
+    esp_targets_feed((uint64_t)self, out, out ? 8 : 0, now_sec());
+}
+
+static float esp_detour_health(void *self)
+{
+    float v = g_orig_health ? g_orig_health(self) : 0.0f;
+    g_calls_health++;
+    for (int i = 0; i < g_count; i++)
+        if (g_targets[i].valid && g_targets[i].id == (uint64_t)self)
+            g_targets[i].health = v;
+    return v;
+}
+
+static float esp_detour_dead(void *self)
+{
+    float v = g_orig_dead ? g_orig_dead(self) : 0.0f;
+    g_calls_dead++;
+    for (int i = 0; i < g_count; i++)
+        if (g_targets[i].valid && g_targets[i].id == (uint64_t)self)
+            g_targets[i].alive = (v < 0.5f);
+    return v;
+}
+
+static const char *esp_detour_name(void *self)
+{
+    const char *s = g_orig_name ? g_orig_name(self) : NULL;
+    g_calls_name++;
+    if (s) {
+        for (int i = 0; i < g_count; i++)
+            if (g_targets[i].valid && g_targets[i].id == (uint64_t)self) {
+                strncpy(g_targets[i].name, s, sizeof(g_targets[i].name) - 1);
+                g_targets[i].name[sizeof(g_targets[i].name) - 1] = 0;
+            }
+    }
+    return s;
+}
+
+/* --------------------------------------------------------------------- */
+/* Arranque                                                               */
+/* --------------------------------------------------------------------- */
+int esp_targets_start(const esp_config_t *cfg)
+{
+    char msg[160];
+    g_cfg = *cfg;
+    if (!resolve_base()) {
+        esp_fmt(msg, sizeof(msg), "[!] ESP: no se encontro la imagen 'cod'");
+        NSLog(@"%s", msg);
+        return 0;
+    }
+
+    int installed = 0;
+    const char *why = NULL;
+
+    void *p = esp_resolve(cfg->off.player_aabb);
+    if (p && esp_hook_install(p, (void *)esp_detour_aabb, (void **)&g_orig_aabb, &why))
+        installed++;
+    else if (cfg->off.player_aabb >= 0) {
+        esp_fmt(msg, sizeof(msg), "[!] ESP: hook AABB fallo: %s", why ? why : "?");
+        NSLog(@"%s", msg);
+    }
+
+    p = esp_resolve(cfg->off.is_dead);
+    if (p && esp_hook_install(p, (void *)esp_detour_dead, (void **)&g_orig_dead, &why))
+        installed++;
+    else if (cfg->off.is_dead >= 0) {
+        esp_fmt(msg, sizeof(msg), "[!] ESP: hook is_dead fallo: %s", why ? why : "?");
+        NSLog(@"%s", msg);
+    }
+
+    p = esp_resolve(cfg->off.health);
+    if (p && esp_hook_install(p, (void *)esp_detour_health, (void **)&g_orig_health, &why))
+        installed++;
+    else if (cfg->off.health >= 0) {
+        esp_fmt(msg, sizeof(msg), "[!] ESP: hook health fallo: %s", why ? why : "?");
+        NSLog(@"%s", msg);
+    }
+
+    p = esp_resolve(cfg->off.player_name);
+    if (p && esp_hook_install(p, (void *)esp_detour_name, (void **)&g_orig_name, &why))
+        installed++;
+    else if (cfg->off.player_name >= 0) {
+        esp_fmt(msg, sizeof(msg), "[!] ESP: hook name fallo: %s", why ? why : "?");
+        NSLog(@"%s", msg);
+    }
+
+    esp_fmt(msg, sizeof(msg), "[+] ESP: %d hooks puestos sobre slide 0x%llx",
+            installed, (unsigned long long)g_slide);
+    NSLog(@"%s", msg);
+    return installed;
+}
+
+void esp_targets_stop(void)
+{
+    for (int i = 0; i < esp_hook_count(); i++) esp_hook_remove(i);
+    g_count = 0;
+}
+
+/* --------------------------------------------------------------------- */
+/* Render                                                                 */
+/* --------------------------------------------------------------------- */
+void esp_render_frame(void *cgctx, float width, float height)
+{
+    /* La camara se lee aqui, una vez por frame. Si los offsets de matriz no
+       estan resueltos esto no hace nada y las cajas simplemente no salen. */
+    esp_pump_matrices();
+
+    esp_target_t snap[ESP_MAX_TARGETS];
+    int n = esp_targets_snapshot(snap, ESP_MAX_TARGETS);
+    if (n <= 0) return;
+
+    for (int i = 0; i < n; i++) {
+        esp_target_t *t = &snap[i];
+
+        /* Proyecta las 8 esquinas y se queda con el AABB en pantalla. */
+        float lx = 1e9f, ly = 1e9f, hx = -1e9f, hy = -1e9f;
+        bool behind = true;
+        for (int c = 0; c < 8; c++) {
+            float wx = (c & 1) ? t->max[0] : t->min[0];
+            float wy = (c & 2) ? t->max[1] : t->min[1];
+            float wz = (c & 4) ? t->max[2] : t->min[2];
+            float sx, sy;
+            if (!esp_project(wx, wy, wz, &sx, &sy)) continue;
+            behind = false;
+            if (sx < lx) lx = sx;  if (sx > hx) hx = sx;
+            if (sy < ly) ly = sy;  if (sy > hy) hy = sy;
+        }
+        if (behind) continue;      /* detras de la camara: no se dibuja */
+
+        float bw = hx - lx, bh = hy - ly;
+        if (bw < 1 || bh < 1) continue;
+
+        /* Cono de vision, si esta puesto. */
+        if (g_cfg.fov_degrees > 0.5f) {
+            float fcx, fcy;
+            if (esp_project(t->center[0], t->center[1], t->center[2], &fcx, &fcy)) {
+                float dx = fcx - width  * 0.5f, dy = fcy - height * 0.5f;
+                float ang = atan2f(dy, dx) * 57.2957795f;
+                if (ang < 0) ang += 360.0f;
+                if (ang < g_cfg.fov_degrees * 0.5f || ang > 360.0f - g_cfg.fov_degrees * 0.5f)
+                    continue;
+            }
+        }
+
+        /* Distancia y rango maximo. */
+        char buf[64];
+        float dx = t->center[0], dy = t->center[1], dz = t->center[2];
+        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (g_cfg.max_distance > 0.5f && dist > g_cfg.max_distance) continue;
+
+        uint32_t col = t->alive ? g_cfg.color_enemy : g_cfg.color_dead;
+
+        if (g_cfg.draw_snapline) {
+            float ty = g_cfg.snapline_height_px > 0 ? height : hy;
+            esp_draw_line(width * 0.5f, ty, (lx + hx) * 0.5f, hy,
+                          esp_argb(col, 0.35f), 1.0f);
+        }
+        if (g_cfg.draw_box)
+            esp_draw_box(lx, ly, bw, bh, col, g_cfg.box_thickness);
+        if (g_cfg.draw_corner_box)
+            esp_draw_corners(lx, ly, bw, bh, col, g_cfg.box_thickness,
+                             g_cfg.corner_ratio);
+
+        /* Barra de vida vertical a la izquierda de la caja. */
+        if (g_cfg.draw_health) {
+            float hp = t->health;
+            if (hp < 0) hp = 0;
+            if (hp > 100) hp = 100;
+            float bh2 = bh * (hp / 100.0f);
+            esp_draw_filled(lx - 4.0f, ly, 2.5f, bh, esp_argb(0x202020, 0.55f));
+            esp_draw_filled(lx - 4.0f, ly + bh - bh2, 2.5f, bh2,
+                            esp_argb(g_cfg.color_health, 0.95f));
+        }
+
+        float ty = ly - 12.0f;
+        if (g_cfg.draw_name && t->name[0]) {
+            esp_draw_text_shadow((lx + hx) * 0.5f, ty, 11.0f,
+                                 g_cfg.color_text, true, t->name);
+            ty -= 13.0f;
+        }
+        if (g_cfg.draw_distance) {
+            esp_fmt(buf, sizeof(buf), "%.0fm", dist);
+            esp_draw_text_shadow((lx + hx) * 0.5f, ty, 10.0f,
+                                 esp_argb(g_cfg.color_text, 0.85f), true, buf);
+        }
+    }
+
+    if (g_cfg.draw_fov_circle && g_cfg.fov_radius_px > 0)
+        esp_draw_circle(width * 0.5f, height * 0.5f, g_cfg.fov_radius_px,
+                        esp_argb(g_cfg.color_text, 0.12f), 1.0f);
+}
+
+/* --------------------------------------------------------------------- */
+/* Calibrador                                                             */
+/* --------------------------------------------------------------------- */
+void esp_targets_calib_dump(void)
+{
+    FILE *f = fopen("/tmp/esp-calib.txt", "w");
+    if (!f) return;
+
+    fprintf(f, "# ESP calibracion\n");
+    fprintf(f, "slide_base      = 0x%llx\n", (unsigned long long)g_slide);
+    fprintf(f, "base_resuelta   = %s\n", g_base_ok ? "si" : "no");
+    fprintf(f, "hooks_puestos   = %d\n", esp_hook_count());
+    fprintf(f, "llamadas AABB   = %llu\n", (unsigned long long)g_calls_aabb);
+    fprintf(f, "llamadas name   = %llu\n", (unsigned long long)g_calls_name);
+    fprintf(f, "llamadas dead   = %llu\n", (unsigned long long)g_calls_dead);
+    fprintf(f, "llamadas health = %llu\n", (unsigned long long)g_calls_health);
+    fprintf(f, "jugadores_distintos = %llu\n", (unsigned long long)g_distinct_self);
+    fprintf(f, "objetos_vivos   = %d\n", g_count);
+    fprintf(f, "disposicion     = %d (0=minmax6 1=minmax8 2=center_size 3=origin_size 4=dagor)\n",
+            (int)g_cfg.aabb_layout);
+    fprintf(f, "\n#Ultimo AABB crudo (%d flotantes)\n", g_last6_n);
+    for (int i = 0; i < g_last6_n; i++) fprintf(f, "  aabb[%d] = %f\n", i, g_last6[i]);
+
+    fprintf(f, "\n#Objetos\n");
+    esp_target_t snap[ESP_MAX_TARGETS];
+    int n = esp_targets_snapshot(snap, ESP_MAX_TARGETS);
+    for (int i = 0; i < n; i++) {
+        fprintf(f, "  0x%llx  hits=%u  hp=%.1f  alive=%d  name='%s'\n",
+                (unsigned long long)snap[i].id, snap[i].hits, snap[i].health,
+                snap[i].alive ? 1 : 0, snap[i].name);
+        fprintf(f, "      min(%.2f %.2f %.2f)  max(%.2f %.2f %.2f)\n",
+                snap[i].min[0], snap[i].min[1], snap[i].min[2],
+                snap[i].max[0], snap[i].max[1], snap[i].max[2]);
+    }
+
+    /* Las matrices: si no estan resueltas esto sale vacio y es la pista de
+       que falta el offset. */
+    float v[16], p[16];
+    esp_overlay_get_matrices(v, p);
+    fprintf(f, "\n#Matrices\n  view = ");
+    for (int i = 0; i < 16; i++) fprintf(f, "%s%f", i ? "," : "", v[i]);
+    fprintf(f, "\n  proj = ");
+    for (int i = 0; i < 16; i++) fprintf(f, "%s%f", i ? "," : "", p[i]);
+    fprintf(f, "\n");
+
+    fclose(f);
+}
+
+int esp_targets_calib_aabb_candidates(void) { return (int)AABB__COUNT; }

@@ -1,0 +1,91 @@
+name: ESP
+
+# Compila ESP.dylib sin que tengas Mac. Mismo truco que KeyGate: GitHub te
+# presta un Mac virtual, ejecuta el clang y te deja descargar el resultado.
+#
+# La ESP son varios archivos, a diferencia de KeyGate. Se compilan todos juntos
+# porque comparten cabeceras: Hook.m necesita ESP.h y Hook.h, Targets.m llama
+# a lo que define Hook.m, y asi sucesivamente.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'ESP/ESP.h'
+      - 'ESP/Hook.h'
+      - 'ESP/Hook.m'
+      - 'ESP/Overlay.h'
+      - 'ESP/Overlay.m'
+      - 'ESP/Targets.h'
+      - 'ESP/Targets.m'
+      - 'ESP/ESP.m'
+      - '.github/workflows/esp.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Compilar ESP.dylib
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          # -fobjc-arc es obligatorio: Overlay.m usa __weak.
+          # Los ficheros van en orden NO determinista: el enlazador resuelve los
+          # simbolos globals, asi que da igual, pero se dejan juntos por claridad.
+          clang -dynamiclib \
+                -arch arm64 \
+                -isysroot "$SDK" \
+                -miphoneos-version-min=15.0 \
+                -fobjc-arc \
+                -Wall \
+                -framework UIKit \
+                -framework Foundation \
+                -framework QuartzCore \
+                -framework CoreGraphics \
+                -o ESP.dylib \
+                ESP/ESP.m \
+                ESP/Hook.m \
+                ESP/Overlay.m \
+                ESP/Targets.m
+          echo "compilado"
+
+      - name: Verificar que es una dylib arm64
+        run: |
+          set -e
+          echo "--- file ---"
+          file ESP.dylib
+          echo
+          echo "--- architectures ---"
+          lipo -info ESP.dylib
+          echo
+          echo "--- simbolos que deben estar dentro ---"
+          # Si esto falla, el motor no se linko bien y la dylib no hara nada.
+          for s in ESP_init esp_hook_install esp_targets_start esp_render_frame; do
+            if nm -gU ESP.dylib | grep -q " T _$s"; then
+              echo "  ok      _$s"
+            else
+              echo "  FALTA   _$s"
+              exit 1
+            fi
+          done
+          echo
+          echo "--- tamano ---"
+          ls -l ESP.dylib
+          echo
+          file ESP.dylib | grep -q 'arm64'      || { echo "NO es arm64"; exit 1; }
+          file ESP.dylib | grep -q 'shared'     || { echo "NO es una libreria compartida"; exit 1; }
+          echo
+          echo "OK: es una dylib arm64 con el motor dentro"
+
+      - name: Subir el resultado
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP
+          path: ESP.dylib
+          if-no-files-found: error
