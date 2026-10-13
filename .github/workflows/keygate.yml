@@ -1,0 +1,62 @@
+name: KeyGate
+
+# Esto compila KeyGate.dylib sin que tengas Mac.
+# GitHub Actions te da un Mac virtual gratis, ejecuta el clang y te deja
+# descargar el resultado. Todo desde el navegador de Windows.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'KeyGate.m'
+      - '.github/workflows/keygate.yml'
+
+jobs:
+  build:
+    # macos-latest es un runner con Xcode instalado. Gratis para repos publicos.
+    runs-on: macos-latest
+
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Compilar KeyGate.dylib
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          clang -dynamiclib \
+                -arch arm64 \
+                -isysroot "$SDK" \
+                -miphoneos-version-min=15.0 \
+                -framework UIKit \
+                -framework Foundation \
+                -o KeyGate.dylib \
+                KeyGate.m
+          echo "compilado"
+
+      - name: Verificar que es una dylib arm64
+        run: |
+          set -e
+          echo "--- file ---"
+          file KeyGate.dylib
+          echo
+          echo "--- architecturas ---"
+          lipo -info KeyGate.dylib
+          echo
+          echo "--- tamano ---"
+          ls -l KeyGate.dylib
+          echo
+          # tiene que decir: Mach-O 64-bit dynamically linked shared library arm64
+          file KeyGate.dylib | grep -q 'arm64'      || { echo "NO es arm64"; exit 1; }
+          file KeyGate.dylib | grep -q 'shared'     || { echo "NO es una libreria compartida"; exit 1; }
+          echo
+          echo "OK: es una dylib arm64"
+
+      - name: Subir el resultado
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyGate
+          path: KeyGate.dylib
+          if-no-files-found: error
