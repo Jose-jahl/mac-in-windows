@@ -152,7 +152,9 @@ static bool    g_base_ok    = false;
 static bool read_text_segment(const struct mach_header *mh)
 {
     uint32_t ncmds = mh->ncmds;
-    const uint8_t *p = (const uint8_t *)mh + sizeof(mach_header_64);
+    /* struct, si o si: en <mach-o/loader.h> mach_header_64 es un tag, no un
+       typedef, y en C el nombre a pelo no compila. */
+    const uint8_t *p = (const uint8_t *)mh + sizeof(struct mach_header_64);
     for (uint32_t i = 0; i < ncmds; i++) {
         const struct load_command *lc = (const struct load_command *)p;
         if (lc->cmd == LC_SEGMENT_64) {
