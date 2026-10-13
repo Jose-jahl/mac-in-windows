@@ -178,11 +178,6 @@ bool esp_config_load(esp_config_t *c, const char *json)
 /* --------------------------------------------------------------------- */
 static esp_config_t g_cfg;
 
-static double esp_time(void)
-{
-    return (double)[NSDate timeIntervalSinceReferenceDate];
-}
-
 static void esp_boot(void);
 
 __attribute__((constructor))

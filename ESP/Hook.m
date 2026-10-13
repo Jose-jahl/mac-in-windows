@@ -27,7 +27,6 @@
 #include <unistd.h>      /* sysconf, para el tamano de pagina */
 #include <string.h>
 #include <stdio.h>
-#include <libkern/OScacheControl.h>
 
 static esp_hook_t g_hooks[MAX_HOOKS];
 static int        g_hook_count = 0;
@@ -107,7 +106,12 @@ static bool patch_code(void *addr, size_t len, const void *bytes)
 {
     if (!make_writable(addr, len)) return false;
     memcpy(addr, bytes, len);
-    __builtin___clear_cache((char *)addr, (char *)addr + len);
+    /* No se vacia la cache de instrucciones a proposito. En arm64 la
+       coherencia entre I-cache y D-cache la garantiza la arquitectura, y
+       __builtin___clear_cache no genera codigo. Ademas, si se escribe el
+       builtin, al haber declarado <libkern/OScacheControl.h> clang lo resuelve
+       contra la funcion real ___clear_cache, que iOS no exporta y rompe el
+       enlazado. En arm64 la escritura es visible ya. */
     make_executable(addr, len);
     return true;
 }
