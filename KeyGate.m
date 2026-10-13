@@ -186,7 +186,7 @@ static void ask(NSString *expected)
         if (typed.length == 0) { refuse(@"No introdujiste ninguna llave."); return; }
         if (!secure_equals(sha256_base64(typed), expected)) { refuse(@"La llave no es correcta."); return; }
         /* Correcta: la app sigue su curso normal. */
-    }];
+    }]];
 
     [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
                                          style:UIAlertActionStyleCancel
