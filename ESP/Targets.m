@@ -288,7 +288,105 @@ static const char *esp_detour_name(void *self)
 /* --------------------------------------------------------------------- */
 int esp_targets_start(const esp_config_t *cfg)
 {
-    char msg[220];
+    /* --------------------------------------------------------------------- */
+/* Sondas: mirar sin tocar                                                  */
+/* --------------------------------------------------------------------- */
+/* Una entrada a funcion arm64 empieza casi siempre por uno de estos grupos.
+   Si no encaja en ninguno, esa direccion no es el principio de una funcion y
+   parchear ahi es escribir encima de otra cosa. */
+bool esp_probe_prologue(const uint8_t *raw, char *why, size_t whyn)
+{
+    uint32_t i0 = ((uint32_t)raw[0] << 24) | ((uint32_t)raw[1] << 16) |
+                  ((uint32_t)raw[2] <<  8) |  (uint32_t)raw[3];
+
+    /* Todos los bytes a cero: memoria sin inicializar, no codigo. */
+    if (i0 == 0) { snprintf(why, whyn, "todo ceros, no es codigo"); return false; }
+
+    /* BRK, SVC, udf: si esta aqui, no es un prologo. */
+    if ((i0 & 0xFFE0001Fu) == 0xD4000001u || (i0 & 0xFFE0001Fu) == 0xD4200000u) {
+        snprintf(why, whyn, "primera instruccion es BRK/SVC"); return false;
+    }
+
+    /* Salto incondicional: es una funcion de una instruccion o un tail call,
+       no un punto de entrada con prologo conservable. */
+    if ((i0 & 0x7C000000u) == 0x14000000u) {
+        snprintf(why, whyn, "empieza con un salto"); return false;
+    }
+
+    /* Lo que si se acepta como entrada: */
+    uint8_t top = (uint8_t)(i0 >> 24);
+    if (top == 0xA9 || top == 0xA8 ||   /* STP / LDP 64 */
+        top == 0xA5 || top == 0xA4 ||   /* STP / LDP 32 */
+        top == 0xD1 || top == 0x91 ||   /* SUB SP / MOV-ADR */
+        top == 0xD6 ||                   /* RET de hoja */
+        top == 0xF9 || top == 0xB9 ||   /* STR / LD registros */
+        top == 0x10 || top == 0x11 ||   /* ADR / ADRP */
+        top == 0x12 || top == 0x52 || top == 0xD3)
+        return true;
+
+    snprintf(why, whyn, "primera instruccion 0x%08X no parece un prologo", i0);
+    return false;
+}
+
+const char *esp_probe_one(const char *label, int64_t off, uint8_t *prologue_out)
+{
+    static char verdict[160];
+    uint8_t buf[16];
+    char why[96];
+
+    (void)label;
+    if (off < 0) {
+        snprintf(verdict, sizeof(verdict), "sin resolver");
+        return verdict;
+    }
+    if (!g_base_ok) {
+        snprintf(verdict, sizeof(verdict), "sin base de carga");
+        return verdict;
+    }
+
+    uint64_t va  = g_text_vm + (uint64_t)off;
+    void    *at = (void *)(uint64_t)(g_slide + (int64_t)va);
+
+    if (va < g_text_vm || va >= g_text_end) {
+        snprintf(verdict, sizeof(verdict), "FUERA de __TEXT (offset de otra build?)");
+        return verdict;
+    }
+
+    memcpy(buf, at, 16);
+    if (prologue_out) memcpy(prologue_out, buf, 16);
+
+    if (!esp_probe_prologue(buf, why, sizeof(why))) {
+        snprintf(verdict, sizeof(verdict), "no parece funcion: %s", why);
+        return verdict;
+    }
+
+    snprintf(verdict, sizeof(verdict), "ok");
+    return verdict;
+}
+
+/* Las cuatro enganchables, sin escribir nada. */
+int esp_probe_all(void)
+{
+    if (!resolve_base()) return 0;
+    int good = 0;
+    struct { const char *n; int64_t v; } L[] = {
+        { "player_aabb", g_cfg.off.player_aabb },
+        { "is_dead",     g_cfg.off.is_dead },
+        { "health",      g_cfg.off.health },
+        { "name",        g_cfg.off.player_name },
+    };
+    for (unsigned i = 0; i < sizeof(L)/sizeof(L[0]); i++) {
+        const char *v = esp_probe_one(L[i].n, L[i].v, NULL);
+        NSLog(@"[ESP-PROBE] %-12s %s", L[i].n, v);
+        if (v[0] == 'o' && v[1] == 'k') good++;
+    }
+    return good;
+}
+
+/* --------------------------------------------------------------------- */
+/* Arranque                                                               */
+/* --------------------------------------------------------------------- */
+char msg[220];
     g_cfg = *cfg;
     if (!resolve_base()) {
         NSLog(@"[ESP] no se resolvio la base de carga de 'cod': no se engancha nada.");
@@ -299,6 +397,41 @@ int esp_targets_start(const esp_config_t *cfg)
             (unsigned long long)g_slide, (unsigned long long)g_text_vm,
             (unsigned long long)((g_text_end - g_text_vm) >> 20));
     NSLog(@"%s", msg);
+
+    /* ---- aqui esta el cambio de fondo ----------------------------------
+       Por defecto NO se parchea nada. Se mira, se apunta que se ha mirado y
+       ya. Escribir en la __TEXT del juego al arrancar es lo unico de toda la
+       ESP que puede tumbar la app, y no tiene sentido arriesgarlo sin saber
+       antes si los offsets son de esta build. */
+    if (!cfg->enable_hooks) {
+        int good = esp_probe_all();
+        esp_fmt(msg, sizeof(msg),
+                "[i] ESP: MODO INSPECCION (sin hooks): %d de 4 offsets parecen funciones.",
+                good);
+        NSLog(@"%s", msg);
+        esp_fmt(msg, sizeof(msg),
+                "[i] ESP: no se ha escrito nada en el binario del juego.");
+        NSLog(@"%s", msg);
+        return 0;
+    }
+
+    /* Antes de un solo mprotect, se comprueba que los cuatro destinos parecen
+       funciones. Si alguno no encaja, no se engancha ninguno: es mas util no
+       tener ESP que perderla en un crash. */
+    struct { const char *n; int64_t v; } L[] = {
+        { "player_aabb", cfg->off.player_aabb },
+        { "is_dead",     cfg->off.is_dead },
+        { "health",      cfg->off.health },
+        { "name",        cfg->off.player_name },
+    };
+    for (unsigned i = 0; i < sizeof(L)/sizeof(L[0]); i++) {
+        const char *v = esp_probe_one(L[i].n, L[i].v, NULL);
+        if (v[0] == 'o' && v[1] == 'k') continue;
+        esp_fmt(msg, sizeof(msg),
+                "[!] ESP: %s no parece una funcion (%s). No se engancha nada.", L[i].n, v);
+        NSLog(@"%s", msg);
+        return 0;
+    }
 
 /* Engancha un offset. Si esp_resolve devuelve NULL es que cae fuera de __TEXT,
    o sea que el offset es de otra build: no se intenta parchear. */
@@ -464,11 +597,11 @@ void esp_targets_calib_dump(void)
             (unsigned long long)((g_text_end - g_text_vm) >> 20));
     fprintf(f, "base_resuelta   = %s\n", g_base_ok ? "si" : "no");
 
-    /* Cada offset: resuelto y a donde apunta. Si uno sale fuera de __TEXT es
-       que el offset es de otra build y por ahi no hay que enganchar. */
-    fprintf(f, "\n#Offsets\n");
+    /* Cada offset: resuelto, dentro de __TEXT, y los primeros 16 bytes para
+       poder reconocerlos. NO se escribe nada en el juego. */
+    fprintf(f, "\n#Sondas (solo lectura: no se escribe nada en el cod)\n");
     {
-        const struct { const char *n; int64_t v; } offs[] = {
+        struct { const char *n; int64_t v; } offs[] = {
             { "player_aabb",      g_cfg.off.player_aabb },
             { "player_target",    g_cfg.off.player_target_point },
             { "player_name",      g_cfg.off.player_name },
@@ -479,14 +612,14 @@ void esp_targets_calib_dump(void)
             { "proj_matrix",      g_cfg.off.proj_matrix },
         };
         for (unsigned i = 0; i < sizeof(offs)/sizeof(offs[0]); i++) {
-            if (offs[i].v < 0) {
-                fprintf(f, "  %-16s sin resolver\n", offs[i].n);
-                continue;
-            }
-            void *r = esp_resolve(offs[i].v);
-            fprintf(f, "  %-16s off=0x%-9llx -> %s\n", offs[i].n,
-                    (unsigned long long)offs[i].v,
-                    r ? "dentro de __TEXT" : "FUERA de __TEXT (offset de otra build?)");
+            uint8_t pro[16];
+            memset(pro, 0, sizeof(pro));
+            const char *v = esp_probe_one(offs[i].n, offs[i].v, pro);
+            fprintf(f, "  %-16s off=0x%-9llx  %s\n", offs[i].n,
+                    (unsigned long long)offs[i].v, v);
+            fprintf(f, "      bytes:");
+            for (int k = 0; k < 16; k++) fprintf(f, " %02X", pro[k]);
+            fprintf(f, "\n");
         }
     }
     fprintf(f, "hooks_puestos   = %d\n", esp_hook_count());

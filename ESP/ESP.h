@@ -47,6 +47,11 @@ typedef struct {
 typedef struct {
     bool  enabled;
 
+    /* Permiso para escribir en el binario del juego. Por defecto FALSE: la
+       ESP solo inspecciona. Ponerlo a true es lo unico que puede hacer que la
+       app caiga, asi que no se activa solo. */
+    bool  enable_hooks;
+
     /* dibujo */
     bool  draw_box;
     bool  draw_corner_box;

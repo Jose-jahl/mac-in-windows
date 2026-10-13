@@ -57,9 +57,23 @@ int  esp_targets_snapshot(esp_target_t *out, int max);
 
 /* --- arranque ---------------------------------------------------------- */
 /* Resuelve la base de carga del 'cod' y engancha loOffsets definidos.
-   Devuelve el numero de hooks puestos; los fallos van al log. */
+   Devuelve el numero de hooks puestos; los fallos van al log.
+
+   OJO: solo parchea si cfg->enable_hooks es true. Por defecto es false y lo
+   unico que hace es INSPECCIONAR los offsets, sin escribir nada en el juego.
+   Esa separacion es deliberada: parchear la __TEXT del juego al arrancar es
+   la unica parte de la ESP que puede tumbar la app, y no tiene sentido
+   arriesgarse antes de saber si los offsets son buenos. */
 int  esp_targets_start(const esp_config_t *cfg);
 void esp_targets_stop(void);
+
+/* Sondas: comprueba un offset sin escribir nada. Devuelve el veredicto.
+   static_veredicto devuelve una cadena estatica. */
+const char *esp_probe_one(const char *label, int64_t off, uint8_t *prologue_out);
+bool        esp_probe_prologue(const uint8_t *p, char *why, size_t whyn);
+
+/* Sonda las cuatro funciones enganchables sin parchear nada. */
+int  esp_probe_all(void);
 
 /* --- render ------------------------------------------------------------ */
 void esp_render_frame(void *cgctx, float width, float height);

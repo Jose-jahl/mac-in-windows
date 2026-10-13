@@ -35,6 +35,10 @@ void esp_config_defaults(esp_config_t *c)
 {
     memset(c, 0, sizeof(*c));
     c->enabled = true;
+    /* PARCHEAR QUEDA APAGADO. Por defecto la ESP solo inspecciona: no escribe
+       nada en el binario del juego. Es la unica parte que puede hacer caer la
+       app, y no se activa hasta que los offsets esten confirmados. */
+    c->enable_hooks = false;
 
     c->draw_box = true;
     c->draw_corner_box = false;
@@ -124,6 +128,7 @@ bool esp_config_load(esp_config_t *c, const char *json)
 #define BOOL(k, field) if (json_bool(json, k, &b)) c->field = b
 
     BOOL("enabled",         enabled);
+    BOOL("enableHooks",     enable_hooks);
     BOOL("drawBox",         draw_box);
     BOOL("drawCornerBox",   draw_corner_box);
     BOOL("drawHealth",      draw_health);
@@ -214,7 +219,11 @@ static void esp_boot(void)
 
     int n = esp_targets_start(&g_cfg);
     if (n <= 0) {
-        NSLog(@"[ESP] no se pudo enganchar nada: revisa los offsets.");
+        /* Modo inspeccion, o ningun offset bueno. En los dos casos no hay nada
+           que dibujar y lo unico razonable es decirlo y no montar nada: una
+           ventana por encima del juego sin ningun dato solo estorba. */
+        NSLog(@"[ESP] sin hooks: no se monta el overlay. Informe en Documents.");
+        esp_targets_calib_dump();
         return;
     }
 
