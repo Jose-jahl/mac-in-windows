@@ -1,30 +1,94 @@
-/*
- *  KeyGate.dylib   —   llave de inicio para CODM
- *  ------------------------------------------------------------------
- *  Se inyecta en cod.app con una entrada LC_LOAD_DYLIB. Al arrancar la app
- *  lee la llave esperada del Info.plist (clave CODMGateKey = SHA-256 en
- *  base64), la pide al usuario y cierra la app si no coincide.
+/* ============================================================================
+ *  KeyGate.m  -  arreglo de estabilidad
+ *  ---------------------------------------------------------------------------
+ *  Que pasaba antes
+ *  ----------------
+ *  El vigilante (commit 4be2dc7) presenting el dialogo sobre el controlador
+ *  del JUEGO, cada 0,6 s, mientras creyera que no estaba en pantalla:
  *
- *  Solo depende de Foundation y UIKit. El SHA-256 va implementado aqui
- *  para no depender de CommonCrypto ni de ningun SDK concreto: compila
- *  en Mac, Linux, WSL o GitHub Actions con el mismo clang.
+ *      if (gate_visible()) { schedule_tick(0.6); return; }
+ *      ...
+ *      if (... || top.presentedViewController || ...) { schedule_tick(0.5); return; }
+ *      build_alert(); [top presentViewController:g_alert ...];
  *
- *  La llave en claro NUNCA va dentro de la IPA, solo su hash. Por eso un
- *  mismo dylib sirve para cualquier llave: la herramienta escribe el hash.
- */
+ *  Eso tiene dos fallos encadenados:
+ *
+ *  - La condicion de guarda mira top.presentedViewController, que es nil
+ *    DURANTE la animacion de presentacion. En el siguiente tick el dialogo
+ *    anterior sigue animandose, gate_visible() dice que no esta, y se presenta
+ *    otro encima. UIKit lanza NSInternalInconsistencyException y la app muere.
+ *
+ *  - Si la presentacion falla, g_alert queda apuntando a un controlador que
+ *    nunca se presento. Cada tick crea uno nuevo y lo intenta otra vez: se
+ *    acumulan view controllers sin limite hasta que revienta.
+ *
+ *  Que se hace ahora
+ *  -----------------
+ *  El dialogo se presenta en una UIWindow PROPIA, con su propio
+ *  UIViewController raiz. El juego puede cambiar de rootViewController,
+ *  desmontar escenas y traerse lo suyo: esta ventana no depende de el.
+ *
+ *  Ademas:
+ *    - g_presenting evita solapar dos presentaciones.
+ *    - La presentacion va dentro de @try: una inconsistencia de UIKit avisa en
+ *      el log y reintenta, pero no tumba la app.
+ *    - El vigilante sigue como red, pero cada reintento cuenta y hay tope.
+ * ==========================================================================*/
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#import <string.h>
+#import <string.h>   /* memcpy / strlen, los usa el SHA-256 */
 
-static NSString *const kPlistKey    = @"CODMGateKey";
-static NSString *const kPlistDevice = @"CODMGateDevice";
+static NSString *const kTitle  = @"CODM AIM";
+static NSString *const kPrompt = @"Introduce tu llave.";
 
-/* Donde queda guardada, en el equipo, la huella del primer telefono que valido
-   la llave. Vive en NSUserDefaults: se crea al vuelo, no va dentro de la IPA. */
-static NSString *const kStoreDevice = @"codmgate.devicehash.v1";
+/* Ventana propia. El nivel alto la pone por encima de la del juego sin
+   stealarle el foco: backgroundColor transparente y userInteractionEnabled
+   en NO, asi que los toques siguen yendo al juego (que ya esta corriendo). */
+static UIWindow           *g_win   = nil;
+static UIAlertController  *g_alert = nil;
 
-/* ==================================================================== SHA-256 */
+/* No tocar la ventana del juego en ningun momento. */
+
+/* ============================================================================
+ *  Utilidades
+ * ==========================================================================*/
+
+/* Ventana de la puerta. Se crea una sola vez y se reutiliza. */
+static UIWindow *gate_window(void)
+{
+    if (g_win) return g_win;
+
+    UIWindowScene *scene = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        if (sc.activationState != UISceneActivationStateForegroundActive) continue;
+        scene = (UIWindowScene *)sc;
+        break;
+    }
+    if (!scene) return nil;
+
+    UIWindow *w = [[UIWindow alloc] initWithWindowScene:scene];
+    w.windowLevel = UIWindowLevelAlert + 100.0;
+    w.backgroundColor = [UIColor clearColor];
+    w.userInteractionEnabled = YES;      /* el dialogo tiene que recibir toques */
+    w.rootViewController = [[UIViewController alloc] init];
+    w.hidden = NO;
+    g_win = w;
+    return g_win;
+}
+
+/* ¿Esta la puerta ya en pantalla? Se mira la ventana PROPIA, no la del juego. */
+static BOOL gate_visible(void)
+{
+    if (!g_alert) return NO;
+    if (g_alert.presentingViewController == nil) return NO;
+    return YES;
+}
+
+/* ============================================================================
+ *  Base del SHA-256 (identico a la version anterior)
+ * ==========================================================================*/
 
 typedef struct { uint32_t s[8]; uint64_t len; unsigned char buf[64]; size_t n; } sha256_t;
 
@@ -106,7 +170,7 @@ static NSString *sha256_base64(NSString *input)
     return [[NSData dataWithBytes:d length:32] base64EncodedStringWithOptions:0];
 }
 
-/* Comparacion en tiempo constante: no filtra nada por temporizacion. */
+/* Comparacion en tiempo constante. */
 static BOOL secure_equals(NSString *a, NSString *b)
 {
     if (!a || !b) return NO;
@@ -119,11 +183,25 @@ static BOOL secure_equals(NSString *a, NSString *b)
     return diff == 0;
 }
 
-/* ============================================================ atar al equipo */
+/* ============================================================================
+ *  Estado y callbacks
+ * ==========================================================================*/
 
-/* identifierForVendor no pide permiso ni entitlement y no se puede leer desde
-   fuera. Solo cambia si se borran TODAS las apps del mismo fabricante del
-   telefono, que para este caso es justo lo que se quiere. */
+static NSString *kPlistKey    = @"CODMGateKey";
+static NSString *kPlistDevice = @"CODMGateDevice";
+static NSString *kStoreDevice = @"codmgate.devicehash.v1";
+
+static NSString *g_expected = nil;
+static BOOL     g_bind     = NO;
+static BOOL     g_open     = NO;
+static BOOL     g_refused  = NO;
+static BOOL     g_presenting = NO;   /* hay una presentacion en curso */
+static int      g_waits     = 0;
+
+static const int kMaxWaits = 60;     /* 60 intentos x 1 s = 60 s */
+
+/* --- huella del equipo ------------------------------------------------- */
+
 static NSString *device_fingerprint(void)
 {
     NSString *v = [UIDevice currentDevice].identifierForVendor;
@@ -131,20 +209,16 @@ static NSString *device_fingerprint(void)
     return sha256_base64(v);
 }
 
-/* Devuelve nil si todo esta bien, o el motivo por el que hay que bloquear.
-   Si el equipo no se puede identificar no se bloquea nunca: es preferible
-   dejar pasar a dejar al usuario sin poder jugar. */
 static NSString *device_problem(void)
 {
     NSString *now = device_fingerprint();
-    if (!now) return nil;                                   // no se puede comprobar
+    if (!now) return nil;
     NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kStoreDevice];
-    if (!saved || saved.length == 0) return nil;             // primer uso: se atara luego
-    if ([saved isEqualToString:now]) return nil;             // mismo equipo
+    if (!saved || saved.length == 0) return nil;
+    if ([saved isEqualToString:now]) return nil;
     return @"Esta llave ya se valido en otro equipo.";
 }
 
-/* Se llama justo despues de acertar la llave: fija el equipo. */
 static void device_bind(void)
 {
     NSString *fp = device_fingerprint();
@@ -154,100 +228,44 @@ static void device_bind(void)
     [u synchronize];
 }
 
-/* ==================================================================== UI */
+/* ============================================================================
+ *  Presentacion
+ * ==========================================================================*/
 
-static UIWindow *active_window(void)
-{
-    UIApplication *app = UIApplication.sharedApplication;
-
-    /* API de escenas: la que sigue en pie desde iOS 13. */
-    for (UIScene *sc in app.connectedScenes) {
-        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-        if (sc.activationState != UISceneActivationStateForegroundActive) continue;
-        for (UIWindow *c in ((UIWindowScene *)sc).windows)
-            if (c.isKeyWindow) return c;
-    }
-    /* Si ninguna escena esta en primer plano, sirve la primera ventana que haya. */
-    for (UIScene *sc in app.connectedScenes) {
-        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *c in ((UIWindowScene *)sc).windows)
-            return c;
-    }
-    /* Reserva para apps que no usan escenas. */
-    id delegate = app.delegate;
-    if ([delegate respondsToSelector:@selector(window)])
-        return [delegate window];
-    return nil;
-}
-
-/* ============================================================== estado de la puerta */
-
-static NSString *g_expected = nil;     /* hash esperado            */
-static BOOL     g_bind     = NO;       /* atar al equipo            */
-static BOOL     g_open     = NO;       /* llave correcta: no insistir */
-static BOOL     g_refused  = NO;       /* ya se respondio "no"      */
-static UIAlertController *g_alert = nil;
-static int      g_waits     = 0;       /* intentos de esperar ventana */
-
-/* Cuantos intentos de espera antes de rendirse. 0,5 s cada uno -> 60 s. */
-static const int kMaxWaits = 120;
-
-/* El controlador mas alto de la jerarquia de esa ventana. */
-static UIViewController *top_vc(UIWindow *w)
-{
-    UIViewController *vc = w.rootViewController;
-    int guard = 0;
-    while (vc.presentedViewController && guard++ < 64) vc = vc.presentedViewController;
-    return vc;
-}
-
-/* ¿Sigue el dialogo en pantalla? La app puede llevarselo al cambiar de escena. */
-static BOOL gate_visible(void)
-{
-    UIWindow *w = active_window();
-    if (!w || !g_alert) return NO;
-    UIViewController *vc = w.rootViewController;
-    int guard = 0;
-    while (vc && guard++ < 64) {
-        if (vc == g_alert) return YES;
-        vc = vc.presentedViewController;
-    }
-    return NO;
-}
-
-static void refuse(NSString *why)
-{
-    g_refused = YES;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *w = active_window();
-        if (!w) { exit(0); return; }
-        UIViewController *top = top_vc(w);
-        UIAlertController *a =
-            [UIAlertController alertControllerWithTitle:@"Acceso denegado"
-                                               message:why
-                                        preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"Salir"
-                                             style:UIAlertActionStyleDestructive
-                                           handler:^(UIAlertAction *act) { exit(0); }]];
-        [top presentViewController:a animated:YES completion:nil];
-    });
-    /* Si el usuario no toca nada, se cierra solo. */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ exit(0); });
-}
+static void refuse(NSString *why);
+static void gate_tick(void);
 
 static void build_alert(void)
 {
     UIAlertController *a =
-        [UIAlertController alertControllerWithTitle:@"CODM AIM"
-                                           message:@"Introduce tu llave."
+        [UIAlertController alertControllerWithTitle:@"Acceso denegado"
+                                           message:why
                                     preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Salir"
+                                         style:UIAlertActionStyleDestructive
+                                       handler:^(UIAlertAction *act) { exit(0); }]];
+    g_alert = a;
+}
 
+/* Presenta el dialogo de la llave en la ventana propia. Devuelve NO si no se
+   pudo; nunca deja la app en un estado raro. */
+static BOOL present_prompt(void)
+{
+    if (g_presenting) return NO;
+    if (gate_visible()) return YES;
+
+    UIWindow *w = gate_window();
+    if (!w) return NO;
+
+    UIAlertController *a =
+        [UIAlertController alertControllerWithTitle:kTitle
+                                           message:kPrompt
+                                    preferredStyle:UIAlertControllerStyleAlert];
     [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"llave";
         tf.secureTextEntry = YES;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocapitalizationType = UITextCapitalizationTypeNone;
         tf.spellCheckingType = UITextSpellCheckingTypeNo;
         tf.clearButtonMode = UITextFieldViewModeWhileEditing;
     }];
@@ -261,21 +279,58 @@ static void build_alert(void)
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (typed.length == 0) { refuse(@"No introdujiste ninguna llave."); return; }
         if (!secure_equals(sha256_base64(typed), g_expected)) { refuse(@"La llave no es correcta."); return; }
-        /* Correcta: se ata al equipo la primera vez y el vigilante se detiene. */
         if (g_bind) device_bind();
         g_open = YES;
-        g_alert = nil;
+        g_presenting = NO;
+        [g_win resignKeyWindow];
+        g_win.hidden = YES;
     }]];
 
     [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
                                          style:UIAlertActionStyleCancel
                                        handler:^(UIAlertAction *act) { exit(0); }]];
+
     g_alert = a;
+    g_presenting = YES;
+
+    @try {
+        /* animated:NO evita la ventana de tiempo en la que UIKit considera que
+           hay una presentacion en curso. Es la causa del crash anterior. */
+        [w.rootViewController presentViewController:a animated:NO completion:^{
+            g_presenting = NO;
+        }];
+    }
+    @catch (NSException *e) {
+        /* Inconsistencia de UIKit: se avisa y se reintenta en el siguiente
+           tick. Lo que no se hace es tumbar la app. */
+        NSLog(@"[KeyGate] presentacion fallida: %@", e.reason);
+        g_presenting = NO;
+        g_alert = nil;
+        return NO;
+    }
+    return YES;
 }
 
-static void gate_tick(void);
+static void refuse(NSString *why)
+{
+    g_refused = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        build_alert();
+        UIWindow *w = gate_window();
+        if (!w) { exit(0); return; }
+        @try {
+            [w.rootViewController presentViewController:g_alert animated:NO completion:nil];
+        } @catch (NSException *e) {
+            NSLog(@"[KeyGate] no se pudo mostrar el aviso: %@", e.reason);
+            exit(0);
+        }
+    });
+    /* Si el usuario no toca nada, se cierra solo. */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ exit(0); });
+}
 
-/* El vigilante vuelve a mirar cada 0,6 s mientras la puerta este cerrada. */
+/* El vigilante. Cada 0,8 s, mientras la puerta este cerrada. */
 static void schedule_tick(double delay)
 {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
@@ -284,48 +339,49 @@ static void schedule_tick(double delay)
 
 static void gate_tick(void)
 {
-    if (g_open || g_refused) return;            /* ya resuelto */
+    if (g_open || g_refused) return;
+    if (g_presenting) { schedule_tick(0.8); return; }
 
-    /* Si el dialogo sigue en pantalla, solo seguimos vigilando. */
-    if (gate_visible()) { schedule_tick(0.6); return; }
+    if (gate_visible()) {
+        g_waits = 0;
+        schedule_tick(0.8);
+        return;
+    }
 
-    UIWindow *w = active_window();
-    UIViewController *top = w ? top_vc(w) : nil;
-
-    /* Todavia no hay ventana estable, o hay algo en transicion encima:
-       el juego cambia de rootViewController al salir del splash y se lleva
-       consigo cualquier alerta que se haya presentado encima. Esperamos. */
-    if (!w || !w.isKeyWindow || !top || top.presentedViewController || top.view.window == nil) {
+    /* Todavia no hay escena activa. Se espera. */
+    if (!gate_window()) {
         if (++g_waits > kMaxWaits) { refuse(@"No se pudo mostrar la pantalla de llave."); return; }
-        schedule_tick(0.5);
+        schedule_tick(1.0);
+        return;
+    }
+
+    if (!present_prompt()) {
+        if (++g_waits > kMaxWaits) { refuse(@"No se pudo mostrar la pantalla de llave."); return; }
+        schedule_tick(1.0);
         return;
     }
 
     g_waits = 0;
-    build_alert();
-    [top presentViewController:g_alert animated:YES completion:nil];
-    schedule_tick(0.6);
+    schedule_tick(0.8);
 }
 
-/* ================================================================ arranque */
+/* ============================================================================
+ *  Arranque
+ * ==========================================================================*/
 
 __attribute__((constructor))
 static void KeyGate_init(void)
 {
-    /* Margen minimo para que la app cree su primera ventana. A partir de ahi
-       manda el vigilante, que va buscando el momento estable. */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         NSString *expected = [[NSBundle mainBundle] objectForInfoDictionaryKey:kPlistKey];
         if (![expected isKindOfClass:[NSString class]] || expected.length == 0) {
-            /* Sin llave configurada: esta build no va protegida. */
-            return;
+            return;   /* esta build no va protegida */
         }
 
         id dev = [[NSBundle mainBundle] objectForInfoDictionaryKey:kPlistDevice];
         BOOL bindDevice = [dev isKindOfClass:[NSString class]] && [dev isEqualToString:@"1"];
 
-        /* Si ya se ató a otro equipo, no se llega ni a pedir la llave. */
         if (bindDevice) {
             NSString *bad = device_problem();
             if (bad) { refuse(bad); return; }
@@ -336,4 +392,3 @@ static void KeyGate_init(void)
         gate_tick();
     });
 }
-
