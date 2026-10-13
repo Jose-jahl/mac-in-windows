@@ -38,6 +38,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <string.h>   /* memcpy / strlen, los usa el SHA-256 */
+#import <stdlib.h>   /* exit(), para cerrar la app al cancelar o denegar */
 
 static NSString *const kTitle  = @"CODM AIM";
 static NSString *const kPrompt = @"Introduce tu llave.";
@@ -204,7 +205,12 @@ static const int kMaxWaits = 60;     /* 60 intentos x 1 s = 60 s */
 
 static NSString *device_fingerprint(void)
 {
-    NSString *v = [UIDevice currentDevice].identifierForVendor;
+    /* identifierForVendor es un NSUUID, no un NSString. El UUIDString es
+       exactamente la misma cadena de texto que se usaba antes, asi que los
+       hashes ya atados en NSUserDefaults siguen valiendo. */
+    NSUUID *u = [UIDevice currentDevice].identifierForVendor;
+    if (u == nil) return nil;
+    NSString *v = [u UUIDString];
     if (v.length == 0) return nil;
     return sha256_base64(v);
 }
@@ -235,11 +241,11 @@ static void device_bind(void)
 static void refuse(NSString *why);
 static void gate_tick(void);
 
-static void build_alert(void)
+static void build_alert(NSString *why)
 {
     UIAlertController *a =
         [UIAlertController alertControllerWithTitle:@"Acceso denegado"
-                                           message:why
+                                           message:(why ?: @"Acceso denegado")
                                     preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Salir"
                                          style:UIAlertActionStyleDestructive
@@ -265,7 +271,7 @@ static BOOL present_prompt(void)
         tf.placeholder = @"llave";
         tf.secureTextEntry = YES;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextCapitalizationTypeNone;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.spellCheckingType = UITextSpellCheckingTypeNo;
         tf.clearButtonMode = UITextFieldViewModeWhileEditing;
     }];
@@ -315,7 +321,7 @@ static void refuse(NSString *why)
 {
     g_refused = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
-        build_alert();
+        build_alert(why);
         UIWindow *w = gate_window();
         if (!w) { exit(0); return; }
         @try {
