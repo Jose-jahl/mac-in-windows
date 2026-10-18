@@ -8,10 +8,16 @@
 #include "Tracer.h"
 #include "Hook.h"
 #include <mach/mach.h>
+#include <mach/vm_map.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Exportada por libSystem; no se incluye OSCacheControl.h a proposito para no
+   arrastrar __builtin___clear_cache (que clang resuelve a un simbolo que iOS
+   no exporta y rompe el enlazado). */
+extern void sys_icache_invalidate(void *start, size_t len);
 
 static esp_hook_t g_hooks[MAX_HOOKS];
 static int        g_hook_count = 0;
@@ -50,20 +56,27 @@ static inline uint32_t with_pc_rel_imm(uint32_t i, int32_t imm21_in_4s)
 static bool make_writable(void *addr, size_t len)
 {
     long ps = sysconf(_SC_PAGESIZE);
-    if (ps <= 0) ps = 4096;
+    if (ps <= 0) ps = 0x4000;
     uintptr_t start = ((uintptr_t)addr) & ~((uintptr_t)ps - 1);
     uintptr_t end   = ((uintptr_t)addr + len + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
-    if (mprotect((void *)start, (size_t)(end - start), PROT_READ | PROT_WRITE) != 0)
-        return false;
-    return true;
+    // En iOS el __TEXT del binario principal esta firmado y mprotect(RW) lo
+    // rechaza. VM_PROT_COPY fuerza copy-on-write: una copia privada escribible
+    // de la pagina, que es como se parchea codigo firmado sin jailbreak
+    // (Frida/Dobby). Requiere get-task-allow, que traen las apps dev-signed.
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)start,
+                                  (vm_size_t)(end - start), FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    return kr == KERN_SUCCESS;
 }
 static void make_executable(void *addr, size_t len)
 {
     long ps = sysconf(_SC_PAGESIZE);
-    if (ps <= 0) ps = 4096;
+    if (ps <= 0) ps = 0x4000;
     uintptr_t start = ((uintptr_t)addr) & ~((uintptr_t)ps - 1);
     uintptr_t end   = ((uintptr_t)addr + len + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
-    mprotect((void *)start, (size_t)(end - start), PROT_READ | PROT_EXEC);
+    vm_protect(mach_task_self(), (vm_address_t)start, (vm_size_t)(end - start),
+               FALSE, VM_PROT_READ | VM_PROT_EXEC);
+    sys_icache_invalidate(addr, len);   // coherencia I-cache tras escribir codigo
 }
 static bool patch_code(void *addr, size_t len, const void *bytes)
 {
