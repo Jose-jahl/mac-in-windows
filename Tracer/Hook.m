@@ -87,8 +87,11 @@ static bool copy_prologue(uint8_t *dst, uint8_t *src, size_t max_bytes,
                           size_t *out_bytes, const char **why)
 {
     size_t n = 0;
-    const size_t kMaxInstr = 8;
-    while (n < kMaxInstr && n + 4 <= max_bytes) {
+    // Copiar hasta tener al menos 16 bytes (4 instrucciones), que es lo que
+    // ocupa el salto parcheado. OJO: el bug original comparaba n (BYTES) contra
+    // un contador de 8 INSTRUCCIONES, asi que copiaba solo 8 B (2 instr) y el
+    // salto de 16 B pisaba codigo sin reubicar -> el hook quedaba inerte/crash.
+    while (n < 16 && n + 4 <= max_bytes) {
         uint32_t insn;
         memcpy(&insn, src + n, 4);
         if (is_branch(insn)) {
