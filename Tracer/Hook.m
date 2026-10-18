@@ -75,7 +75,7 @@ static void make_executable(void *addr, size_t len)
     uintptr_t start = ((uintptr_t)addr) & ~((uintptr_t)ps - 1);
     uintptr_t end   = ((uintptr_t)addr + len + (uintptr_t)ps - 1) & ~((uintptr_t)ps - 1);
     vm_protect(mach_task_self(), (vm_address_t)start, (vm_size_t)(end - start),
-               FALSE, VM_PROT_READ | VM_PROT_EXEC);
+               FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     sys_icache_invalidate(addr, len);   // coherencia I-cache tras escribir codigo
 }
 static bool patch_code(void *addr, size_t len, const void *bytes)
