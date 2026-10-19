@@ -12,6 +12,19 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.7 (19 oct) - OPCIONES A FABRICA EN CADA ARRANQUE + FIX DEL PARPADEO.
+ *    - pedido del operador: "que las opciones aparezcan desactivadas cada vez
+ *      que se inicia el juego" (se quedaban guardadas como se dejaron). Al
+ *      cargar el dylib se borran las claves de opciones (mm_esp_* y
+ *      mm_stream) y todo arranca apagado, incluidos los filtros
+ *      Jugadores/Bots (antes venian en ON por defecto). Se conservan solo las
+ *      POSICIONES (boton y panel): son comodidad de arrastre, no opciones.
+ *    - fix del parpadeo del menu: mm_place_ui() volvia a llamar a
+ *      mm_set_panel(YES) en CADA latido (0.5 s al principio, 5 s despues) y
+ *      eso re-disparaba la animacion de entrada desde alpha 0 con el panel
+ *      abierto: el menu parecia parpadear. Ahora el latido solo se asegura de
+ *      que el panel siga visible (alpha 1) sin animar de nuevo.
+ *
  *  v0.2.6 (19 oct) - SALUD VISIBLE (pedido del test de la 0.2.5: "la salud de
  *  los jugadores no se ve"; el resto bien).
  *    - la barra de salud ya no depende del toggle "Cajas" (en la 0.2.5 se
@@ -128,7 +141,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.6-esp"
+#define MODMENU_VERSION     "0.2.7-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -144,7 +157,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.6";
+const char *modmenu_build_id = "modmenu-esp-0.2.7";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -557,6 +570,26 @@ static float mm_def_float(NSString *k, float d)
     return [ud floatForKey:k];
 }
 
+/* v0.2.7: las OPCIONES no se recuerdan entre partidas. En cada arranque del
+   juego se borran las claves de opciones y todo vuelve al estado de fabrica
+   (apagado). El operador lo pidio asi: preferia que nada quedara activado de
+   la sesion anterior. Las POSICIONES del boton y del panel SI se conservan:
+   son comodidad de arrastre, no opciones. */
+static void mm_reset_options(void)
+{
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
+                           @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
+                           @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
+                           @"mm_esp_fill", @"mm_esp_range", @"mm_stream" ];
+        for (NSString *k in keys) [ud removeObjectForKey:k];
+        [ud synchronize];
+    } @catch (NSException *e) {
+        NSLog(@"[MODMENU] reset de opciones: %@", e.reason);
+    }
+}
+
 /*---------------------------------------------------------------------------
  * ESP v0.2.3 - motor de dibujo.
  *  El CADisplayLink llama a mm_esp_frame() ~30 veces por segundo: los datos
@@ -927,8 +960,8 @@ static void mm_esp_collect_real(void)
 
     float rango = mm_def_float(@"mm_esp_range", 300.0f);
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
-    BOOL conJug    = mm_def_bool(@"mm_esp_players", YES); /* v0.2.4 */
-    BOOL conBots   = mm_def_bool(@"mm_esp_bots", YES);    /* v0.2.4 */
+    BOOL conJug    = mm_def_bool(@"mm_esp_players", NO);  /* v0.2.7: a fabrica */
+    BOOL conBots   = mm_def_bool(@"mm_esp_bots", NO);     /* v0.2.7: a fabrica */
     int drawn = 0;
     MMEspBox nuevos[MM_MAX_BOXES];
     memset(nuevos, 0, sizeof(nuevos));
@@ -1219,6 +1252,7 @@ static void mm_build_ui(void)
     if (g_esp == nil) {
         g_esp = [[MMCanvasView alloc] initWithFrame:CGRectZero];
         g_esp.backgroundColor = [UIColor clearColor];
+        g_esp.opaque = NO;   /* v0.2.7: sin fondo opaco (evita restos/parpadeo) */
         g_esp.userInteractionEnabled = NO;
         g_esp.hidden = YES;
     }
@@ -1305,7 +1339,10 @@ static void mm_build_ui(void)
     g_sub_switches = [NSMutableArray array];
     for (NSUInteger i = 0; i < keys.count; i++) {
         UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-        sw.on = mm_def_bool(keys[i], (i == 2 || i == 3)); /* jugadores/bots ON */
+        /* v0.2.7: todo arranca apagado, tambien Jugadores/Bots (antes venian
+           ON por defecto). Con el reseteo de arranque la clave casi nunca
+           existe al construir; el default queda como red de seguridad. */
+        sw.on = mm_def_bool(keys[i], NO);
         sw.onTintColor = mm_verde();
         sw.accessibilityIdentifier = keys[i];
         /* v0.2.5: 10 filas; el switch se reduce al 90% para que la fila de
@@ -1493,6 +1530,7 @@ static BOOL mm_place_ui(void)
         if (g_root == nil) {
             g_root = [[MMPassView alloc] initWithFrame:host.bounds];
             g_root.backgroundColor = [UIColor clearColor];
+            g_root.opaque = NO;  /* v0.2.7: capa transparente limpia */
             g_root.autoresizingMask = UIViewAutoresizingFlexibleWidth |
                                       UIViewAutoresizingFlexibleHeight;
         }
@@ -1565,7 +1603,19 @@ static BOOL mm_place_ui(void)
         }
 
         mm_apply_stream();
-        if (g_panel_open) mm_set_panel(YES);
+        /* v0.2.7: NO re-abrir el panel en cada latido. Antes, con el panel
+           abierto, cada latido (0.5 s al principio; 5 s despues) volvia a
+           llamar a mm_set_panel(YES), que re-disparaba la animacion de
+           entrada desde alpha 0: el menu parecia parpadear. Ahora solo se
+           asegura de que siga visible, sin animar de nuevo (si el latido
+           recoloco la UI, se reposiciona con la memoria de siempre). */
+        if (g_panel_open && g_panel != nil) {
+            if (recolocar) mm_position_panel();
+            if (g_panel.hidden || g_panel.alpha < 0.95) {
+                g_panel.hidden = NO;
+                g_panel.alpha = 1.0;
+            }
+        }
 
         return YES;
     } @catch (NSException *e) {
@@ -1614,9 +1664,10 @@ static void mm_tick(void)
 __attribute__((constructor)) static void modmenu_init(void)
 {
     g_t0 = [NSDate date].timeIntervalSinceReferenceDate;
-    NSLog(@"%s dylib cargada v%s  path=%s  pid=%d",
+    mm_reset_options();   /* v0.2.7: opciones a fabrica en cada arranque */
+    NSLog(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
           MM_TAG, MODMENU_VERSION, mm_my_path(), (int)getpid());
-    mm_write_status(@"arranque");
+    mm_write_status(@"arranque (opciones a fabrica)");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ mm_tick(); });
