@@ -23,7 +23,10 @@
  *      valido con longitud 1..63 como GL); si no hay nombre valido se queda
  *      BOT / JUGADOR;
  *    - si el puntero de GetHealth no valida, el ESP sigue funcionando sin
- *      salud (no tumba la cadena).
+ *      salud (no tumba la cadena);
+ *    - identidad (19 oct): menu en verde + marca de agua "Desarrollado por
+ *      Jose Lopez @l0pez9801" abajo a la izquierda (tenue, no recibe toques,
+ *      se atenua con Stream Mode).
  *
  *  v0.2.3 (19 oct) - ESP parte 2: DATOS REALES.
  *    - fuera las cajas DEMO; con el ESP maestro ON se leen los jugadores de
@@ -102,6 +105,7 @@ static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
 static UIView   *g_panel = nil;   /* panel desplegable                        */
 static UISegmentedControl *g_seg = nil;
+static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
 static UIView   *g_p_misc = nil;
 static UIView   *g_p_info = nil;
@@ -964,6 +968,12 @@ static void mm_write_status(NSString *nota)
  * Construccion de la UI (la primera vez; luego se reutiliza)
  *--------------------------------------------------------------------------*/
 
+/* Verde de identidad (19 oct): tema del menu + detalles. */
+static UIColor *mm_verde(void)
+{
+    return [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:1.0];
+}
+
 /* Fila generica del panel: titulo a la izquierda + control a la derecha. */
 static UIView *mm_row(NSString *titulo, UIView *ctrl)
 {
@@ -984,6 +994,7 @@ static UIView *mm_switch_row(NSString *titulo, NSString *key, BOOL def)
 {
     UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
     sw.on = mm_def_bool(key, def);
+    sw.onTintColor = mm_verde();
     sw.accessibilityIdentifier = key;
     [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
         forControlEvents:UIControlEventValueChanged];
@@ -997,12 +1008,13 @@ static void mm_build_ui(void)
     if (g_btn == nil) {
         g_btn = [UIButton buttonWithType:UIButtonTypeCustom];
         g_btn.bounds = CGRectMake(0, 0, 54.0, 54.0);
-        g_btn.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+        g_btn.backgroundColor = [UIColor colorWithRed:0.02 green:0.10 blue:0.04 alpha:0.72];
         g_btn.layer.cornerRadius = 27.0;
-        g_btn.layer.borderWidth = 1.0;
-        g_btn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.6].CGColor;
+        g_btn.layer.borderWidth = 1.5;
+        g_btn.layer.borderColor = mm_verde().CGColor;
         [g_btn setTitle:@"MENU" forState:UIControlStateNormal];
-        [g_btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [g_btn setTitleColor:[UIColor colorWithRed:0.78 green:1.0 blue:0.84 alpha:1.0]
+                    forState:UIControlStateNormal];
         g_btn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
         [g_btn addTarget:[MMTargets shared] action:@selector(onTap)
         forControlEvents:UIControlEventTouchUpInside];
@@ -1029,24 +1041,24 @@ static void mm_build_ui(void)
 
     /* --- panel --- */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MM_PANEL_W, MM_PANEL_H)];
-    g_panel.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.90];
+    g_panel.backgroundColor = [UIColor colorWithRed:0.02 green:0.09 blue:0.04 alpha:0.93];
     g_panel.layer.cornerRadius = 14.0;
-    g_panel.layer.borderWidth = 1.0;
-    g_panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
+    g_panel.layer.borderWidth = 1.2;
+    g_panel.layer.borderColor = [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.65].CGColor;
     g_panel.clipsToBounds = YES;
     g_panel.hidden = YES;
     g_panel.alpha = 0.0;
 
     UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 9.0, 220.0, 20.0)];
     h.text = [NSString stringWithFormat:@"ModMenu %s", MODMENU_VERSION];
-    h.textColor = [UIColor whiteColor];
+    h.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
     h.font = [UIFont boldSystemFontOfSize:15.0];
     [g_panel addSubview:h];
 
     UIButton *x = [UIButton buttonWithType:UIButtonTypeCustom];
     x.frame = CGRectMake(MM_PANEL_W - 46.0, 5.0, 40.0, 28.0);
     [x setTitle:@"X" forState:UIControlStateNormal];
-    [x setTitleColor:[UIColor colorWithWhite:0.85 alpha:1.0] forState:UIControlStateNormal];
+    [x setTitleColor:[UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0] forState:UIControlStateNormal];
     x.titleLabel.font = [UIFont boldSystemFontOfSize:15.0];
     [x addTarget:[MMTargets shared] action:@selector(onClose)
         forControlEvents:UIControlEventTouchUpInside];
@@ -1055,6 +1067,17 @@ static void mm_build_ui(void)
     g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"MISC", @"INFO"]];
     g_seg.frame = CGRectMake(10.0, 36.0, MM_PANEL_W - 20.0, 30.0);
     g_seg.selectedSegmentIndex = 0;
+    if ([g_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        g_seg.selectedSegmentTintColor =
+            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
+    else
+        g_seg.tintColor = mm_verde();
+    [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor colorWithWhite:0.88 alpha:1.0] }
+                          forState:UIControlStateNormal];
+    [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor whiteColor] }
+                          forState:UIControlStateSelected];
     [g_seg addTarget:[MMTargets shared] action:@selector(onSeg:)
         forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:g_seg];
@@ -1077,6 +1100,7 @@ static void mm_build_ui(void)
     for (NSUInteger i = 0; i < keys.count; i++) {
         UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
         sw.on = mm_def_bool(keys[i], NO);
+        sw.onTintColor = mm_verde();
         sw.accessibilityIdentifier = keys[i];
         [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
             forControlEvents:UIControlEventValueChanged];
@@ -1106,6 +1130,8 @@ static void mm_build_ui(void)
     sl.maximumValue = 300.0f;
     sl.value = rng;
     sl.accessibilityIdentifier = @"mm_esp_range";
+    sl.tintColor = mm_verde();
+    sl.thumbTintColor = [UIColor colorWithRed:0.80 green:1.0 blue:0.86 alpha:1.0];
     [sl addTarget:[MMTargets shared] action:@selector(onSlider:)
         forControlEvents:UIControlEventValueChanged];
     [g_p_esp addSubview:sl];
@@ -1159,6 +1185,7 @@ static void mm_apply_stream(void)
 {
     BOOL on = mm_def_bool(@"mm_stream", NO);
     if (g_btn != nil) g_btn.alpha = on ? 0.15 : 1.0;
+    if (g_marca != nil) g_marca.alpha = on ? 0.15 : 1.0;
     if (on && g_panel_open) mm_set_panel(NO);
 }
 
@@ -1286,6 +1313,30 @@ static BOOL mm_place_ui(void)
             [g_panel removeFromSuperview];
             [g_root addSubview:g_panel];
             recolocar = YES;
+        }
+
+        /* marca de agua (v0.2.4): credito tenue abajo a la izquierda. No
+           recibe toques (UILabel no interactivo => el juego sigue vivo) y
+           va POR DEBAJO del boton/panel (indice 1; el lienzo esta en 0). */
+        if (g_marca == nil) {
+            g_marca = [[UILabel alloc] init];
+            g_marca.text = @"Desarrollado por Jose Lopez  @l0pez9801";
+            g_marca.font = [UIFont boldSystemFontOfSize:10.0];
+            g_marca.textColor =
+                [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.38];
+            g_marca.backgroundColor = [UIColor clearColor];
+            g_marca.userInteractionEnabled = NO;
+        }
+        if (g_marca.superview != g_root) {
+            [g_marca removeFromSuperview];
+            [g_root insertSubview:g_marca atIndex:1];
+        }
+        [g_marca sizeToFit];
+        {
+            CGRect rm = g_marca.frame;
+            rm.origin.x = 12.0;
+            rm.origin.y = g_root.bounds.size.height - rm.size.height - 10.0;
+            g_marca.frame = rm;
         }
 
         if (recolocar) {
