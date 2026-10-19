@@ -12,6 +12,19 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.4 (19 oct) - ESP parte 3: SALUD + NOMBRE REAL.
+ *    - barra de salud real: con el toggle "Salud" ON se llama a GetHealth
+ *      del juego (VA 0x1018B5524, la misma llamada que hace el mod de
+ *      referencia) solo para jugadores que ya pasaron todas las guardas; la
+ *      vida maxima sale del objeto de salud (*(pawn+0x78) + 0x38, tambien
+ *      como GL), todo con las mismas lecturas protegidas;
+ *    - nombre real del jugador en la etiqueta: string C# de la entidad
+ *      (entidad+0x160 -> longitud en +0x10 -> caracteres UTF-16 en +0x14,
+ *      valido con longitud 1..63 como GL); si no hay nombre valido se queda
+ *      BOT / JUGADOR;
+ *    - si el puntero de GetHealth no valida, el ESP sigue funcionando sin
+ *      salud (no tumba la cadena).
+ *
  *  v0.2.3 (19 oct) - ESP parte 2: DATOS REALES.
  *    - fuera las cajas DEMO; con el ESP maestro ON se leen los jugadores de
  *      verdad y se dibujan sus cajas (color segun jugador/bot, mas etiqueta y
@@ -72,7 +85,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.3-esp"
+#define MODMENU_VERSION     "0.2.4-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -82,7 +95,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.3";
+const char *modmenu_build_id = "modmenu-esp-0.2.4";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -104,7 +117,16 @@ static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 24
-typedef struct { CGFloat x, y, w, h; float dist; int robot; int alive; } MMEspBox;
+typedef struct {
+    CGFloat x, y, w, h;
+    float   dist;
+    float   hp;                 /* v0.2.4: salud actual (-1 = sin dato) */
+    float   hpMax;              /* v0.2.4: salud maxima (100 por defecto)*/
+    int     robot;
+    int     alive;
+    int     hasName;            /* v0.2.4: 1 si name trae nombre real   */
+    char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
+} MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
 static UIView      *g_esp   = nil;    /* lienzo MMCanvasView              */
@@ -160,6 +182,7 @@ static void mm_probe_run(void);
     BOOL conNombre = mm_def_bool(@"mm_esp_name", NO);
     BOOL conDist   = mm_def_bool(@"mm_esp_dist", NO);
     BOOL conLineas = mm_def_bool(@"mm_esp_lines", NO);
+    BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
 
     CGContextSetLineWidth(ctx, 1.6);
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
@@ -180,13 +203,36 @@ static void mm_probe_run(void);
         CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
         CGContextStrokeRect(ctx, r);
 
+        /* v0.2.4: barra de salud a la izquierda de la caja */
+        if (conSalud && b->hp >= 0.0f && b->hpMax > 1.0f) {
+            float fr = b->hp / b->hpMax;
+            if (fr < 0.0f) fr = 0.0f;
+            if (fr > 1.0f) fr = 1.0f;
+            CGFloat bwv = 3.0;
+            CGFloat bx  = r.origin.x - 6.0;
+            CGFloat by  = r.origin.y;
+            CGFloat bhh = r.size.height;
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.45);
+            CGContextFillRect(ctx, CGRectMake(bx, by, bwv, bhh));
+            CGFloat rr2 = 1.00, gg2 = 0.25;
+            if (fr > 0.5f)       { rr2 = 0.25; gg2 = 1.00; }
+            else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.80; }
+            CGFloat fh2 = bhh * fr;
+            CGContextSetRGBFillColor(ctx, rr2, gg2, 0.25, 0.95);
+            CGContextFillRect(ctx, CGRectMake(bx, by + bhh - fh2, bwv, fh2));
+        }
+
         NSDictionary *attr = @{ NSFontAttributeName: f,
             NSForegroundColorAttributeName:
                 [UIColor colorWithRed:cr green:cg blue:cb alpha:1.0] };
-        if (conNombre)
-            [(b->robot ? @"BOT" : @"JUGADOR")
-             drawAtPoint:CGPointMake(r.origin.x, r.origin.y - 15.0)
+        if (conNombre) {
+            NSString *nm = nil;
+            if (b->hasName) nm = [NSString stringWithUTF8String:b->name];
+            if (nm == nil || nm.length == 0)
+                nm = (b->robot ? @"BOT" : @"JUGADOR");
+            [nm drawAtPoint:CGPointMake(r.origin.x, r.origin.y - 15.0)
              withAttributes:attr];
+        }
         if (conDist && b->dist > 0.5f)
             [[NSString stringWithFormat:@"%d m", (int)(b->dist + 0.5f)]
              drawAtPoint:CGPointMake(r.origin.x, CGRectGetMaxY(r) + 2.0)
@@ -505,6 +551,7 @@ static void mm_probe_run(void)
 #define VA_W2C_INJ          0x108BDABC0ULL  /* worldToCameraMatrix_Injected     */
 #define VA_PROJ_INJ         0x108BDACF8ULL  /* projectionMatrix_Injected        */
 #define VA_TRANSPOS         0x108C63B10ULL  /* Transform.get_position_Injected  */
+#define VA_HEALTH           0x1018B5524ULL  /* GetHealth() (x0=pawn -> w0 int)  */
 
 #define OFF_GP_LIST         0x178   /* gameplay -> List<Pawn>               */
 #define OFF_LIST_ITEMS      0x10    /* List -> array IL2CPP                 */
@@ -514,10 +561,16 @@ static void mm_probe_run(void)
 #define OFF_PAWN_TRANSFORM  0x308   /* pawn -> Transform                    */
 #define OFF_PAWN_ENTITY     0x5C0   /* pawn -> entidad                      */
 #define OFF_ENT_ROBOT       0x298   /* entidad -> byte robot                */
+#define OFF_PAWN_MODEL      0x78    /* pawn -> objeto de salud              */
+#define OFF_MODEL_MAXHP     0x38    /* objeto de salud -> float vida maxima */
+#define OFF_ENT_NAME        0x160   /* entidad -> string C# del nombre      */
+#define OFF_STR_LEN         0x10    /* string -> int longitud               */
+#define OFF_STR_CHARS       0x14    /* string -> chars UTF-16               */
 
 typedef void *(*MMGetPtrFn)(void);
 typedef void  (*MMMatFn)(void *self, void *out64);
 typedef void  (*MMVec3Fn)(void *self, float *out3);
+typedef int32_t (*MMGetIntFn)(void *self);
 
 static uintptr_t  g_game_base    = 0;
 static MMGetPtrFn g_fp_gameplay  = NULL;
@@ -526,6 +579,7 @@ static MMGetPtrFn g_fp_maincam   = NULL;
 static MMMatFn    g_fp_w2c       = NULL;
 static MMMatFn    g_fp_proj      = NULL;
 static MMVec3Fn   g_fp_transpos  = NULL;
+static MMGetIntFn g_fp_health    = NULL; /* opcional: si no valida, sin salud */
 static int        g_fp_state     = -1;  /* -1 sin probar / 0 error / 1 ok */
 static NSString  *g_esp_diag     = nil; /* motivo del ultimo fallo / ok   */
 static int        g_esp_players  = 0;   /* ultima cuenta de la lista      */
@@ -595,6 +649,7 @@ static void mm_game_resolve(void)
             MMMatFn    fp3 = (MMMatFn)(b + MM_GAME_DELTA(VA_W2C_INJ));
             MMMatFn    fp4 = (MMMatFn)(b + MM_GAME_DELTA(VA_PROJ_INJ));
             MMVec3Fn   fp5 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
+            MMGetIntFn fp6 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_HEALTH));
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
@@ -604,6 +659,9 @@ static void mm_game_resolve(void)
                 !mm_ptr_en_imagen((const void *)fp5, b))
                 continue;
 
+            /* el de salud es OPCIONAL: si no valida, el ESP sigue sin barra */
+            BOOL hpOk = mm_ptr_en_imagen((const void *)fp6, b);
+
             g_game_base    = b;
             g_fp_gameplay  = fp0;
             g_fp_localpawn = fp1;
@@ -611,15 +669,17 @@ static void mm_game_resolve(void)
             g_fp_w2c       = fp3;
             g_fp_proj      = fp4;
             g_fp_transpos  = fp5;
+            g_fp_health    = hpOk ? fp6 : NULL;
             g_fp_state     = 1;
-            NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p",
+            NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
                   (void *)g_fp_maincam,
                   (void *)g_fp_gameplay,
                   (void *)g_fp_localpawn,
                   (void *)g_fp_transpos,
                   (void *)g_fp_w2c,
-                  (void *)g_fp_proj);
+                  (void *)g_fp_proj,
+                  hpOk ? "ok" : "no");
             return;
         }
 
@@ -730,6 +790,7 @@ static void mm_esp_collect_real(void)
     }
 
     float rango = mm_def_float(@"mm_esp_range", 150.0f);
+    BOOL conSalud = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
     int drawn = 0;
 
     for (int i = 0; i < loopn && drawn < MM_MAX_BOXES; i++) {
@@ -774,19 +835,74 @@ static void mm_esp_collect_real(void)
         if (bh < 4.0 || bh > 2.0 * H) continue;
         CGFloat bw = bh * 0.45;
 
+        /* --- v0.2.4: salud (solo con el toggle ON; misma llamada que GL,
+           despues de todas las guardas: pawn mapeado y vivo) --- */
+        float hp = -1.0f;
+        float hpMax = 100.0f;
+        if (conSalud && g_fp_health != NULL) {
+            uint64_t pk = 0;
+            if (mm_r64((uintptr_t)pawn, &pk)) {
+                int32_t h = g_fp_health((void *)(uintptr_t)pawn);
+                if (h >= 0 && h <= 1000000) hp = (float)h;
+            }
+            uint64_t mdl = 0;
+            if (mm_r64((uintptr_t)pawn + OFF_PAWN_MODEL, &mdl) && mdl != 0) {
+                float m = 0.0f;
+                if (mm_vm_read((uintptr_t)mdl + OFF_MODEL_MAXHP, &m, sizeof(m)) &&
+                    isfinite(m) && m > 0.5f && m < 100000.0f)
+                    hpMax = m;
+            }
+        }
+
+        /* --- v0.2.4: nombre real (entidad+0x160; string C#: len 1..63) --- */
+        char nm[64] = { 0 };
+        if (ent != 0) {
+            uint64_t so = 0;
+            if (mm_r64((uintptr_t)ent + OFF_ENT_NAME, &so) && so != 0) {
+                int32_t slen = 0;
+                if (mm_vm_read((uintptr_t)so + OFF_STR_LEN, &slen, sizeof(slen)) &&
+                    slen >= 1 && slen <= 63) {
+                    uint16_t wbuf[64];
+                    if (mm_vm_read((uintptr_t)so + OFF_STR_CHARS, wbuf,
+                                   (size_t)slen * 2)) {
+                        BOOL legible = YES;
+                        for (int32_t c = 0; c < slen; c++) {
+                            uint16_t ch = wbuf[c];
+                            if (ch < 0x20 || ch == 0x7F) { legible = NO; break; }
+                        }
+                        if (legible) {
+                            NSString *s = [[NSString alloc]
+                                initWithCharacters:(const unichar *)wbuf
+                                length:(NSUInteger)slen];
+                            const char *u8 = s.UTF8String;
+                            if (u8 != NULL) {
+                                strncpy(nm, u8, sizeof(nm) - 1);
+                                nm[sizeof(nm) - 1] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         MMEspBox *b = &g_boxes[drawn];
         b->x = cab.x - bw / 2.0;
         b->y = cab.y;
         b->w = bw;
         b->h = bh;
         b->dist = dist;
+        b->hp = hp;
+        b->hpMax = hpMax;
         b->robot = robot;
         b->alive = 1;
+        b->hasName = (nm[0] != 0) ? 1 : 0;
+        memcpy(b->name, nm, sizeof(b->name));
         drawn++;
     }
 
     g_box_count = drawn;
-    g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d", total, drawn];
+    g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d hp=%s",
+                  total, drawn, (g_fp_health != NULL) ? "ok" : "no"];
 }
 
 /* Reescritura atomica del archivo de estado que se puede leer sin syslog. */
@@ -995,7 +1111,7 @@ static void mm_build_ui(void)
     [g_p_esp addSubview:sl];
 
     UILabel *na = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 292.0, 272.0, 40.0)];
-    na.text = @"v0.2.3: datos reales (rojo = jugador, ambar = bot). Si no aparecen cajas mira la pagina INFO (linea esp2) o Documents/modmenu_status.txt.";
+    na.text = @"v0.2.4: datos reales + salud y nombre real. Rojo = jugador, ambar = bot. Si no aparecen cajas mira INFO (esp2) o modmenu_status.txt.";
     na.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
     na.font = [UIFont systemFontOfSize:10.5];
     na.numberOfLines = 3;
