@@ -12,6 +12,24 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.5 (19 oct) - ESP parte 4: CAJA DE CUERPO COMPLETO + TOGGLES + LINEAS.
+ *    - la caja ya no se queda pegada a la cabeza: la posicion del pawn cae a
+ *      la altura del cuello (verificado en captura), y el +0.5 de clip del mod
+ *      de referencia solo movia la cabeza unos pixeles (caja diminuta). Ahora
+ *      se proyectan dos puntos del mundo, cabeza (pos + 0.25 m) y pies
+ *      (pos - 1.52 m), asi que la caja cubre todo el cuerpo a cualquier
+ *      distancia;
+ *    - el toggle "Cajas" ahora SI manda: el lienzo no leia mm_esp_box y
+ *      dibujaba las cajas siempre. Con Cajas OFF se apagan caja, relleno y
+ *      barra de salud ligada a la caja (nombres, distancia y lineas siguen
+ *      siendo independientes);
+ *    - nuevo toggle "Lineas desde arriba": con ON las lineas salen del borde
+ *      superior de la pantalla y terminan en la cabeza de la caja; con OFF
+ *      (por defecto) salen desde abajo y terminan en los pies, como antes;
+ *    - auditoria de los 9 toggles anteriores: todos tienen efecto real en el
+ *      escaneo o en el lienzo (Jugadores/Bots en el escaneo; el resto al
+ *      pintar).
+ *
  *  v0.2.4 (19 oct) - ESP parte 3: SALUD + NOMBRE REAL.
  *    - barra de salud real: con el toggle "Salud" ON se llama a GetHealth
  *      del juego (VA 0x1018B5524, la misma llamada que hace el mod de
@@ -96,7 +114,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.4-esp"
+#define MODMENU_VERSION     "0.2.5-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -104,9 +122,15 @@
 #define MM_PANEL_W          300.0
 #define MM_PANEL_H          430.0
 
+/* v0.2.5: la posicion del pawn proyecta a la altura del cuello/cabeza. La
+   caja se completa con dos puntos del mundo para cubrir el cuerpo entero:
+   +0.25 m hasta la coronilla y -1.52 m hasta los pies (1.77 m de alto). */
+#define MM_BOX_TOP_UP       0.25f
+#define MM_BOX_FEET_DN      1.52f
+
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.4";
+const char *modmenu_build_id = "modmenu-esp-0.2.5";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -193,9 +217,11 @@ static void mm_probe_run(void);
     UIFont *f = [UIFont fontWithName:@"Menlo-Bold" size:11.0];
     if (f == nil) f = [UIFont boldSystemFontOfSize:11.0];
 
+    BOOL conCajas  = mm_def_bool(@"mm_esp_box", NO);          /* v0.2.5 */
     BOOL conNombre = mm_def_bool(@"mm_esp_name", NO);
     BOOL conDist   = mm_def_bool(@"mm_esp_dist", NO);
     BOOL conLineas = mm_def_bool(@"mm_esp_lines", NO);
+    BOOL lineasTop = mm_def_bool(@"mm_esp_lines_top", NO);    /* v0.2.5 */
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
     BOOL conRelleno = mm_def_bool(@"mm_esp_fill", NO);
 
@@ -212,47 +238,59 @@ static void mm_probe_run(void);
         if (b->robot) { cr = 1.00; cg = 0.72; cb = 0.20; }  /* bot: ambar     */
 
         if (conLineas) {
+            /* v0.2.5: origen elegible. OFF = borde inferior -> pies de la caja;
+               ON = borde superior -> cabeza de la caja. */
+            CGPoint desde = CGPointMake(bs.size.width / 2.0,
+                                        lineasTop ? 0.0 : bs.size.height);
+            CGPoint hasta = CGPointMake(CGRectGetMidX(r),
+                                        lineasTop ? CGRectGetMinY(r)
+                                                  : CGRectGetMaxY(r));
             /* v0.2.4: contorno negro + trazo grueso (antes se veia debil) */
             CGContextSetLineWidth(ctx, 4.2);
             CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.45);
-            CGContextMoveToPoint(ctx, bs.size.width / 2.0, bs.size.height);
-            CGContextAddLineToPoint(ctx, CGRectGetMidX(r), CGRectGetMaxY(r));
+            CGContextMoveToPoint(ctx, desde.x, desde.y);
+            CGContextAddLineToPoint(ctx, hasta.x, hasta.y);
             CGContextStrokePath(ctx);
             CGContextSetLineWidth(ctx, 1.8);
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
-            CGContextMoveToPoint(ctx, bs.size.width / 2.0, bs.size.height);
-            CGContextAddLineToPoint(ctx, CGRectGetMidX(r), CGRectGetMaxY(r));
+            CGContextMoveToPoint(ctx, desde.x, desde.y);
+            CGContextAddLineToPoint(ctx, hasta.x, hasta.y);
             CGContextStrokePath(ctx);
         }
 
-        if (conRelleno) {
-            CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.12);
-            CGContextFillRect(ctx, r);
-        }
-        CGContextSetLineWidth(ctx, 3.4);
-        CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
-        CGContextStrokeRect(ctx, r);
-        CGContextSetLineWidth(ctx, 1.7);
-        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
-        CGContextStrokeRect(ctx, r);
+        /* v0.2.5: TODO lo que cuelga de la caja respeta el toggle "Cajas".
+           Antes se dibujaba siempre (el switch parecia no responder). Los
+           nombres y la distancia quedan fuera: son toggles independientes. */
+        if (conCajas) {
+            if (conRelleno) {
+                CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.12);
+                CGContextFillRect(ctx, r);
+            }
+            CGContextSetLineWidth(ctx, 3.4);
+            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
+            CGContextStrokeRect(ctx, r);
+            CGContextSetLineWidth(ctx, 1.7);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+            CGContextStrokeRect(ctx, r);
 
-        /* v0.2.4: barra de salud a la izquierda de la caja */
-        if (conSalud && b->hp >= 0.0f && b->hpMax > 1.0f) {
-            float fr = b->hp / b->hpMax;
-            if (fr < 0.0f) fr = 0.0f;
-            if (fr > 1.0f) fr = 1.0f;
-            CGFloat bwv = 3.0;
-            CGFloat bx  = r.origin.x - 6.0;
-            CGFloat by  = r.origin.y;
-            CGFloat bhh = r.size.height;
-            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.45);
-            CGContextFillRect(ctx, CGRectMake(bx, by, bwv, bhh));
-            CGFloat rr2 = 1.00, gg2 = 0.25;
-            if (fr > 0.5f)       { rr2 = 0.25; gg2 = 1.00; }
-            else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.80; }
-            CGFloat fh2 = bhh * fr;
-            CGContextSetRGBFillColor(ctx, rr2, gg2, 0.25, 0.95);
-            CGContextFillRect(ctx, CGRectMake(bx, by + bhh - fh2, bwv, fh2));
+            /* v0.2.4: barra de salud a la izquierda de la caja */
+            if (conSalud && b->hp >= 0.0f && b->hpMax > 1.0f) {
+                float fr = b->hp / b->hpMax;
+                if (fr < 0.0f) fr = 0.0f;
+                if (fr > 1.0f) fr = 1.0f;
+                CGFloat bwv = 3.0;
+                CGFloat bx  = r.origin.x - 6.0;
+                CGFloat by  = r.origin.y;
+                CGFloat bhh = r.size.height;
+                CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.45);
+                CGContextFillRect(ctx, CGRectMake(bx, by, bwv, bhh));
+                CGFloat rr2 = 1.00, gg2 = 0.25;
+                if (fr > 0.5f)       { rr2 = 0.25; gg2 = 1.00; }
+                else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.80; }
+                CGFloat fh2 = bhh * fr;
+                CGContextSetRGBFillColor(ctx, rr2, gg2, 0.25, 0.95);
+                CGContextFillRect(ctx, CGRectMake(bx, by + bhh - fh2, bwv, fh2));
+            }
         }
 
         NSDictionary *attr = @{ NSFontAttributeName: f,
@@ -758,6 +796,8 @@ static void mm_game_resolve(void)
      clip = P * view
      si !(clip.z >= 0.01) -> fuera
      cabeza: clip.y += 0.5
+             (v0.2.5: ya no se usa para la caja; la coronilla y los pies se
+              proyectan como puntos del mundo con MM_BOX_TOP_UP/FEET_DN)
      ndc  = clip.xyz / clip.w        (si |w| <= 0.001 -> 0)
      px   = ndc.x + W/2 + ndc.x*(W/2)
      py   = ndc.y + H/2 - ndc.y*(H/2) */
@@ -900,15 +940,25 @@ static void mm_esp_collect_real(void)
             if (dist > rango) continue;
         }
 
-        CGPoint pies, cab;
-        if (!mm_w2s(view, proj, wp, NO,  W, H, &pies)) continue;
-        if (!mm_w2s(view, proj, wp, YES, W, H, &cab))  continue;
+        /* v0.2.5: caja de cuerpo completo. La posicion del pawn proyecta a la
+           altura del cuello, no a los pies (verificado en captura): el +0.5
+           de clip que usa GL para la "cabeza" solo separaba unos pixeles y
+           dejaba un cuadrito pegado a la cara. Se proyectan dos puntos del
+           mundo, coronilla (pos + 0.25 m) y pies (pos - 1.52 m); asi la caja
+           cubre el cuerpo entero a cualquier distancia. */
+        float wpTop[3]  = { wp[0], wp[1] + MM_BOX_TOP_UP,  wp[2] };
+        float wpFeet[3] = { wp[0], wp[1] - MM_BOX_FEET_DN, wp[2] };
+        CGPoint cab, pies;
+        if (!mm_w2s(view, proj, wpTop,  NO, W, H, &cab))  continue;
+        if (!mm_w2s(view, proj, wpFeet, NO, W, H, &pies)) continue;
+        if (cab.x  < -W || cab.x  > 2.0 * W || cab.y  < -H || cab.y  > 2.0 * H) continue;
         if (pies.x < -W || pies.x > 2.0 * W || pies.y < -H || pies.y > 2.0 * H) continue;
 
         CGFloat bh = pies.y - cab.y;
         /* v0.2.4: antes 4 px dejaba fuera a los lejanos (cajas pequenas) */
-        if (bh < 1.5 || bh > 2.0 * H) continue;
+        if (bh < 3.0 || bh > 2.0 * H) continue;
         CGFloat bw = bh * 0.45;
+        CGFloat cx = (cab.x + pies.x) * 0.5;
 
         /* --- v0.2.4: salud (solo con el toggle ON; misma llamada que GL,
            despues de todas las guardas: pawn mapeado y vivo) --- */
@@ -963,7 +1013,7 @@ static void mm_esp_collect_real(void)
         MMEspBox nb;
         memset(&nb, 0, sizeof(nb));
         nb.pawn = pawn;
-        nb.x = cab.x - bw / 2.0;
+        nb.x = cx - bw / 2.0;
         nb.y = cab.y;
         nb.w = bw;
         nb.h = bh;
@@ -1014,7 +1064,7 @@ static void mm_write_status(NSString *nota)
             @"escenas=%d estado=%@\n"
             @"ventanas=%d\n"
             @"boton=%s panel=%s via=%s\n"
-            @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d rango=%d\n"
+            @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d arriba=%d rango=%d\n"
             @"stream=%d\n"
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
@@ -1031,7 +1081,8 @@ static void mm_write_status(NSString *nota)
             (int)mm_def_bool(@"mm_esp_dist", NO),
             (int)mm_def_bool(@"mm_esp_health", NO),
             (int)mm_def_bool(@"mm_esp_lines", NO),
-            (int)mm_def_float(@"mm_esp_range", 150.0f),
+            (int)mm_def_bool(@"mm_esp_lines_top", NO),
+            (int)mm_def_float(@"mm_esp_range", 300.0f),
             (int)mm_def_bool(@"mm_stream", NO),
             (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? "on" : "off",
             g_box_count,
@@ -1189,40 +1240,45 @@ static void mm_build_ui(void)
     /* --- pagina ESP --- */
     NSArray *keys = @[@"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
-                      @"mm_esp_health", @"mm_esp_lines", @"mm_esp_fill"];
+                      @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
+                      @"mm_esp_fill"];
     NSArray *titulos = @[@"ESP maestro", @"Cajas", @"Jugadores",
                          @"Bots", @"Nombres", @"Distancia",
-                         @"Salud", @"Lineas", @"Relleno"];
+                         @"Salud", @"Lineas", @"Lineas desde arriba",
+                         @"Relleno"];
     g_sub_switches = [NSMutableArray array];
     for (NSUInteger i = 0; i < keys.count; i++) {
         UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
         sw.on = mm_def_bool(keys[i], (i == 2 || i == 3)); /* jugadores/bots ON */
         sw.onTintColor = mm_verde();
         sw.accessibilityIdentifier = keys[i];
+        /* v0.2.5: 10 filas; el switch se reduce al 90% para que la fila de
+           29.5 pt no se solape con la siguiente y quepa el nuevo toggle. */
+        sw.transform = CGAffineTransformMakeScale(0.9, 0.9);
         [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
             forControlEvents:UIControlEventValueChanged];
         UIView *row = mm_row(titulos[i], sw);
-        row.frame = CGRectMake(0, (CGFloat)i * 31.5, 284.0, 31.0);
+        row.frame = CGRectMake(0, (CGFloat)i * 29.5, 284.0, 31.0);
         [g_p_esp addSubview:row];
         if (i > 0) [g_sub_switches addObject:sw];
     }
 
     float rng = mm_def_float(@"mm_esp_range", 300.0f);
 
-    UILabel *rt = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 288.0, 190.0, 18.0)];
+    UILabel *rt = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 298.0, 190.0, 18.0)];
     rt.text = @"Rango ESP (m)";
     rt.textColor = [UIColor whiteColor];
     rt.font = [UIFont systemFontOfSize:13.0];
     [g_p_esp addSubview:rt];
 
-    g_range_val = [[UILabel alloc] initWithFrame:CGRectMake(200.0, 288.0, 78.0, 18.0)];
+    g_range_val = [[UILabel alloc] initWithFrame:CGRectMake(200.0, 298.0, 78.0, 18.0)];
     g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(rng + 0.5f)];
     g_range_val.textColor = [UIColor colorWithWhite:0.8 alpha:1.0];
     g_range_val.font = [UIFont systemFontOfSize:12.0];
     g_range_val.textAlignment = NSTextAlignmentRight;
     [g_p_esp addSubview:g_range_val];
 
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, 306.0, 272.0, 30.0)];
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, 315.0, 272.0, 30.0)];
     sl.minimumValue = 20.0f;
     sl.maximumValue = 500.0f;
     sl.value = rng;
