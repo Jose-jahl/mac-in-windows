@@ -12,18 +12,30 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.3 (19 oct) - ESP parte 2: DATOS REALES.
+ *    - fuera las cajas DEMO; con el ESP maestro ON se leen los jugadores de
+ *      verdad y se dibujan sus cajas (color segun jugador/bot, mas etiqueta y
+ *      distancia opcionales y lineas opcionales);
+ *    - la cadena de datos es la del mod de referencia, verificada en el
+ *      laboratorio para la version 1.0.57 del juego: camara -> matrices de
+ *      vista/proyeccion -> gameplay -> List<Pawn> -> por cada pawn su vivo,
+ *      transform y posicion; la matematica de pantalla es identica a la suya
+ *      (misma normalizacion y mismos chequeos), para que los cuadros caigan
+ *      donde caen en su mod;
+ *    - TODAS las lecturas usan vm_read_overwrite (direccion fuera de mapa =
+ *      error, nunca crash) y los 6 punteros de funcion del juego se validan
+ *      con dladdr contra la imagen del juego ANTES de llamarlos;
+ *    - si la cadena falla en algun paso queda el motivo en la pagina INFO
+ *      (linea esp2) y en Documents/modmenu_status.txt (linea esp_real).
+ *
  *  v0.2.2 (19 oct) - ESP parte 1: MOTOR DE DIBUJO + SONDA.
  *    - capa de dibujo propia (MMCanvasView) DENTRO de la ventana del juego,
- *      por debajo del boton/panel: pinta cajas con nombre/distancia/salud a
- *      ~30 fps (CADisplayLink);
- *    - aun SIN datos reales: con el ESP maestro ON se dibujan 3 cajas DEMO en
- *      movimiento (valida el motor de dibujo en el equipo);
+ *      por debajo del boton/panel: pinta cajas con nombre/distancia a ~30 fps
+ *      (CADisplayLink);
  *    - sonda de SOLO LECTURA de la tabla methodPointers del juego: lee con
  *      vm_read_overwrite (si una direccion no vale, devuelve error en vez de
  *      tumbar la app) y comprueba que los punteros caen en el binario del
- *      juego; resultado en Documents/modmenu_status.txt (linea probe=);
- *    - la v0.2.3 conecta camara/pawns reales (objetivos ya cribados en el
- *      laboratorio con la dylib del modder).
+ *      juego; resultado en Documents/modmenu_status.txt (linea probe=).
  *
  *  v0.2.1 (19 oct) - FIX reportado en dispositivo real:
  *    - FUERA la ventana overlay propia: provocaba que la app girara a
@@ -60,7 +72,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.2-esp"
+#define MODMENU_VERSION     "0.2.3-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -70,7 +82,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.2";
+const char *modmenu_build_id = "modmenu-esp-0.2.3";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -90,9 +102,9 @@ static int   g_tries       = 0;
 static NSTimeInterval g_t0 = 0;
 static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
 
-/* --- ESP v0.2.2: lienzo + cajas + sonda --- */
+/* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 24
-typedef struct { CGFloat x, y, w, h; float dist; int alive; } MMEspBox;
+typedef struct { CGFloat x, y, w, h; float dist; int robot; int alive; } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
 static UIView      *g_esp   = nil;    /* lienzo MMCanvasView              */
@@ -110,6 +122,7 @@ static void mm_refresh_info(void);
 static void mm_write_status(NSString *nota);
 static BOOL mm_def_bool(NSString *k, BOOL d);
 static void mm_esp_frame(double t);
+static void mm_esp_collect_real(void);
 static void mm_probe_run(void);
 
 /*---------------------------------------------------------------------------
@@ -140,36 +153,41 @@ static void mm_probe_run(void);
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (ctx == NULL) return;
 
+    CGRect bs = self.bounds;
     UIFont *f = [UIFont fontWithName:@"Menlo-Bold" size:11.0];
     if (f == nil) f = [UIFont boldSystemFontOfSize:11.0];
-    NSDictionary *attr = @{ NSFontAttributeName: f,
-        NSForegroundColorAttributeName:
-            [UIColor colorWithRed:1.0 green:0.45 blue:0.45 alpha:1.0] };
 
     BOOL conNombre = mm_def_bool(@"mm_esp_name", NO);
     BOOL conDist   = mm_def_bool(@"mm_esp_dist", NO);
-    BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
+    BOOL conLineas = mm_def_bool(@"mm_esp_lines", NO);
 
     CGContextSetLineWidth(ctx, 1.6);
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
         MMEspBox *b = &g_boxes[i];
         if (!b->alive) continue;
         CGRect r = CGRectMake(b->x, b->y, b->w, b->h);
-        CGContextSetRGBStrokeColor(ctx, 1.0, 0.25, 0.25, 0.95);
-        CGContextStrokeRect(ctx, r);
-        if (conSalud) {
-            CGRect hb = CGRectMake(r.origin.x, r.origin.y - 6.0, r.size.width, 3.0);
-            CGContextSetRGBFillColor(ctx, 0.25, 1.0, 0.35, 0.9);
-            CGContextFillRect(ctx, CGRectMake(hb.origin.x, hb.origin.y,
-                                              hb.size.width * 0.7, hb.size.height));
-            CGContextSetRGBStrokeColor(ctx, 0.2, 0.6, 0.2, 0.9);
-            CGContextStrokeRect(ctx, hb);
+
+        CGFloat cr = 1.00, cg = 0.25, cb = 0.25;            /* jugador: rojo  */
+        if (b->robot) { cr = 1.00; cg = 0.72; cb = 0.20; }  /* bot: ambar     */
+
+        if (conLineas) {
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.55);
+            CGContextMoveToPoint(ctx, bs.size.width / 2.0, bs.size.height);
+            CGContextAddLineToPoint(ctx, CGRectGetMidX(r), CGRectGetMaxY(r));
+            CGContextStrokePath(ctx);
         }
+
+        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+        CGContextStrokeRect(ctx, r);
+
+        NSDictionary *attr = @{ NSFontAttributeName: f,
+            NSForegroundColorAttributeName:
+                [UIColor colorWithRed:cr green:cg blue:cb alpha:1.0] };
         if (conNombre)
-            [[NSString stringWithFormat:@"DEMO-%d", i + 1]
-             drawAtPoint:CGPointMake(r.origin.x, r.origin.y - 16.0)
+            [(b->robot ? @"BOT" : @"JUGADOR")
+             drawAtPoint:CGPointMake(r.origin.x, r.origin.y - 15.0)
              withAttributes:attr];
-        if (conDist)
+        if (conDist && b->dist > 0.5f)
             [[NSString stringWithFormat:@"%d m", (int)(b->dist + 0.5f)]
              drawAtPoint:CGPointMake(r.origin.x, CGRectGetMaxY(r) + 2.0)
              withAttributes:attr];
@@ -365,37 +383,11 @@ static float mm_def_float(NSString *k, float d)
 }
 
 /*---------------------------------------------------------------------------
- * ESP v0.2.2 - motor de dibujo.
- *  El CADisplayLink llama a mm_esp_frame() ~30 veces por segundo: decide que
- *  cajas hay y pide repintar el lienzo. Aun NO hay datos reales del juego:
- *  con el ESP maestro ON se pintan 3 cajas DEMO en movimiento (valida el
- *  motor de dibujo en el equipo). La v0.2.3 conecta camara/pawns reales.
+ * ESP v0.2.3 - motor de dibujo.
+ *  El CADisplayLink llama a mm_esp_frame() ~30 veces por segundo: los datos
+ *  del juego se leen a ~15 Hz (mm_esp_collect_real, bloque mas abajo) y el
+ *  lienzo se repinta a 30 fps. Sin el maestro ON no se toca NADA del juego.
  *--------------------------------------------------------------------------*/
-static BOOL mm_esp_collect_real(void)
-{
-    return NO;                          /* v0.2.3: camara + jugadores */
-}
-
-static void mm_esp_demo(double t)
-{
-    CGFloat W = (g_esp != nil && g_esp.bounds.size.width > 1.0)
-              ? g_esp.bounds.size.width : 800.0;
-    g_box_count = 3;
-    for (int i = 0; i < 3; i++) {
-        CGFloat bw = 42.0 + (CGFloat)i * 14.0;
-        CGFloat bh = bw * 1.9;
-        CGFloat cx = W * 0.5 + sin(t * 0.8 + (double)i * 2.1) * (110.0 + 45.0 * i);
-        CGFloat cy = 150.0 + (CGFloat)i * 115.0;
-        MMEspBox *b = &g_boxes[i];
-        b->x = cx - bw / 2.0;
-        b->y = cy - bh / 2.0;
-        b->w = bw;
-        b->h = bh;
-        b->dist = 30.0f + (float)i * 37.0f + (float)fmod(t * 8.0, 6.0);
-        b->alive = 1;
-    }
-}
-
 static void mm_esp_frame(double t)
 {
     @try {
@@ -409,7 +401,9 @@ static void mm_esp_frame(double t)
             return;
         }
         if (g_esp.hidden) g_esp.hidden = NO;
-        if (!mm_esp_collect_real()) mm_esp_demo(t);
+
+        static int s_tick = 0;              /* datos ~15 Hz, pintado a 30 fps */
+        if ((s_tick++ & 1) == 0) mm_esp_collect_real();
         [g_esp setNeedsDisplay];
     } @catch (NSException *e) {}
 }
@@ -482,6 +476,319 @@ static void mm_probe_run(void)
     }
 }
 
+/*---------------------------------------------------------------------------
+ * ESP v0.2.3 - DATOS REALES (cadena verificada para la version 1.0.57).
+ *
+ *  camera   = Camera.get_main()                     (thunk del motor)
+ *  view     = camera.worldToCameraMatrix_Injected() (4x4; x0 = camara, x1 = salida)
+ *  proj     = camera.projectionMatrix_Injected()    (4x4; x0 = camara, x1 = salida)
+ *  gameplay = GetGameplayInstance()                 (singleton)
+ *  lista    = *(gameplay + 0x178)                   List<Pawn>
+ *  items    = *(lista + 0x10)                       array IL2CPP (datos en +0x20)
+ *  n        = *(int *)(lista + 0x18)
+ *  por pawn: vivo = byte[pawn+0x548]; transform = *(pawn+0x308);
+ *            entidad = *(pawn+0x5C0); robot = byte[entidad+0x298];
+ *            pos = Transform.get_position_Injected(transform, &v3)
+ *
+ *  Lecturas SIEMPRE con vm_read_overwrite (direccion fuera de mapa = error,
+ *  no crash) y los punteros de funcion se validan con dladdr contra la
+ *  imagen del juego antes de llamarlos. La proyeccion a pantalla replica la
+ *  matematica del mod de referencia (matrices + clip.z >= 0.01 + division por
+ *  clip.w y el mismo mapeo a pixeles).
+ *--------------------------------------------------------------------------*/
+
+#define MM_GAME_DELTA(va)   ((uintptr_t)((va) - 0x100000000ULL))
+
+#define VA_GAMEPLAY         0x1023DD388ULL  /* GetGameplayInstance()            */
+#define VA_LOCALPAWN        0x1023DE550ULL  /* getLocalPawn()                   */
+#define VA_MAINCAM          0x108BDBE98ULL  /* Camera.get_main() (thunk)        */
+#define VA_W2C_INJ          0x108BDABC0ULL  /* worldToCameraMatrix_Injected     */
+#define VA_PROJ_INJ         0x108BDACF8ULL  /* projectionMatrix_Injected        */
+#define VA_TRANSPOS         0x108C63B10ULL  /* Transform.get_position_Injected  */
+
+#define OFF_GP_LIST         0x178   /* gameplay -> List<Pawn>               */
+#define OFF_LIST_ITEMS      0x10    /* List -> array IL2CPP                 */
+#define OFF_LIST_SIZE       0x18    /* List -> int size                     */
+#define OFF_ARR_DATA        0x20    /* array IL2CPP -> primer elemento      */
+#define OFF_PAWN_ALIVE      0x548   /* pawn -> byte vivo                    */
+#define OFF_PAWN_TRANSFORM  0x308   /* pawn -> Transform                    */
+#define OFF_PAWN_ENTITY     0x5C0   /* pawn -> entidad                      */
+#define OFF_ENT_ROBOT       0x298   /* entidad -> byte robot                */
+
+typedef void *(*MMGetPtrFn)(void);
+typedef void  (*MMMatFn)(void *self, void *out64);
+typedef void  (*MMVec3Fn)(void *self, float *out3);
+
+static uintptr_t  g_game_base    = 0;
+static MMGetPtrFn g_fp_gameplay  = NULL;
+static MMGetPtrFn g_fp_localpawn = NULL;
+static MMGetPtrFn g_fp_maincam   = NULL;
+static MMMatFn    g_fp_w2c       = NULL;
+static MMMatFn    g_fp_proj      = NULL;
+static MMWec3Fn   g_fp_transpos  = NULL;
+static int        g_fp_state     = -1;  /* -1 sin probar / 0 error / 1 ok */
+static NSString  *g_esp_diag     = nil; /* motivo del ultimo fallo / ok   */
+static int        g_esp_players  = 0;   /* ultima cuenta de la lista      */
+
+/* lectura protegida de un rango (misma idea que la sonda de la v0.2.2) */
+static BOOL mm_vm_read(uintptr_t addr, void *dst, size_t n)
+{
+    vm_size_t outsz = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr,
+                                         (vm_size_t)n, (vm_address_t)dst, &outsz);
+    return (kr == KERN_SUCCESS && outsz == (vm_size_t)n);
+}
+
+static BOOL mm_r64(uintptr_t addr, uint64_t *out)
+{
+    BOOL ok = NO;
+    uint64_t v = mm_safe_read64(addr, &ok);
+    if (ok && out != NULL) *out = v;
+    return ok;
+}
+
+/* el puntero cae dentro de la imagen del juego? Acepta dos senales (dladdr
+   es read-only): que la base coincida, o que el nombre de la imagen sea el
+   del binario del juego (la sonda v0.2.2 comprobo en el equipo que dladdr
+   sobre punteros del juego devuelve la imagen "cod"). */
+static BOOL mm_ptr_en_imagen(const void *p, uintptr_t base)
+{
+    Dl_info di;
+    if (p == NULL || base == 0) return NO;
+    if (!dladdr(p, &di)) return NO;
+    if ((uintptr_t)di.dli_fbase == base) return YES;
+    if (di.dli_fname != NULL) {
+        const char *bn = strrchr(di.dli_fname, '/');
+        bn = (bn != NULL) ? (bn + 1) : di.dli_fname;
+        if (strcmp(bn, "cod") == 0) return YES;
+    }
+    return NO;
+}
+
+/* Resuelve los 6 punteros del juego validandolos uno a uno. Prueba primero
+   la imagen 0 (probada buena por la sonda v0.2.2) y si no cuaja busca la
+   imagen "UserAssembly" (el nombre que usa el mod de referencia). */
+static void mm_game_resolve(void)
+{
+    @try {
+        g_fp_state = 0;
+        uintptr_t head0 = (uintptr_t)_dyld_get_image_header(0);
+        uintptr_t ua = 0;
+        uint32_t nimg = _dyld_image_count();
+        for (uint32_t i = 0; i < nimg; i++) {
+            const char *nm = _dyld_get_image_name(i);
+            if (nm != NULL && strstr(nm, "UserAssembly") != NULL) {
+                ua = (uintptr_t)_dyld_get_image_header(i);
+                break;
+            }
+        }
+        uintptr_t bases[2];
+        int nb = 0;
+        if (head0 != 0) bases[nb++] = head0;
+        if (ua != 0 && ua != head0) bases[nb++] = ua;
+
+        for (int k = 0; k < nb; k++) {
+            uintptr_t b = bases[k];
+            MMGetPtrFn fp0 = (MMGetPtrFn)(b + MM_GAME_DELTA(VA_GAMEPLAY));
+            MMGetPtrFn fp1 = (MMGetPtrFn)(b + MM_GAME_DELTA(VA_LOCALPAWN));
+            MMGetPtrFn fp2 = (MMGetPtrFn)(b + MM_GAME_DELTA(VA_MAINCAM));
+            MMMatFn    fp3 = (MMMatFn)(b + MM_GAME_DELTA(VA_W2C_INJ));
+            MMMatFn    fp4 = (MMMatFn)(b + MM_GAME_DELTA(VA_PROJ_INJ));
+            MMWec3Fn   fp5 = (MMWec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
+
+            if (!mm_ptr_en_imagen((const void *)fp0, b) ||
+                !mm_ptr_en_imagen((const void *)fp1, b) ||
+                !mm_ptr_en_imagen((const void *)fp2, b) ||
+                !mm_ptr_en_imagen((const void *)fp3, b) ||
+                !mm_ptr_en_imagen((const void *)fp4, b) ||
+                !mm_ptr_en_imagen((const void *)fp5, b))
+                continue;
+
+            g_game_base    = b;
+            g_fp_gameplay  = fp0;
+            g_fp_localpawn = fp1;
+            g_fp_maincam   = fp2;
+            g_fp_w2c       = fp3;
+            g_fp_proj      = fp4;
+            g_fp_transpos  = fp5;
+            g_fp_state     = 1;
+            NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p",
+                  MM_TAG, (unsigned long)b, k,
+                  (void *)g_fp_maincam,
+                  (void *)g_fp_gameplay,
+                  (void *)g_fp_localpawn,
+                  (void *)g_fp_transpos,
+                  (void *)g_fp_w2c,
+                  (void *)g_fp_proj);
+            return;
+        }
+
+        g_esp_diag = @"punteros fuera de la imagen del juego";
+        NSLog(@"%s ESP: no pude validar los punteros del juego (imagenes=%d)", MM_TAG, (int)nimg);
+    } @catch (NSException *e) {
+        g_fp_state = 0;
+        g_esp_diag = [NSString stringWithFormat:@"resolver: %@", e.reason];
+    }
+}
+
+/* Proyeccion mundo->pantalla IDENTICA al mod de referencia:
+     view = M * (x,y,z,1)            (columnas; chunks de 16 bytes)
+     clip = P * view
+     si !(clip.z >= 0.01) -> fuera
+     cabeza: clip.y += 0.5
+     ndc  = clip.xyz / clip.w        (si |w| <= 0.001 -> 0)
+     px   = ndc.x + W/2 + ndc.x*(W/2)
+     py   = ndc.y + H/2 - ndc.y*(H/2) */
+static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
+                   BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out)
+{
+    float x = p[0], y = p[1], z = p[2];
+    float vx = view[0] * x + view[4] * y + view[8]  * z + view[12];
+    float vy = view[1] * x + view[5] * y + view[9]  * z + view[13];
+    float vz = view[2] * x + view[6] * y + view[10] * z + view[14];
+    float vw = view[3] * x + view[7] * y + view[11] * z + view[15];
+
+    float cx = proj[0] * vx + proj[4] * vy + proj[8]  * vz + proj[12] * vw;
+    float cy = proj[1] * vx + proj[5] * vy + proj[9]  * vz + proj[13] * vw;
+    float cz = proj[2] * vx + proj[6] * vy + proj[10] * vz + proj[14] * vw;
+    float cw = proj[3] * vx + proj[7] * vy + proj[11] * vz + proj[15] * vw;
+
+    if (!(cz >= 0.01f)) return NO;
+    if (cabeza) cy += 0.5f;
+
+    float nx = 0.0f, ny = 0.0f;
+    if (cw >= 0.001f || cw <= -0.001f) { nx = cx / cw; ny = cy / cw; }
+    if (!isfinite(nx) || !isfinite(ny)) return NO;
+
+    out->x = (CGFloat)(nx + (float)W / 2.0f + nx * ((float)W / 2.0f));
+    out->y = (CGFloat)(ny + (float)H / 2.0f - ny * ((float)H / 2.0f));
+    return YES;
+}
+
+/* Una pasada de ESP real (~15 Hz). Deja el motivo en g_esp_diag. */
+static void mm_esp_collect_real(void)
+{
+    g_box_count = 0;
+    g_esp_players = 0;
+    if (g_fp_state != 1) mm_game_resolve();
+    if (g_fp_state != 1) return;
+
+    CGFloat W = 0.0, H = 0.0;
+    @try {
+        CGSize sz = UIScreen.mainScreen.bounds.size;
+        W = sz.width;
+        H = sz.height;
+    } @catch (NSException *e) {}
+    if (W < 10.0 || H < 10.0) {
+        W = (g_esp != nil) ? g_esp.bounds.size.width  : 0.0;
+        H = (g_esp != nil) ? g_esp.bounds.size.height : 0.0;
+    }
+    if (W < 10.0 || H < 10.0) { g_esp_diag = @"sin medidas de pantalla"; return; }
+
+    float view[16], proj[16];
+
+    /* camara + matrices de vista/proyeccion */
+    void *cam = g_fp_maincam();
+    uint64_t chk = 0;
+    if (cam == NULL) { g_esp_diag = @"esperando camara"; return; }
+    if (!mm_r64((uintptr_t)cam, &chk)) { g_esp_diag = @"camara ilegible"; return; }
+    g_fp_w2c(cam, view);
+    g_fp_proj(cam, proj);
+
+    /* gameplay + lista de jugadores */
+    void *gp = g_fp_gameplay();
+    if (gp == NULL) { g_esp_diag = @"esperando partida (gameplay)"; return; }
+    uint64_t lst = 0;
+    if (!mm_r64((uintptr_t)gp + OFF_GP_LIST, &lst) || lst == 0) {
+        g_esp_diag = @"esperando partida (lista)";
+        return;
+    }
+    uint8_t lh[0x20];
+    if (!mm_vm_read((uintptr_t)lst, lh, sizeof(lh))) { g_esp_diag = @"lista ilegible"; return; }
+    uint64_t items = 0;
+    uint32_t sz = 0;
+    memcpy(&items, lh + OFF_LIST_ITEMS, 8);
+    memcpy(&sz,    lh + OFF_LIST_SIZE,  4);
+    if (items == 0) { g_esp_diag = @"lista sin datos"; return; }
+    int total = (int)sz;
+    if (total < 0) total = 0;
+    if (total > 999) total = 999;
+    g_esp_players = total;
+    int loopn = (total > MM_MAX_BOXES) ? MM_MAX_BOXES : total;
+
+    /* jugador local: para la distancia y para no dibujarlo */
+    void *localPawn = g_fp_localpawn();
+    float lpos[3] = { 0.0f, 0.0f, 0.0f };
+    BOOL haveLocal = NO;
+    if (localPawn != NULL) {
+        uint64_t ltr = 0, lchk = 0;
+        if (mm_r64((uintptr_t)localPawn + OFF_PAWN_TRANSFORM, &ltr) && ltr != 0 &&
+            mm_r64((uintptr_t)ltr, &lchk)) {
+            g_fp_transpos((void *)(uintptr_t)ltr, lpos);
+            haveLocal = isfinite(lpos[0]) && isfinite(lpos[1]) && isfinite(lpos[2]);
+        }
+    }
+
+    float rango = mm_def_float(@"mm_esp_range", 150.0f);
+    int drawn = 0;
+
+    for (int i = 0; i < loopn && drawn < MM_MAX_BOXES; i++) {
+        uint64_t pawn = 0;
+        if (!mm_r64((uintptr_t)items + OFF_ARR_DATA + (uintptr_t)i * 8, &pawn) || pawn == 0)
+            continue;
+        if (localPawn != NULL && (void *)(uintptr_t)pawn == localPawn) continue;
+
+        uint64_t a = 0;
+        if (!mm_r64((uintptr_t)pawn + OFF_PAWN_ALIVE, &a) || (a & 0xFF) == 0) continue;
+
+        int robot = 0;
+        uint64_t ent = 0;
+        if (mm_r64((uintptr_t)pawn + OFF_PAWN_ENTITY, &ent) && ent != 0) {
+            uint64_t rb = 0;
+            if (mm_r64((uintptr_t)ent + OFF_ENT_ROBOT, &rb)) robot = (int)(rb & 0xFF);
+        }
+
+        uint64_t tr = 0, tchk = 0;
+        if (!mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &tr) || tr == 0) continue;
+        if (!mm_r64((uintptr_t)tr, &tchk)) continue;
+
+        float wp[3] = { 0.0f, 0.0f, 0.0f };
+        g_fp_transpos((void *)(uintptr_t)tr, wp);
+        if (!isfinite(wp[0]) || !isfinite(wp[1]) || !isfinite(wp[2])) continue;
+        if (fabsf(wp[0]) > 20000.0f || fabsf(wp[1]) > 20000.0f || fabsf(wp[2]) > 20000.0f)
+            continue;
+
+        float dist = 0.0f;
+        if (haveLocal) {
+            float dx = wp[0] - lpos[0], dy = wp[1] - lpos[1], dz = wp[2] - lpos[2];
+            dist = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (dist > rango) continue;
+        }
+
+        CGPoint pies, cab;
+        if (!mm_w2s(view, proj, wp, NO,  W, H, &pies)) continue;
+        if (!mm_w2s(view, proj, wp, YES, W, H, &cab))  continue;
+        if (pies.x < -W || pies.x > 2.0 * W || pies.y < -H || pies.y > 2.0 * H) continue;
+
+        CGFloat bh = pies.y - cab.y;
+        if (bh < 4.0 || bh > 2.0 * H) continue;
+        CGFloat bw = bh * 0.45;
+
+        MMEspBox *b = &g_boxes[drawn];
+        b->x = cab.x - bw / 2.0;
+        b->y = cab.y;
+        b->w = bw;
+        b->h = bh;
+        b->dist = dist;
+        b->robot = robot;
+        b->alive = 1;
+        drawn++;
+    }
+
+    g_box_count = drawn;
+    g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d", total, drawn];
+}
+
 /* Reescritura atomica del archivo de estado que se puede leer sin syslog. */
 static void mm_write_status(NSString *nota)
 {
@@ -506,6 +813,7 @@ static void mm_write_status(NSString *nota)
             @"stream=%d\n"
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
+            @"esp_real=%@ jugadores=%d\n"
             @"nota=%@\n",
             MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), (int)getpid(),
             NSBundle.mainBundle.bundleIdentifier ?: @"?",
@@ -524,6 +832,7 @@ static void mm_write_status(NSString *nota)
             g_box_count,
             (g_link != nil && !g_link.paused) ? "activo" : "parado",
             g_probe != nil ? g_probe.UTF8String : "pendiente",
+            (g_esp_diag != nil) ? g_esp_diag : @"-", g_esp_players,
             nota];
 
         [txt writeToFile:[docs stringByAppendingPathComponent:@"modmenu_status.txt"]
@@ -686,10 +995,10 @@ static void mm_build_ui(void)
     [g_p_esp addSubview:sl];
 
     UILabel *na = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 292.0, 272.0, 40.0)];
-    na.text = @"DEMO v0.2.2: con el maestro ON veras cajas de prueba moviendose. Los jugadores reales llegan en la proxima build.";
+    na.text = @"v0.2.3: datos reales (rojo = jugador, ambar = bot). Si no aparecen cajas mira la pagina INFO (linea esp2) o Documents/modmenu_status.txt.";
     na.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
     na.font = [UIFont systemFontOfSize:10.5];
-    na.numberOfLines = 2;
+    na.numberOfLines = 3;
     [g_p_esp addSubview:na];
 
     /* --- pagina MISC --- */
@@ -792,6 +1101,7 @@ static void mm_refresh_info(void)
             @"panel    %@\n"
             @"esp      %@   rango %d m\n"
             @"render   %@   cajas %d\n"
+            @"esp2     %@\n"
             @"probe    %@\n",
             MODMENU_VERSION,
             mm_my_path(),
@@ -807,6 +1117,7 @@ static void mm_refresh_info(void)
             (int)mm_def_float(@"mm_esp_range", 150.0f),
             (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? @"ON" : @"off",
             g_box_count,
+            (g_esp_diag != nil) ? g_esp_diag : @"-",
             (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar")];
         g_info.text = txt;
     } @catch (NSException *e) {}
