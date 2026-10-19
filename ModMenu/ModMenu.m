@@ -12,6 +12,24 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.8 (19 oct) - FASE C, parte 1: NOJB (ANTIDETECT).
+ *    - se replican los 39 swizzles ObjC del mod de referencia (GL), leidos de
+ *      su dylib en el laboratorio: checksums (APMRemoteConfig.checksumEnabled,
+ *      GNLCommonTools._checksumOfCRC32:, QCloudSimplePing...), identificadores
+ *      anonimos (AppsFlyer / FBSDK / FBAd), watchdog de hilos de APM y TODOS
+ *      los metodos de MSWeakTimer. Todos devuelven 0 o no-op, igual que GL;
+ *    - de la tabla de 10 parches de anogs de GL solo se usan los 2 sitios que
+ *      en 1.0.57 caen EXACTAMENTE en la entrada de una funcion
+ *      (_AnoSDKGetReportData y _AnoSDKDelReportData). Los otros 8 caen a media
+ *      funcion: parchearlos ahi dejaria la pila desbalanceada (crash), asi que
+ *      NO se tocan; queda anotado para futuras versiones;
+ *    - todo con guardas: clase/metodo ausente = se salta y se registra; nunca
+ *      se toca un metodo heredado de NSObject (swizzlearlo romperia la app);
+ *      antes de escribir en anogs se comparan los bytes del sitio con los
+ *      esperados de 1.0.57 y, si no coinciden, NO se escribe nada;
+ *    - reintentos en segundo plano (las frameworks cargan tarde) y resultado
+ *      visible en la pagina INFO y en Documents/modmenu_status.txt (nojb=).
+ *
  *  v0.2.7 (19 oct) - OPCIONES A FABRICA EN CADA ARRANQUE + FIX DEL PARPADEO.
  *    - pedido del operador: "que las opciones aparezcan desactivadas cada vez
  *      que se inicia el juego" (se quedaban guardadas como se dejaron). Al
@@ -133,15 +151,18 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 #include <unistd.h>
 #include <mach/mach.h>
 #include <mach/vm_map.h>
+#include <mach/vm_region.h>
 #include <mach-o/dyld.h>
+#include <libkern/OSCacheControl.h>
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.7-esp"
+#define MODMENU_VERSION     "0.2.8-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -157,7 +178,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.7";
+const char *modmenu_build_id = "modmenu-esp-0.2.8";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -685,6 +706,283 @@ static void mm_probe_run(void)
 }
 
 /*---------------------------------------------------------------------------
+ * FASE C v0.2.8 - NOJB (antidetect).
+ *
+ * Receta replicada del mod de referencia (GL), leida de su dylib en el
+ * laboratorio (msdk_gl):
+ *   - 39 swizzles ObjC que devuelven 0 / no-op: checksums (APMRemoteConfig,
+ *     GNLCommonTools, QCloudSimplePing), identificadores anonimos (AppsFlyer,
+ *     FBSDK, FBAd), watchdog de hilos (APMTimeoutThreadManager) y todos los
+ *     metodos de MSWeakTimer (temporizador interno de las capas de proteccion);
+ *   - 2 parches de codigo en anogs (AnoSDK): _AnoSDKGetReportData devuelve 0 y
+ *     _AnoSDKDelReportData hace ret. Son los dos unicos sitios de la tabla de
+ *     GL que en 1.0.57 caen justo en la entrada de una funcion; los otros 8
+ *     caen a media funcion y parchearlos corromperia la pila (no se tocan).
+ *
+ * Reglas de esta fase (defensivas):
+ *   - clase o metodo ausente => se salta y se anota (se reintenta en el
+ *     siguiente pase, porque las frameworks cargan tarde);
+ *   - nunca se swizzlea un metodo heredado de NSObject/NSProxy: el Method
+ *     seria el del root y romperia toda la app (p.ej. -init);
+ *   - antes de escribir en anogs se comparan los bytes del sitio con los
+ *     esperados de 1.0.57; si no coinciden NO se escribe nada;
+ *   - al escribir se guarda la proteccion original con vm_region_64, se pone
+ *     RW, se escribe, se invalida la cache de instrucciones y se restaura;
+ *   - resultado en INFO (linea nojb) y en modmenu_status.txt (nojb=).
+ *--------------------------------------------------------------------------*/
+
+typedef struct {
+    const char *cls;
+    const char *sel;
+    int         isClass;   /* 1 = metodo de clase (+)                */
+    IMP         rep;       /* sustituto: devuelve 0 o no hace nada   */
+} MMNojbHook;
+
+#define MM_NOJB_COUNT 39
+
+static signed char g_nojb_state[MM_NOJB_COUNT]; /* 0 pendiente / 1 puesto / -1 skip */
+static int         g_nojb_passes = 0;
+static int         g_nojb_anogs[2];             /* 0 pend / 1 armado / -1 skip / -2 fallo */
+static int         g_nojb_anogs_log[2];         /* para no repetir el aviso       */
+static BOOL        g_nojb_started = NO;
+
+/* Sustitutos genericos. En arm64 los cero viajan en x0/w0 y en d0, asi que
+   sirven tanto para BOOL/objeto/puntero como para double. */
+static id     mm_hk_obj(id self, SEL _cmd, ...)  { (void)self; (void)_cmd; return nil; }
+static BOOL   mm_hk_no(id self, SEL _cmd, ...)   { (void)self; (void)_cmd; return NO; }
+static double mm_hk_dbl(id self, SEL _cmd, ...)  { (void)self; (void)_cmd; return 0.0; }
+static void   mm_hk_void(id self, SEL _cmd, ...) { (void)self; (void)_cmd; }
+
+/* Orden y comportamiento identicos a la tabla de GL (msdk_gl). */
+static const MMNojbHook g_nojb_hooks[MM_NOJB_COUNT] = {
+    { "APMRemoteConfig",       "checksumEnabled",                     0, (IMP)mm_hk_no   },
+    { "GNLCommonTools",        "_checksumOfCRC32:",                   1, (IMP)mm_hk_obj  },
+    { "QCloudSimplePing",      "pingPacketWithType:payload:requiresChecksum:", 0, (IMP)mm_hk_obj },
+    { "AppsFlyerLib",          "anonymizeUser",                       0, (IMP)mm_hk_no   },
+    { "AppsFlyerLib",          "setAnonymizeUser:",                   0, (IMP)mm_hk_void },
+    { "AppsFlyerUtils",        "retrievePersistedAnonymousID",        1, (IMP)mm_hk_obj  },
+    { "FBSDKAppEvents",        "anonymousID",                         0, (IMP)mm_hk_obj  },
+    { "FBSDKBasicUtility",     "anonymousID",                         1, (IMP)mm_hk_obj  },
+    { "FBSDKBasicUtility",     "retrievePersistedAnonymousID",        1, (IMP)mm_hk_obj  },
+    { "FBSDKBasicUtility",     "persistAnonymousID:",                 1, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "initWithTimeInterval:target:selector:userInfo:repeats:dispatchQueue:", 0, (IMP)mm_hk_obj },
+    { "MSWeakTimer",           "init",                                0, (IMP)mm_hk_obj  },
+    { "MSWeakTimer",           "setTolerance:",                       0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "resetTimerProperties",                0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "description",                         0, (IMP)mm_hk_obj  },
+    { "MSWeakTimer",           "tolerance",                           0, (IMP)mm_hk_dbl  },
+    { "MSWeakTimer",           "invalidate",                          0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "setTimeInterval:",                    0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "target",                              0, (IMP)mm_hk_obj  },
+    { "MSWeakTimer",           "timeInterval",                        0, (IMP)mm_hk_dbl  },
+    { "MSWeakTimer",           "setTarget:",                          0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "userInfo",                            0, (IMP)mm_hk_obj  },
+    { "MSWeakTimer",           "setUserInfo:",                        0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "repeats",                             0, (IMP)mm_hk_no   },
+    { "MSWeakTimer",           "setRepeats:",                         0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "privateSerialQueue",                  0, (IMP)mm_hk_obj  },
+    { "MSWeakTimer",           "setPrivateSerialQueue:",              0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "timer",                               0, (IMP)mm_hk_obj  },
+    { "MSWeakTimer",           "setTimer:",                           0, (IMP)mm_hk_void },
+    { "MSWeakTimer",           "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:dispatchQueue:", 1, (IMP)mm_hk_obj },
+    { "FBAdUtility",           "anonymousIdentifier",                 1, (IMP)mm_hk_obj  },
+    { "FBAdBasicUtility",      "persistAnonymousID:",                 1, (IMP)mm_hk_void },
+    { "FBAdBasicUtility",      "retrievePersistedAnonymousID",        1, (IMP)mm_hk_obj  },
+    { "FBAdBasicUtility",      "anonymousID",                         1, (IMP)mm_hk_obj  },
+    { "TssReachability",       "reachabilityWithHostName:",           1, (IMP)mm_hk_obj  },
+    { "APMDeviceInfoSupportFrameworkLoad", "load",                    1, (IMP)mm_hk_void },
+    { "APMTimeoutThreadManager", "updateThread",                      0, (IMP)mm_hk_void },
+    { "APMTimeoutThreadManager", "checkTimeoutThreadAndWriteBacktrace", 0, (IMP)mm_hk_void },
+    { "APMTimeoutThreadManager", "pushBlockInfo:thread:findBlockTime:passedTime:dumptime:dumpAllThread:", 0, (IMP)mm_hk_void },
+};
+
+/* Sitios de anogs (offsets desde la base de la imagen; __TEXT vmaddr = 0 en
+   1.0.57). expect = primeros `words*4` bytes originales (verificados en el
+   laboratorio contra el anogs del IPA base, sha256 28A31BC48BFE1DD4...). */
+typedef struct {
+    uint32_t off;
+    uint32_t words;      /* 2 = mov x0,#0;ret (8 B) / 1 = ret (4 B)      */
+    uint64_t expect;     /* bytes originales esperados (little endian)    */
+    uint32_t patch[2];
+    const char *name;
+} MMAnogsSite;
+
+static const MMAnogsSite g_anogs_sites[2] = {
+    { 0x0F2304, 2, 0x910003FDA9BF7BFDULL, { 0xD2800000, 0xD65F03C0 }, "p00" },
+    { 0x0F2320, 1, 0x00000000A9BF7BFDULL, { 0xD65F03C0, 0x00000000 }, "p01" },
+};
+
+/* Base de anogs por su nombre de imagen (mismo criterio que GL: sufijo). */
+static uintptr_t mm_anogs_base(void)
+{
+    static const char *names[2] = { "anogs.framework/anogs", "anogs" };
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm == NULL) continue;
+        size_t ln = strlen(nm);
+        for (int k = 0; k < 2; k++) {
+            size_t ls = strlen(names[k]);
+            if (ls <= ln && strcmp(nm + (ln - ls), names[k]) == 0)
+                return (uintptr_t)_dyld_get_image_header(i);
+        }
+    }
+    return 0;
+}
+
+/* Proteccion actual de la pagina que contiene addr (R+X si no se puede leer). */
+static vm_prot_t mm_orig_prot(uintptr_t addr)
+{
+    vm_address_t region = (vm_address_t)addr;
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64,
+                     (vm_region_info_t)&info, &count, &object) == KERN_SUCCESS) {
+        if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        return info.protection;
+    }
+    return VM_PROT_READ | VM_PROT_EXECUTE;
+}
+
+/* Escritura verificada en memoria ejecutable: devuelve 1 ok, <0 fallo. */
+static int mm_mem_write(uintptr_t addr, const void *src, size_t len)
+{
+    if (addr == 0 || src == NULL || len == 0) return -1;
+    vm_prot_t prot = mm_orig_prot(addr);
+    if (vm_protect(mach_task_self(), (vm_address_t)addr, (vm_size_t)len,
+                   FALSE, prot | VM_PROT_WRITE) != KERN_SUCCESS)
+        return -2;
+    memcpy((void *)addr, src, len);
+    sys_icache_invalidate((void *)addr, len);
+    if (vm_protect(mach_task_self(), (vm_address_t)addr, (vm_size_t)len,
+                   FALSE, prot) != KERN_SUCCESS)
+        return -3;
+    return (memcmp((void *)addr, src, len) == 0) ? 1 : 0;
+}
+
+static int mm_nojb_try_swizzles(void)
+{
+    int done = 0;
+    for (int i = 0; i < MM_NOJB_COUNT; i++) {
+        if (g_nojb_state[i] == 1) { done++; continue; }
+        if (g_nojb_state[i] == -1) continue;   /* heredado del root: no se toca */
+        const MMNojbHook *h = &g_nojb_hooks[i];
+        Class cls = objc_getClass(h->cls);
+        if (cls == NULL) continue;             /* aun no cargada: otro pase */
+        SEL sel = sel_registerName(h->sel);
+        Method m = h->isClass ? class_getClassMethod(cls, sel)
+                              : class_getInstanceMethod(cls, sel);
+        if (m == NULL) continue;               /* aun sin el metodo: otro pase */
+        Method base = h->isClass ? class_getClassMethod([NSObject class], sel)
+                                 : class_getInstanceMethod([NSObject class], sel);
+        if (base == m) {
+            g_nojb_state[i] = -1;
+            NSLog(@"%s nojb: %s%s %s es heredado de NSObject, se salta",
+                  MM_TAG, h->isClass ? "+" : "-", h->cls, h->sel);
+            continue;
+        }
+        IMP prev = method_setImplementation(m, h->rep);
+        g_nojb_state[i] = 1;
+        done++;
+        NSLog(@"%s nojb: swz %s%s %s (antes=%p) -> 0",
+              MM_TAG, h->isClass ? "+" : "-", h->cls, h->sel, (void *)prev);
+    }
+    return done;
+}
+
+static void mm_nojb_try_anogs(void)
+{
+    uintptr_t base = mm_anogs_base();
+    if (base == 0) return;                     /* anogs aun no cargada */
+
+    for (int i = 0; i < 2; i++) {
+        if (g_nojb_anogs[i] != 0) continue;
+        const MMAnogsSite *s = &g_anogs_sites[i];
+        uintptr_t a = base + (uintptr_t)s->off;
+        size_t len = (size_t)s->words * 4;
+        uint64_t cur = 0;
+        uint64_t patched = (uint64_t)s->patch[0] | ((uint64_t)s->patch[1] << 32);
+
+        memcpy(&cur, (const void *)a, len);
+        if (cur == patched) {                  /* ya estaba puesto (otro pase) */
+            g_nojb_anogs[i] = 1;
+            continue;
+        }
+        if (cur != s->expect) {
+            g_nojb_anogs[i] = -1;              /* no es el anogs de 1.0.57 */
+            NSLog(@"%s nojb: %s NO coincide (esperado 0x%llX, leido 0x%llX); no se escribe",
+                  MM_TAG, s->name, (unsigned long long)s->expect,
+                  (unsigned long long)cur);
+            continue;
+        }
+        int r = mm_mem_write(a, s->patch, len);
+        if (r == 1) {
+            g_nojb_anogs[i] = 1;
+            NSLog(@"%s nojb: %s armado en 0x%X (%zu B)", MM_TAG, s->name, s->off, len);
+        } else if (g_nojb_anogs_log[i] == 0) {
+            g_nojb_anogs_log[i] = 1;
+            NSLog(@"%s nojb: %s fallo al escribir (r=%d); se reintenta",
+                  MM_TAG, s->name, r);
+        }
+    }
+}
+
+/* Resumen para INFO y modmenu_status.txt. */
+static NSString *mm_nojb_resumen(void)
+{
+    int swz = 0;
+    for (int i = 0; i < MM_NOJB_COUNT; i++) if (g_nojb_state[i] == 1) swz++;
+
+    const char *e0 = "pend", *e1 = "pend";
+    if (g_nojb_anogs[0] == 1) e0 = "ok";
+    else if (g_nojb_anogs[0] == -1) e0 = "skip";
+    else if (g_nojb_anogs[0] == -2) e0 = "fail";
+    if (g_nojb_anogs[1] == 1) e1 = "ok";
+    else if (g_nojb_anogs[1] == -1) e1 = "skip";
+    else if (g_nojb_anogs[1] == -2) e1 = "fail";
+    int armed = (g_nojb_anogs[0] == 1) + (g_nojb_anogs[1] == 1);
+
+    return [NSString stringWithFormat:@"swz=%d/%d anogs=%d/2(%s,%s) img=%s",
+            swz, MM_NOJB_COUNT, armed, e0, e1,
+            (mm_anogs_base() != 0) ? "si" : "no"];
+}
+
+static void mm_nojb_step(void);
+
+static void mm_nojb_step(void)
+{
+    @autoreleasepool {
+        g_nojb_passes++;
+        int done = mm_nojb_try_swizzles();
+        if (mm_uptime() >= 8.0) mm_nojb_try_anogs();
+
+        BOOL todo = (done >= MM_NOJB_COUNT)
+                    && (g_nojb_anogs[0] != 0) && (g_nojb_anogs[1] != 0);
+        if (todo || g_nojb_passes >= 90) {
+            NSLog(@"%s nojb fin: %@ (pasadas=%d)", MM_TAG, mm_nojb_resumen(), g_nojb_passes);
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                           mm_nojb_step();
+                       });
+    }
+}
+
+static void mm_nojb_start(void)
+{
+    if (g_nojb_started) return;
+    g_nojb_started = YES;
+    NSLog(@"%s nojb: inicio (fase C v0.2.8)", MM_TAG);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                       mm_nojb_step();
+                   });
+}
+
+/*---------------------------------------------------------------------------
  * ESP v0.2.3 - DATOS REALES (cadena verificada para la version 1.0.57).
  *
  *  camera   = Camera.get_main()                     (thunk del motor)
@@ -1158,6 +1456,7 @@ static void mm_write_status(NSString *nota)
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
             @"esp_real=%@ jugadores=%d\n"
+            @"nojb=%@\n"
             @"nota=%@\n",
             MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), (int)getpid(),
             NSBundle.mainBundle.bundleIdentifier ?: @"?",
@@ -1178,6 +1477,7 @@ static void mm_write_status(NSString *nota)
             (g_link != nil && !g_link.paused) ? "activo" : "parado",
             g_probe != nil ? g_probe.UTF8String : "pendiente",
             (g_esp_diag != nil) ? g_esp_diag : @"-", g_esp_players,
+            mm_nojb_resumen(),
             nota];
 
         [txt writeToFile:[docs stringByAppendingPathComponent:@"modmenu_status.txt"]
@@ -1497,7 +1797,8 @@ static void mm_refresh_info(void)
             @"esp      %@   rango %d m\n"
             @"render   %@   cajas %d\n"
             @"esp2     %@\n"
-            @"probe    %@\n",
+            @"probe    %@\n"
+            @"nojb     %@\n",
             MODMENU_VERSION,
             mm_my_path(),
             (int)getpid(),
@@ -1513,7 +1814,8 @@ static void mm_refresh_info(void)
             (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? @"ON" : @"off",
             g_box_count,
             (g_esp_diag != nil) ? g_esp_diag : @"-",
-            (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar")];
+            (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar"),
+            mm_nojb_resumen()];
         g_info.text = txt;
     } @catch (NSException *e) {}
 }
@@ -1668,6 +1970,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     NSLog(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
           MM_TAG, MODMENU_VERSION, mm_my_path(), (int)getpid());
     mm_write_status(@"arranque (opciones a fabrica)");
+    mm_nojb_start();      /* v0.2.8: fase C (antidetect) en segundo plano */
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ mm_tick(); });
