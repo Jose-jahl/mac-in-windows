@@ -110,7 +110,7 @@ static void mm_write_status(NSString *nota);
         UIView *root = v.superview;
         if (root == nil) return;
         CGPoint t = [g translationInView:root];
-        [g setTranslation:CGPointZero inView:root];
+        [g setTranslation:CGPointMake(0.0, 0.0) inView:root];
         CGPoint c = CGPointMake(v.center.x + t.x, v.center.y + t.y);
         CGFloat r = v.bounds.size.width / 2.0;
         c.x = MAX(r + 4.0, MIN(root.bounds.size.width  - r - 4.0,  c.x));

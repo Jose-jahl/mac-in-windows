@@ -38,6 +38,7 @@ jobs:
                 -framework UIKit \
                 -framework Foundation \
                 -framework QuartzCore \
+                -framework CoreGraphics \
                 -o ModMenu.dylib \
                 ModMenu/ModMenu.m
           echo "compilado"
