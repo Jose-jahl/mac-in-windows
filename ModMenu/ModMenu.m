@@ -525,7 +525,7 @@ static MMGetPtrFn g_fp_localpawn = NULL;
 static MMGetPtrFn g_fp_maincam   = NULL;
 static MMMatFn    g_fp_w2c       = NULL;
 static MMMatFn    g_fp_proj      = NULL;
-static MMWec3Fn   g_fp_transpos  = NULL;
+static MMVec3Fn   g_fp_transpos  = NULL;
 static int        g_fp_state     = -1;  /* -1 sin probar / 0 error / 1 ok */
 static NSString  *g_esp_diag     = nil; /* motivo del ultimo fallo / ok   */
 static int        g_esp_players  = 0;   /* ultima cuenta de la lista      */
@@ -594,7 +594,7 @@ static void mm_game_resolve(void)
             MMGetPtrFn fp2 = (MMGetPtrFn)(b + MM_GAME_DELTA(VA_MAINCAM));
             MMMatFn    fp3 = (MMMatFn)(b + MM_GAME_DELTA(VA_W2C_INJ));
             MMMatFn    fp4 = (MMMatFn)(b + MM_GAME_DELTA(VA_PROJ_INJ));
-            MMWec3Fn   fp5 = (MMWec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
+            MMVec3Fn   fp5 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
