@@ -12,12 +12,22 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.1 (19 oct) - FIX reportado en dispositivo real:
+ *    - FUERA la ventana overlay propia: provocaba que la app girara a
+ *      vertical (su rootViewController admite todos los giros) y bloqueaba
+ *      los toques fuera del boton/panel (un UIWindow es a su vez una vista:
+ *      su hitTest devolvia la propia ventana y ahi moria el toque);
+ *    - la UI ahora va PEGADA dentro de la ventana del juego (capa
+ *      transparente): los toques fuera del menu caen solos al juego y la
+ *      rotacion la decide unicamente el juego;
+ *    - reenganche automatico en cada latido si el juego cambia de ventana.
+ *
  *  v0.2.0 (19 oct) - FASE B, parte 1: EL MENU DE VERDAD.
  *    - boton flotante arrastrable que se despliega a toque (recuerda donde
  *      lo dejas; estilo del modder de referencia);
  *    - panel con paginas ESP / MISC / INFO;
  *    - los toggles y sliders se guardan (NSUserDefaults): persisten entre
- *      partidas; el ESP REAL se conecta en la build siguiente (v0.2.1) -
+ *      partidas; el ESP REAL se conecta en la build siguiente (v0.2.2) -
  *      esta build valida la UI y la interaccion en dispositivo;
  *    - Stream Mode: atenua el boton casi hasta desaparecer (para grabar);
  *    - la ventana overlay DEJA PASAR los toques fuera del boton/panel: el
@@ -32,7 +42,7 @@
 #import <dlfcn.h>
 #include <unistd.h>
 
-#define MODMENU_VERSION     "0.2.0-menu"
+#define MODMENU_VERSION     "0.2.1-fix"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -42,10 +52,10 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-menu-0.2.0";
+const char *modmenu_build_id = "modmenu-fix-0.2.1";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
-static UIWindow *g_win   = nil;   /* ventana overlay propia                   */
+static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
 static UIView   *g_panel = nil;   /* panel desplegable                        */
 static UISegmentedControl *g_seg = nil;
@@ -197,12 +207,24 @@ static UIWindowScene *mm_pick_scene(void)
     return fallback;
 }
 
-/* Ventana ya existente del juego, por si aun no hay escena usable. */
+/* La ventana DEL JUEGO. NUNCA creamos ventana propia: era la causa de la
+   rotacion a vertical y del bloqueo de toques. Preferimos la visible de nivel
+   normal de la escena activa; si no hay, keyWindow; si no, cualquiera. */
 static UIWindow *mm_host_window(void)
 {
     UIApplication *app = mm_app();
     if (app == nil) return nil;
-    if (app.keyWindow) return app.keyWindow;
+
+    UIWindowScene *scene = mm_pick_scene();
+    UIWindow *best = nil;
+    for (UIWindow *w in app.windows) {
+        if (w.hidden || w.alpha < 0.01) continue;
+        if (w.windowLevel != UIWindowLevelNormal) continue;
+        if (scene != nil && w.windowScene != nil && w.windowScene != scene) continue;
+        best = w;               /* el ultimo de la lista = el mas alto */
+    }
+    if (best != nil) return best;
+    if (app.keyWindow != nil) return app.keyWindow;
     for (UIWindow *w in app.windows) {
         if (!w.hidden) return w;
     }
@@ -439,7 +461,7 @@ static void mm_build_ui(void)
     [g_p_esp addSubview:sl];
 
     UILabel *na = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 292.0, 272.0, 40.0)];
-    na.text = @"El ESP real se conecta en la proxima build (v0.2.1). De momento se guardan los ajustes.";
+    na.text = @"El ESP real llega en la proxima build (v0.2.2). De momento se guardan los ajustes.";
     na.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
     na.font = [UIFont systemFontOfSize:10.5];
     na.numberOfLines = 2;
@@ -560,55 +582,55 @@ static void mm_refresh_info(void)
     } @catch (NSException *e) {}
 }
 
-/* Coloca (o recoloca) boton y panel. Devuelve YES si quedo enganchada a una
-   ventana VIVA. Se ejecuta en el main queue, una vez por tick. */
+/* Coloca (o recoloca) la UI DENTRO de la ventana del juego. Devuelve YES si
+   quedo enganchada. Se ejecuta en el main queue, una vez por tick.
+   v0.2.1: ya NO creamos ventana propia (rompia la rotacion y los toques). */
 static BOOL mm_place_ui(void)
 {
     @try {
-        if (g_btn != nil && g_btn.window != nil) {
-            if (g_win != nil) g_win.hidden = NO;
-            return YES;
+        UIWindow *host = mm_host_window();
+        if (host == nil) return NO;
+
+        if (g_root == nil) {
+            g_root = [[MMPassView alloc] initWithFrame:host.bounds];
+            g_root.backgroundColor = [UIColor clearColor];
+            g_root.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                      UIViewAutoresizingFlexibleHeight;
         }
+
+        BOOL recolocar = NO;
+        if (g_root.superview != host) {
+            [g_root removeFromSuperview];
+            g_root.frame = host.bounds;
+            [host addSubview:g_root];
+            recolocar = YES;
+            g_via = "ventana_del_juego";
+            NSLog(@"%s UI enganchada a la ventana del juego (nivel=%.0f clase=%@)",
+                  MM_TAG, host.windowLevel, NSStringFromClass(host.class));
+        }
+        if (host.subviews.lastObject != g_root) [host bringSubviewToFront:g_root];
 
         if (g_btn == nil) mm_build_ui();
 
-        UIView *root = nil;
-        UIWindowScene *scene = mm_pick_scene();
-        if (scene != nil) {
-            if (g_win == nil || g_win.windowScene != scene) {
-                g_win = [[UIWindow alloc] initWithWindowScene:scene];
-                g_win.frame = UIScreen.mainScreen.bounds;
-                g_win.windowLevel = UIWindowLevelAlert + 2;
-                UIViewController *vc = [[UIViewController alloc] init];
-                MMPassView *pv = [[MMPassView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-                vc.view = pv;
-                g_win.rootViewController = vc;
-            }
-            root = g_win.rootViewController.view;
-            g_win.hidden = NO;
-            g_via = "UIWindowScene";
-        } else {
-            UIWindow *host = mm_host_window();
-            if (host == nil) return NO;
-            root = host;
-            g_via = "keyWindow";
+        if (g_btn.superview != g_root) {
+            [g_btn removeFromSuperview];
+            [g_root addSubview:g_btn];
+            recolocar = YES;
+        }
+        if (g_panel.superview != g_root) {
+            [g_panel removeFromSuperview];
+            [g_root addSubview:g_panel];
+            recolocar = YES;
         }
 
-        if (g_btn.superview != root) {
-            [g_btn removeFromSuperview];
-            [root addSubview:g_btn];
-
+        if (recolocar) {
             CGFloat r = 27.0;
             CGFloat bx = mm_def_float(@"mm_btn_x", 40.0f);
             CGFloat by = mm_def_float(@"mm_btn_y", 150.0f);
-            bx = MAX(r + 4.0, MIN(root.bounds.size.width  - r - 4.0,  bx));
-            by = MAX(r + 44.0, MIN(root.bounds.size.height - r - 60.0, by));
+            bx = MAX(r + 4.0, MIN(g_root.bounds.size.width  - r - 4.0,  bx));
+            by = MAX(r + 44.0, MIN(g_root.bounds.size.height - r - 60.0, by));
             g_btn.center = CGPointMake(bx, by);
-
-            [g_panel removeFromSuperview];
-            [root addSubview:g_panel];
-
-            NSLog(@"%s boton+panel CREADOS via=%s", MM_TAG, g_via);
+            NSLog(@"%s boton+panel listos via=%s", MM_TAG, g_via);
         }
 
         mm_apply_stream();
