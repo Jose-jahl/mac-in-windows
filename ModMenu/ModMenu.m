@@ -12,6 +12,20 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.6 (19 oct) - SALUD VISIBLE (pedido del test de la 0.2.5: "la salud de
+ *  los jugadores no se ve"; el resto bien).
+ *    - la barra de salud ya no depende del toggle "Cajas" (en la 0.2.5 se
+ *      apagaba con el; ahora es solo del toggle "Salud", como el resto);
+ *    - mas visible: 4 px de ancho, marco negro, fondo oscuro y color por
+ *      tramos (verde/ambar/rojo); se dibuja tambien con vida 0 (se ve el
+ *      marco) a la izquierda de la caja, de la cabeza a los pies;
+ *    - lectura de la salud tolerante al ABI: el getter del juego puede
+ *      devolver int (w0) o float (s0) - no estaba confirmado. Se llama con
+ *      las dos firmas (lecturas puras) y se elige el valor plausible: entero
+ *      sano 1..100000, float sano 0.001..100000 (las bandas no se solapan);
+ *      los dos numeros crudos del primer jugador quedan en INFO/status para
+ *      confirmar en el equipo cual era el tipo real.
+ *
  *  v0.2.5 (19 oct) - ESP parte 4: CAJA DE CUERPO COMPLETO + TOGGLES + LINEAS.
  *    - la caja ya no se queda pegada a la cabeza: la posicion del pawn cae a
  *      la altura del cuello (verificado en captura), y el +0.5 de clip del mod
@@ -114,7 +128,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.5-esp"
+#define MODMENU_VERSION     "0.2.6-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -130,7 +144,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.5";
+const char *modmenu_build_id = "modmenu-esp-0.2.6";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -272,24 +286,39 @@ static void mm_probe_run(void);
             CGContextSetLineWidth(ctx, 1.7);
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
             CGContextStrokeRect(ctx, r);
+        }
 
-            /* v0.2.4: barra de salud a la izquierda de la caja */
-            if (conSalud && b->hp >= 0.0f && b->hpMax > 1.0f) {
-                float fr = b->hp / b->hpMax;
-                if (fr < 0.0f) fr = 0.0f;
-                if (fr > 1.0f) fr = 1.0f;
-                CGFloat bwv = 3.0;
-                CGFloat bx  = r.origin.x - 6.0;
-                CGFloat by  = r.origin.y;
-                CGFloat bhh = r.size.height;
-                CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.45);
-                CGContextFillRect(ctx, CGRectMake(bx, by, bwv, bhh));
-                CGFloat rr2 = 1.00, gg2 = 0.25;
-                if (fr > 0.5f)       { rr2 = 0.25; gg2 = 1.00; }
-                else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.80; }
-                CGFloat fh2 = bhh * fr;
-                CGContextSetRGBFillColor(ctx, rr2, gg2, 0.25, 0.95);
-                CGContextFillRect(ctx, CGRectMake(bx, by + bhh - fh2, bwv, fh2));
+        /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
+           0.2.5 yo la habia ligado a el y con Cajas OFF desaparecia; el
+           test la reporto como "no se ve"). Manda solo el toggle "Salud".
+           Ahora mas visible: marco negro + fondo + relleno por tramos
+           (verde/ambar/rojo); se dibuja tambien con vida 0 (se ve el marco)
+           a la izquierda de la caja, de pies a cabeza. */
+        if (conSalud && b->hp >= 0.0f && b->hpMax > 1.0f) {
+            float fr = b->hp / b->hpMax;
+            if (fr < 0.0f) fr = 0.0f;
+            if (fr > 1.0f) fr = 1.0f;
+            CGFloat bwv = 4.0;
+            CGFloat bx  = r.origin.x - 8.0;
+            CGFloat by  = r.origin.y;
+            CGFloat bhh = r.size.height;
+            if (bhh < 6.0) bhh = 6.0;  /* minimo para que se vea de lejos */
+            /* marco negro alrededor de toda la barra */
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.80);
+            CGContextFillRect(ctx, CGRectMake(bx - 1.5, by - 1.5,
+                                              bwv + 3.0, bhh + 3.0));
+            /* fondo oscuro (se ve aunque la vida este en 0) */
+            CGContextSetRGBFillColor(ctx, 0.06, 0.10, 0.06, 0.90);
+            CGContextFillRect(ctx, CGRectMake(bx, by, bwv, bhh));
+            /* relleno segun la vida */
+            CGFloat rr2 = 1.00, gg2 = 0.20;
+            if (fr > 0.5f)       { rr2 = 0.20; gg2 = 1.00; }
+            else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.75; }
+            CGFloat fh2 = bhh * fr;
+            if (fh2 > 0.0f) {
+                CGContextSetRGBFillColor(ctx, rr2, gg2, 0.20, 0.98);
+                CGContextFillRect(ctx, CGRectMake(bx, by + bhh - fh2,
+                                                  bwv, fh2));
             }
         }
 
@@ -671,6 +700,7 @@ typedef void *(*MMGetPtrFn)(void);
 typedef void  (*MMMatFn)(void *self, void *out64);
 typedef void  (*MMVec3Fn)(void *self, float *out3);
 typedef int32_t (*MMGetIntFn)(void *self);
+typedef float   (*MMGetFltFn)(void *self);
 
 static uintptr_t  g_game_base    = 0;
 static MMGetPtrFn g_fp_gameplay  = NULL;
@@ -680,8 +710,10 @@ static MMMatFn    g_fp_w2c       = NULL;
 static MMMatFn    g_fp_proj      = NULL;
 static MMVec3Fn   g_fp_transpos  = NULL;
 static MMGetIntFn g_fp_health    = NULL; /* opcional: si no valida, sin salud */
+static MMGetFltFn g_fp_health_f  = NULL; /* v0.2.6: misma direccion, tipo float */
 static int        g_fp_state     = -1;  /* -1 sin probar / 0 error / 1 ok */
 static NSString  *g_esp_diag     = nil; /* motivo del ultimo fallo / ok   */
+static NSString  *g_hp_diag      = nil; /* v0.2.6: muestra cruda de salud */
 static int        g_esp_players  = 0;   /* ultima cuenta de la lista      */
 
 /* lectura protegida de un rango (misma idea que la sonda de la v0.2.2) */
@@ -770,6 +802,7 @@ static void mm_game_resolve(void)
             g_fp_proj      = fp4;
             g_fp_transpos  = fp5;
             g_fp_health    = hpOk ? fp6 : NULL;
+            g_fp_health_f  = hpOk ? (MMGetFltFn)fp6 : NULL;   /* v0.2.6 */
             g_fp_state     = 1;
             NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
@@ -832,6 +865,7 @@ static void mm_esp_collect_real(void)
 {
     g_box_count = 0;
     g_esp_players = 0;
+    g_hp_diag = nil;                       /* v0.2.6: muestra nueva por pasada */
     if (g_fp_state != 1) mm_game_resolve();
     if (g_fp_state != 1) return;
 
@@ -960,15 +994,30 @@ static void mm_esp_collect_real(void)
         CGFloat bw = bh * 0.45;
         CGFloat cx = (cab.x + pies.x) * 0.5;
 
-        /* --- v0.2.4: salud (solo con el toggle ON; misma llamada que GL,
-           despues de todas las guardas: pawn mapeado y vivo) --- */
+        /* --- v0.2.6: salud (solo con el toggle ON; misma llamada que GL,
+           despues de todas las guardas: pawn mapeado y vivo). El getter del
+           juego puede devolver int (w0) o float (s0) - no estaba confirmado:
+           se llama con las dos firmas (lecturas puras) y se elige el valor
+           plausible. Las bandas no se solapan: los bits de un entero pequeno
+           leidos como float son un numero microscopico, y los de un float
+           normal leidos como entero son gigantes. --- */
         float hp = -1.0f;
         float hpMax = 100.0f;
         if (conSalud && g_fp_health != NULL) {
+            uint32_t hp_i = 0;
+            float    hp_f = 0.0f;
             uint64_t pk = 0;
             if (mm_r64((uintptr_t)pawn, &pk)) {
-                int32_t h = g_fp_health((void *)(uintptr_t)pawn);
-                if (h >= 0 && h <= 1000000) hp = (float)h;
+                hp_i = (uint32_t)g_fp_health((void *)(uintptr_t)pawn);
+                if (g_fp_health_f != NULL)
+                    hp_f = g_fp_health_f((void *)(uintptr_t)pawn);
+                if (hp_i >= 1 && hp_i <= 100000) {
+                    hp = (float)hp_i;
+                } else if (isfinite(hp_f) && hp_f > 0.001f && hp_f <= 100000.0f) {
+                    hp = hp_f;
+                } else if (hp_i == 0 && hp_f == 0.0f) {
+                    hp = 0.0f;
+                }
             }
             uint64_t mdl = 0;
             if (mm_r64((uintptr_t)pawn + OFF_PAWN_MODEL, &mdl) && mdl != 0) {
@@ -977,6 +1026,10 @@ static void mm_esp_collect_real(void)
                     isfinite(m) && m > 0.5f && m < 100000.0f)
                     hpMax = m;
             }
+            /* muestra cruda del primer pawn para confirmar el ABI en el equipo */
+            if (g_hp_diag == nil)
+                g_hp_diag = [NSString stringWithFormat:@"i=%u f=%.2f mx=%.0f",
+                             (unsigned)hp_i, (double)hp_f, (double)hpMax];
         }
 
         /* --- v0.2.4: nombre real (entidad+0x160; string C#: len 1..63) --- */
@@ -1040,8 +1093,11 @@ static void mm_esp_collect_real(void)
 
     memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
-    g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d hp=%s",
-                  total, drawn, (g_fp_health != NULL) ? "ok" : "no"];
+    g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d hp=%s%@",
+                  total, drawn, (g_fp_health != NULL) ? "ok" : "no",
+                  (g_hp_diag != nil)
+                      ? [NSString stringWithFormat:@" [%@]", g_hp_diag]
+                      : @""];
 }
 
 /* Reescritura atomica del archivo de estado que se puede leer sin syslog. */
