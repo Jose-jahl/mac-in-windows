@@ -1,0 +1,85 @@
+name: ModMenu
+
+# Compila ModMenu.dylib (el binario que reemplaza a MSDKPolicy dentro del IPA)
+# sin que tengas Mac. Mismo truco que KeyGate/ESP: GitHub presta un Mac virtual,
+# ejecuta el clang y deja el resultado como artefacto descargable.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'ModMenu/ModMenu.m'
+      - '.github/workflows/modmenu.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Compilar ModMenu.dylib
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          # -fobjc-arc es obligatorio: el fuente usa bloques y ARC.
+          # install_name = el del framework que reemplazamos: si algo mira la
+          # identidad del binario en runtime, ve la ruta que espera el juego.
+          clang -dynamiclib \
+                -arch arm64 \
+                -isysroot "$SDK" \
+                -miphoneos-version-min=15.0 \
+                -fobjc-arc \
+                -Wall \
+                -install_name "@rpath/MSDKPolicy.framework/MSDKPolicy" \
+                -framework UIKit \
+                -framework Foundation \
+                -framework QuartzCore \
+                -o ModMenu.dylib \
+                ModMenu/ModMenu.m
+          echo "compilado"
+
+      - name: Verificar que es una dylib arm64 con constructor
+        run: |
+          set -e
+          echo "--- file ---"
+          file ModMenu.dylib
+          echo
+          echo "--- install name ---"
+          otool -D ModMenu.dylib
+          otool -D ModMenu.dylib | grep -q '@rpath/MSDKPolicy.framework/MSDKPolicy' \
+            || { echo "install name incorrecto"; exit 1; }
+          echo
+          echo "--- simbolo marcador ---"
+          nm -gU ModMenu.dylib | grep -q '_modmenu_build_id' \
+            || { echo "FALTA _modmenu_build_id: el fuente no llego al binario"; exit 1; }
+          echo "  ok      _modmenu_build_id"
+          echo
+          echo "--- constructor ---"
+          # Igual que en ESP: los punteros de constructor van en
+          # __TEXT,__init_offsets (no hay __mod_init_func con Xcode nuevo).
+          INITSZ=$(otool -l ModMenu.dylib | awk '/sectname __init_offsets/{f=1} f&&/^ *size/{print $2; exit}')
+          if [ -n "$INITSZ" ] && [ $((INITSZ)) -gt 0 ]; then
+            echo "  ok      __init_offsets = $INITSZ B (hay constructor)"
+          else
+            echo "  FALTA   sin __init_offsets: la dylib cargaria y no haria nada"
+            otool -l ModMenu.dylib | grep -iE 'sectname|segname' | grep -i init || true
+            exit 1
+          fi
+          echo
+          echo "--- tamano ---"
+          ls -l ModMenu.dylib
+          file ModMenu.dylib | grep -q 'arm64'  || { echo "NO es arm64"; exit 1; }
+          file ModMenu.dylib | grep -q 'shared' || { echo "NO es una libreria compartida"; exit 1; }
+          echo
+          echo "OK: ModMenu.dylib lista para el swap"
+
+      - name: Subir el resultado
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModMenu
+          path: ModMenu.dylib
+          if-no-files-found: error
