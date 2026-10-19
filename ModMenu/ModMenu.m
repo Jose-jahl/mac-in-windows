@@ -12,6 +12,19 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.2 (19 oct) - ESP parte 1: MOTOR DE DIBUJO + SONDA.
+ *    - capa de dibujo propia (MMCanvasView) DENTRO de la ventana del juego,
+ *      por debajo del boton/panel: pinta cajas con nombre/distancia/salud a
+ *      ~30 fps (CADisplayLink);
+ *    - aun SIN datos reales: con el ESP maestro ON se dibujan 3 cajas DEMO en
+ *      movimiento (valida el motor de dibujo en el equipo);
+ *    - sonda de SOLO LECTURA de la tabla methodPointers del juego: lee con
+ *      vm_read_overwrite (si una direccion no vale, devuelve error en vez de
+ *      tumbar la app) y comprueba que los punteros caen en el binario del
+ *      juego; resultado en Documents/modmenu_status.txt (linea probe=);
+ *    - la v0.2.3 conecta camara/pawns reales (objetivos ya cribados en el
+ *      laboratorio con la dylib del modder).
+ *
  *  v0.2.1 (19 oct) - FIX reportado en dispositivo real:
  *    - FUERA la ventana overlay propia: provocaba que la app girara a
  *      vertical (su rootViewController admite todos los giros) y bloqueaba
@@ -41,8 +54,13 @@
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #include <unistd.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#include <mach-o/dyld.h>
+#include <math.h>
+#include <string.h>
 
-#define MODMENU_VERSION     "0.2.1-fix"
+#define MODMENU_VERSION     "0.2.2-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -52,7 +70,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-fix-0.2.1";
+const char *modmenu_build_id = "modmenu-esp-0.2.2";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -72,6 +90,16 @@ static int   g_tries       = 0;
 static NSTimeInterval g_t0 = 0;
 static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
 
+/* --- ESP v0.2.2: lienzo + cajas + sonda --- */
+#define MM_MAX_BOXES 24
+typedef struct { CGFloat x, y, w, h; float dist; int alive; } MMEspBox;
+static MMEspBox     g_boxes[MM_MAX_BOXES];
+static int          g_box_count = 0;  /* cajas listas para pintar         */
+static UIView      *g_esp   = nil;    /* lienzo MMCanvasView              */
+static CADisplayLink *g_link = nil;   /* latido de dibujo ~30 fps         */
+static NSString    *g_probe = nil;    /* texto de la sonda (fase B)       */
+static int          g_probe_ok = -1;  /* -1 pendiente / 0 revisar / 1 ok  */
+
 /* prototipos */
 static void mm_tick(void);
 static void mm_set_panel(BOOL open);
@@ -80,6 +108,9 @@ static void mm_apply_esp_lock(void);
 static void mm_apply_stream(void);
 static void mm_refresh_info(void);
 static void mm_write_status(NSString *nota);
+static BOOL mm_def_bool(NSString *k, BOOL d);
+static void mm_esp_frame(double t);
+static void mm_probe_run(void);
 
 /*---------------------------------------------------------------------------
  * Vista raiz que DEJA PASAR los toques: si nadie (boton/panel) los consume,
@@ -97,10 +128,61 @@ static void mm_write_status(NSString *nota);
 @end
 
 /*---------------------------------------------------------------------------
+ * Lienzo del ESP (v0.2.2): pinta las cajas ENCIMA del juego pero DEBAJO del
+ * boton y del panel (va el primero dentro de la capa). No recibe toques.
+ *--------------------------------------------------------------------------*/
+@interface MMCanvasView : UIView @end
+
+@implementation MMCanvasView
+- (void)drawRect:(CGRect)rect
+{
+    if (g_box_count <= 0) return;
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (ctx == NULL) return;
+
+    UIFont *f = [UIFont fontWithName:@"Menlo-Bold" size:11.0];
+    if (f == nil) f = [UIFont boldSystemFontOfSize:11.0];
+    NSDictionary *attr = @{ NSFontAttributeName: f,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:1.0 green:0.45 blue:0.45 alpha:1.0] };
+
+    BOOL conNombre = mm_def_bool(@"mm_esp_name", NO);
+    BOOL conDist   = mm_def_bool(@"mm_esp_dist", NO);
+    BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
+
+    CGContextSetLineWidth(ctx, 1.6);
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        MMEspBox *b = &g_boxes[i];
+        if (!b->alive) continue;
+        CGRect r = CGRectMake(b->x, b->y, b->w, b->h);
+        CGContextSetRGBStrokeColor(ctx, 1.0, 0.25, 0.25, 0.95);
+        CGContextStrokeRect(ctx, r);
+        if (conSalud) {
+            CGRect hb = CGRectMake(r.origin.x, r.origin.y - 6.0, r.size.width, 3.0);
+            CGContextSetRGBFillColor(ctx, 0.25, 1.0, 0.35, 0.9);
+            CGContextFillRect(ctx, CGRectMake(hb.origin.x, hb.origin.y,
+                                              hb.size.width * 0.7, hb.size.height));
+            CGContextSetRGBStrokeColor(ctx, 0.2, 0.6, 0.2, 0.9);
+            CGContextStrokeRect(ctx, hb);
+        }
+        if (conNombre)
+            [[NSString stringWithFormat:@"DEMO-%d", i + 1]
+             drawAtPoint:CGPointMake(r.origin.x, r.origin.y - 16.0)
+             withAttributes:attr];
+        if (conDist)
+            [[NSString stringWithFormat:@"%d m", (int)(b->dist + 0.5f)]
+             drawAtPoint:CGPointMake(r.origin.x, CGRectGetMaxY(r) + 2.0)
+             withAttributes:attr];
+    }
+}
+@end
+
+/*---------------------------------------------------------------------------
  * Callbacks de la UI (un singleton para target/action).
  *--------------------------------------------------------------------------*/
 @interface MMTargets : NSObject
 + (MMTargets *)shared;
+- (void)onFrame:(CADisplayLink *)link;
 @end
 
 @implementation MMTargets
@@ -163,6 +245,11 @@ static void mm_write_status(NSString *nota);
     if (g_range_val != nil)
         g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(s.value + 0.5f)];
     mm_write_status(@"ajuste");
+}
+
+- (void)onFrame:(CADisplayLink *)link
+{
+    mm_esp_frame(link.timestamp);
 }
 @end
 
@@ -277,6 +364,124 @@ static float mm_def_float(NSString *k, float d)
     return [ud floatForKey:k];
 }
 
+/*---------------------------------------------------------------------------
+ * ESP v0.2.2 - motor de dibujo.
+ *  El CADisplayLink llama a mm_esp_frame() ~30 veces por segundo: decide que
+ *  cajas hay y pide repintar el lienzo. Aun NO hay datos reales del juego:
+ *  con el ESP maestro ON se pintan 3 cajas DEMO en movimiento (valida el
+ *  motor de dibujo en el equipo). La v0.2.3 conecta camara/pawns reales.
+ *--------------------------------------------------------------------------*/
+static BOOL mm_esp_collect_real(void)
+{
+    return NO;                          /* v0.2.3: camara + jugadores */
+}
+
+static void mm_esp_demo(double t)
+{
+    CGFloat W = (g_esp != nil && g_esp.bounds.size.width > 1.0)
+              ? g_esp.bounds.size.width : 800.0;
+    g_box_count = 3;
+    for (int i = 0; i < 3; i++) {
+        CGFloat bw = 42.0 + (CGFloat)i * 14.0;
+        CGFloat bh = bw * 1.9;
+        CGFloat cx = W * 0.5 + sin(t * 0.8 + (double)i * 2.1) * (110.0 + 45.0 * i);
+        CGFloat cy = 150.0 + (CGFloat)i * 115.0;
+        MMEspBox *b = &g_boxes[i];
+        b->x = cx - bw / 2.0;
+        b->y = cy - bh / 2.0;
+        b->w = bw;
+        b->h = bh;
+        b->dist = 30.0f + (float)i * 37.0f + (float)fmod(t * 8.0, 6.0);
+        b->alive = 1;
+    }
+}
+
+static void mm_esp_frame(double t)
+{
+    @try {
+        if (g_esp == nil) return;
+        if (!mm_def_bool(@"mm_esp_master", NO)) {
+            if (g_box_count != 0) {
+                g_box_count = 0;
+                [g_esp setNeedsDisplay];
+            }
+            if (!g_esp.hidden) g_esp.hidden = YES;
+            return;
+        }
+        if (g_esp.hidden) g_esp.hidden = NO;
+        if (!mm_esp_collect_real()) mm_esp_demo(t);
+        [g_esp setNeedsDisplay];
+    } @catch (NSException *e) {}
+}
+
+/*---------------------------------------------------------------------------
+ * Sonda de SOLO LECTURA (v0.2.2 - fase B).
+ *  Comprueba en el equipo que la tabla methodPointers del juego es legible y
+ *  que sus punteros caen en su binario. NO llama a nada del juego: solo lee.
+ *  La lectura va con vm_read_overwrite: si la direccion no es valida devuelve
+ *  error en vez de tumbar la app (sin eso la sonda seria un riesgo).
+ *  Direccion de la tabla (en archivo): VA 0x10C33BFA8, base imagen 0x100000000.
+ *--------------------------------------------------------------------------*/
+static uint64_t mm_safe_read64(uintptr_t addr, BOOL *ok)
+{
+    uint64_t v = 0;
+    vm_size_t outsz = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr,
+                                         (vm_size_t)sizeof(v),
+                                         (vm_address_t)&v, &outsz);
+    *ok = (kr == KERN_SUCCESS && outsz == sizeof(v));
+    return *ok ? v : 0;
+}
+
+static void mm_probe_run(void)
+{
+    @try {
+        const struct mach_header *hdr = _dyld_get_image_header(0);
+        if (hdr == NULL) { g_probe = @"sin imagen principal"; g_probe_ok = 0; return; }
+
+        uintptr_t base = (uintptr_t)hdr;
+        uintptr_t tbl  = base + (uintptr_t)(0x10C33BFA8ULL - 0x100000000ULL);
+        NSMutableString *s = [NSMutableString stringWithFormat:
+            @"base=0x%lX tabla=0x%lX",
+            (unsigned long)base, (unsigned long)tbl];
+
+        static const struct { int pos; const char *que; } slots[] = {
+            {      0, "slot0"          },
+            {  11130, "fieldOfView"    },
+            {  11250, "WorldToScreen"  },
+            {  47790, "get_LocalPawn"  },
+            {  54477, "get_Health"     },
+            { 142662, "WorldToScreen2" },
+            { 236771, "aim(parche)"    },
+            {     -1, NULL             },
+        };
+
+        int enCod = 0, malos = 0;
+        for (int i = 0; slots[i].pos >= 0; i++) {
+            BOOL ok = NO;
+            uint64_t v = mm_safe_read64(tbl + (uintptr_t)slots[i].pos * 8, &ok);
+            if (!ok) { [s appendFormat:@" | %s=ilegible", slots[i].que]; malos++; continue; }
+            uint64_t vv = v & 0x0000FFFFFFFFFFFFULL;   /* quita PAC si lo hay */
+            const char *img = "?";
+            Dl_info di;
+            if (vv != 0 && dladdr((const void *)(uintptr_t)vv, &di) && di.dli_fname != NULL) {
+                const char *bn = strrchr(di.dli_fname, '/');
+                img = (bn != NULL) ? (bn + 1) : di.dli_fname;
+            }
+            if (strcmp(img, "cod") == 0) enCod++;
+            else malos++;
+            [s appendFormat:@" | %s=0x%llX(%s)", slots[i].que,
+                            (unsigned long long)vv, img];
+        }
+        g_probe = s;
+        g_probe_ok = (malos == 0 && enCod > 0) ? 1 : 0;
+        NSLog(@"%s sonda: %@", MM_TAG, s);
+    } @catch (NSException *e) {
+        g_probe = [NSString stringWithFormat:@"excepcion: %@", e.reason];
+        g_probe_ok = 0;
+    }
+}
+
 /* Reescritura atomica del archivo de estado que se puede leer sin syslog. */
 static void mm_write_status(NSString *nota)
 {
@@ -299,6 +504,8 @@ static void mm_write_status(NSString *nota)
             @"boton=%s panel=%s via=%s\n"
             @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d rango=%d\n"
             @"stream=%d\n"
+            @"render=%s cajas=%d link=%s\n"
+            @"probe=%s\n"
             @"nota=%@\n",
             MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), (int)getpid(),
             NSBundle.mainBundle.bundleIdentifier ?: @"?",
@@ -313,6 +520,10 @@ static void mm_write_status(NSString *nota)
             (int)mm_def_bool(@"mm_esp_lines", NO),
             (int)mm_def_float(@"mm_esp_range", 150.0f),
             (int)mm_def_bool(@"mm_stream", NO),
+            (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? "on" : "off",
+            g_box_count,
+            (g_link != nil && !g_link.paused) ? "activo" : "parado",
+            g_probe != nil ? g_probe.UTF8String : "pendiente",
             nota];
 
         [txt writeToFile:[docs stringByAppendingPathComponent:@"modmenu_status.txt"]
@@ -373,6 +584,20 @@ static void mm_build_ui(void)
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:[MMTargets shared] action:@selector(onPan:)];
         [g_btn addGestureRecognizer:pan];
+    }
+
+    /* --- lienzo del ESP + latido de dibujo (~30 fps) --- */
+    if (g_esp == nil) {
+        g_esp = [[MMCanvasView alloc] initWithFrame:CGRectZero];
+        g_esp.backgroundColor = [UIColor clearColor];
+        g_esp.userInteractionEnabled = NO;
+        g_esp.hidden = YES;
+    }
+    if (g_link == nil) {
+        g_link = [CADisplayLink displayLinkWithTarget:[MMTargets shared]
+                                             selector:@selector(onFrame:)];
+        g_link.preferredFramesPerSecond = 30;
+        [g_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 
     if (g_panel != nil) return;
@@ -461,7 +686,7 @@ static void mm_build_ui(void)
     [g_p_esp addSubview:sl];
 
     UILabel *na = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 292.0, 272.0, 40.0)];
-    na.text = @"El ESP real llega en la proxima build (v0.2.2). De momento se guardan los ajustes.";
+    na.text = @"DEMO v0.2.2: con el maestro ON veras cajas de prueba moviendose. Los jugadores reales llegan en la proxima build.";
     na.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
     na.font = [UIFont systemFontOfSize:10.5];
     na.numberOfLines = 2;
@@ -565,7 +790,9 @@ static void mm_refresh_info(void)
             @"ventanas %d  via %s\n"
             @"uptime   %d s\n"
             @"panel    %@\n"
-            @"esp      %@   rango %d m\n",
+            @"esp      %@   rango %d m\n"
+            @"render   %@   cajas %d\n"
+            @"probe    %@\n",
             MODMENU_VERSION,
             mm_my_path(),
             (int)getpid(),
@@ -577,7 +804,10 @@ static void mm_refresh_info(void)
             (int)mm_uptime(),
             g_panel_open ? @"abierto" : @"cerrado",
             mm_def_bool(@"mm_esp_master", NO) ? @"ON" : @"off",
-            (int)mm_def_float(@"mm_esp_range", 150.0f)];
+            (int)mm_def_float(@"mm_esp_range", 150.0f),
+            (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? @"ON" : @"off",
+            g_box_count,
+            (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar")];
         g_info.text = txt;
     } @catch (NSException *e) {}
 }
@@ -611,6 +841,14 @@ static BOOL mm_place_ui(void)
         if (host.subviews.lastObject != g_root) [host bringSubviewToFront:g_root];
 
         if (g_btn == nil) mm_build_ui();
+
+        if (g_esp.superview != g_root) {   /* el lienzo va AL FONDO del menu */
+            [g_esp removeFromSuperview];
+            g_esp.frame = g_root.bounds;
+            g_esp.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                                     UIViewAutoresizingFlexibleHeight;
+            [g_root insertSubview:g_esp atIndex:0];
+        }
 
         if (g_btn.superview != g_root) {
             [g_btn removeFromSuperview];
@@ -652,6 +890,7 @@ static void mm_tick(void)
         if (!g_ui_ok) g_ui_ok = YES;
         BOOL fast = (g_tries <= MM_FAST_TRIES);
         BOOL ok = mm_place_ui();
+        if (g_probe == nil && mm_uptime() > 2.0) mm_probe_run();
         mm_refresh_info();
 
         if (fast) {
