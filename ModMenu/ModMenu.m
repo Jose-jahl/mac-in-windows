@@ -26,7 +26,15 @@
  *      salud (no tumba la cadena);
  *    - identidad (19 oct): menu en verde + marca de agua "Desarrollado por
  *      Jose Lopez @l0pez9801" abajo a la izquierda (tenue, no recibe toques,
- *      se atenua con Stream Mode).
+ *      se atenua con Stream Mode);
+ *    - rango (19 oct): escaneo de hasta 200 pawns como el mod de referencia
+ *      (antes se cortaba a 24) y fuera el minimo de 4 px que ocultaba a los
+ *      lejanos; slider hasta 500 m;
+ *    - dibujo (19 oct): cajas y lineas con contorno negro y trazo grueso,
+ *      filtros Jugadores/Bots y relleno opcional; suavizado por pawn para que
+ *      las cajas/lineas no salten al cambiar el orden de la lista;
+ *    - panel arrastrable (19 oct): se mueve desde la franja del titulo y
+ *      recuerda posicion (mm_panel_pos/x/y).
  *
  *  v0.2.3 (19 oct) - ESP parte 2: DATOS REALES.
  *    - fuera las cajas DEMO; con el ESP maestro ON se leen los jugadores de
@@ -115,13 +123,15 @@ static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
 
 static const char *g_via   = "-";     /* donde quedo colgada la UI        */
 static BOOL  g_panel_open  = NO;
+static CGPoint g_panel_drag0;         /* v0.2.4: inicio de arrastre panel */
 static int   g_tries       = 0;
 static NSTimeInterval g_t0 = 0;
 static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
 
 /* --- ESP: lienzo + cajas + sonda --- */
-#define MM_MAX_BOXES 24
+#define MM_MAX_BOXES 32
 typedef struct {
+    uint64_t pawn;              /* v0.2.4: dueno de la caja (estabilidad) */
     CGFloat x, y, w, h;
     float   dist;
     float   hp;                 /* v0.2.4: salud actual (-1 = sin dato) */
@@ -187,6 +197,10 @@ static void mm_probe_run(void);
     BOOL conDist   = mm_def_bool(@"mm_esp_dist", NO);
     BOOL conLineas = mm_def_bool(@"mm_esp_lines", NO);
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
+    BOOL conRelleno = mm_def_bool(@"mm_esp_fill", NO);
+
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextSetLineJoin(ctx, kCGLineJoinRound);
 
     CGContextSetLineWidth(ctx, 1.6);
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
@@ -198,12 +212,27 @@ static void mm_probe_run(void);
         if (b->robot) { cr = 1.00; cg = 0.72; cb = 0.20; }  /* bot: ambar     */
 
         if (conLineas) {
-            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.55);
+            /* v0.2.4: contorno negro + trazo grueso (antes se veia debil) */
+            CGContextSetLineWidth(ctx, 4.2);
+            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.45);
+            CGContextMoveToPoint(ctx, bs.size.width / 2.0, bs.size.height);
+            CGContextAddLineToPoint(ctx, CGRectGetMidX(r), CGRectGetMaxY(r));
+            CGContextStrokePath(ctx);
+            CGContextSetLineWidth(ctx, 1.8);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
             CGContextMoveToPoint(ctx, bs.size.width / 2.0, bs.size.height);
             CGContextAddLineToPoint(ctx, CGRectGetMidX(r), CGRectGetMaxY(r));
             CGContextStrokePath(ctx);
         }
 
+        if (conRelleno) {
+            CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.12);
+            CGContextFillRect(ctx, r);
+        }
+        CGContextSetLineWidth(ctx, 3.4);
+        CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
+        CGContextStrokeRect(ctx, r);
+        CGContextSetLineWidth(ctx, 1.7);
         CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
         CGContextStrokeRect(ctx, r);
 
@@ -251,6 +280,7 @@ static void mm_probe_run(void);
 @interface MMTargets : NSObject
 + (MMTargets *)shared;
 - (void)onFrame:(CADisplayLink *)link;
+- (void)onPanelPan:(UIPanGestureRecognizer *)g;
 @end
 
 @implementation MMTargets
@@ -288,6 +318,34 @@ static void mm_probe_run(void);
 }
 
 - (void)onClose { mm_set_panel(NO); }
+
+/* v0.2.4: arrastre del panel por su franja superior, con memoria. */
+- (void)onPanelPan:(UIPanGestureRecognizer *)g
+{
+    @try {
+        UIView *p = g_panel;
+        if (p == nil || p.superview == nil) return;
+        UIView *root = p.superview;
+        if (g.state == UIGestureRecognizerStateBegan) g_panel_drag0 = p.center;
+        CGPoint t = [g translationInView:root];
+        CGPoint c = CGPointMake(g_panel_drag0.x + t.x, g_panel_drag0.y + t.y);
+        CGFloat hw = p.bounds.size.width / 2.0;
+        CGFloat hh = p.bounds.size.height / 2.0;
+        c.x = MAX(hw + 4.0, MIN(root.bounds.size.width  - hw - 4.0, c.x));
+        c.y = MAX(hh + 4.0, MIN(root.bounds.size.height - hh - 4.0, c.y));
+        p.center = c;
+        if (g.state == UIGestureRecognizerStateEnded ||
+            g.state == UIGestureRecognizerStateCancelled) {
+            NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+            [ud setFloat:c.x forKey:@"mm_panel_x"];
+            [ud setFloat:c.y forKey:@"mm_panel_y"];
+            [ud setBool:YES forKey:@"mm_panel_pos"];
+            mm_write_status(@"panel movido");
+        }
+    } @catch (NSException *e) {
+        NSLog(@"%s onPanelPan: %@", MM_TAG, e.reason);
+    }
+}
 
 - (void)onSeg:(UISegmentedControl *)s
 {
@@ -778,7 +836,7 @@ static void mm_esp_collect_real(void)
     if (total < 0) total = 0;
     if (total > 999) total = 999;
     g_esp_players = total;
-    int loopn = (total > MM_MAX_BOXES) ? MM_MAX_BOXES : total;
+    int loopn = total;
 
     /* jugador local: para la distancia y para no dibujarlo */
     void *localPawn = g_fp_localpawn();
@@ -793,9 +851,17 @@ static void mm_esp_collect_real(void)
         }
     }
 
-    float rango = mm_def_float(@"mm_esp_range", 150.0f);
-    BOOL conSalud = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
+    float rango = mm_def_float(@"mm_esp_range", 300.0f);
+    BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
+    BOOL conJug    = mm_def_bool(@"mm_esp_players", YES); /* v0.2.4 */
+    BOOL conBots   = mm_def_bool(@"mm_esp_bots", YES);    /* v0.2.4 */
     int drawn = 0;
+    MMEspBox nuevos[MM_MAX_BOXES];
+    memset(nuevos, 0, sizeof(nuevos));
+
+    /* v0.2.4: GL escanea hasta 200 pawns; el tope de cajas es solo para
+       DIBUJAR. Antes se recortaba el escaneo a 24 y se perdia rango real. */
+    if (loopn > 200) loopn = 200;
 
     for (int i = 0; i < loopn && drawn < MM_MAX_BOXES; i++) {
         uint64_t pawn = 0;
@@ -812,6 +878,10 @@ static void mm_esp_collect_real(void)
             uint64_t rb = 0;
             if (mm_r64((uintptr_t)ent + OFF_ENT_ROBOT, &rb)) robot = (int)(rb & 0xFF);
         }
+
+        /* v0.2.4: filtros por tipo */
+        if (robot && !conBots) continue;
+        if (!robot && !conJug) continue;
 
         uint64_t tr = 0, tchk = 0;
         if (!mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &tr) || tr == 0) continue;
@@ -836,7 +906,8 @@ static void mm_esp_collect_real(void)
         if (pies.x < -W || pies.x > 2.0 * W || pies.y < -H || pies.y > 2.0 * H) continue;
 
         CGFloat bh = pies.y - cab.y;
-        if (bh < 4.0 || bh > 2.0 * H) continue;
+        /* v0.2.4: antes 4 px dejaba fuera a los lejanos (cajas pequenas) */
+        if (bh < 1.5 || bh > 2.0 * H) continue;
         CGFloat bw = bh * 0.45;
 
         /* --- v0.2.4: salud (solo con el toggle ON; misma llamada que GL,
@@ -889,21 +960,35 @@ static void mm_esp_collect_real(void)
             }
         }
 
-        MMEspBox *b = &g_boxes[drawn];
-        b->x = cab.x - bw / 2.0;
-        b->y = cab.y;
-        b->w = bw;
-        b->h = bh;
-        b->dist = dist;
-        b->hp = hp;
-        b->hpMax = hpMax;
-        b->robot = robot;
-        b->alive = 1;
-        b->hasName = (nm[0] != 0) ? 1 : 0;
-        memcpy(b->name, nm, sizeof(b->name));
-        drawn++;
+        MMEspBox nb;
+        memset(&nb, 0, sizeof(nb));
+        nb.pawn = pawn;
+        nb.x = cab.x - bw / 2.0;
+        nb.y = cab.y;
+        nb.w = bw;
+        nb.h = bh;
+        nb.dist = dist;
+        nb.hp = hp;
+        nb.hpMax = hpMax;
+        nb.robot = robot;
+        nb.alive = 1;
+        nb.hasName = (nm[0] != 0) ? 1 : 0;
+        memcpy(nb.name, nm, sizeof(nb.name));
+
+        /* v0.2.4: estabilidad por pawn. La lista cambia de orden y las cajas
+           saltaban; cada pawn conserva su caja y se interpola suavemente. */
+        for (int q = 0; q < g_box_count; q++) {
+            if (g_boxes[q].pawn != pawn || !g_boxes[q].alive) continue;
+            nb.x = g_boxes[q].x * 0.55 + nb.x * 0.45;
+            nb.y = g_boxes[q].y * 0.55 + nb.y * 0.45;
+            nb.w = g_boxes[q].w * 0.55 + nb.w * 0.45;
+            nb.h = g_boxes[q].h * 0.55 + nb.h * 0.45;
+            break;
+        }
+        nuevos[drawn++] = nb;
     }
 
+    memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
     g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d hp=%s",
                   total, drawn, (g_fp_health != NULL) ? "ok" : "no"];
@@ -1049,6 +1134,16 @@ static void mm_build_ui(void)
     g_panel.hidden = YES;
     g_panel.alpha = 0.0;
 
+    /* v0.2.4: zona de arrastre del panel (franja superior). Va ANTES que el
+       titulo y la X para no taparlos. */
+    UIView *dz = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, MM_PANEL_W, 32.0)];
+    dz.backgroundColor = [UIColor clearColor];
+    dz.userInteractionEnabled = YES;
+    UIPanGestureRecognizer *dpan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:[MMTargets shared] action:@selector(onPanelPan:)];
+    [dz addGestureRecognizer:dpan];
+    [g_panel addSubview:dz];
+
     UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 9.0, 220.0, 20.0)];
     h.text = [NSString stringWithFormat:@"ModMenu %s", MODMENU_VERSION];
     h.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
@@ -1092,42 +1187,44 @@ static void mm_build_ui(void)
     [g_panel addSubview:g_p_info];
 
     /* --- pagina ESP --- */
-    NSArray *keys = @[@"mm_esp_master", @"mm_esp_box", @"mm_esp_name",
-                      @"mm_esp_dist", @"mm_esp_health", @"mm_esp_lines"];
-    NSArray *titulos = @[@"ESP maestro", @"Cajas", @"Nombres",
-                         @"Distancia", @"Salud", @"Lineas"];
+    NSArray *keys = @[@"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
+                      @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
+                      @"mm_esp_health", @"mm_esp_lines", @"mm_esp_fill"];
+    NSArray *titulos = @[@"ESP maestro", @"Cajas", @"Jugadores",
+                         @"Bots", @"Nombres", @"Distancia",
+                         @"Salud", @"Lineas", @"Relleno"];
     g_sub_switches = [NSMutableArray array];
     for (NSUInteger i = 0; i < keys.count; i++) {
         UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-        sw.on = mm_def_bool(keys[i], NO);
+        sw.on = mm_def_bool(keys[i], (i == 2 || i == 3)); /* jugadores/bots ON */
         sw.onTintColor = mm_verde();
         sw.accessibilityIdentifier = keys[i];
         [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
             forControlEvents:UIControlEventValueChanged];
         UIView *row = mm_row(titulos[i], sw);
-        row.frame = CGRectMake(0, 2.0 + (CGFloat)i * 38.0, 284.0, 34.0);
+        row.frame = CGRectMake(0, (CGFloat)i * 31.5, 284.0, 31.0);
         [g_p_esp addSubview:row];
         if (i > 0) [g_sub_switches addObject:sw];
     }
 
-    float rng = mm_def_float(@"mm_esp_range", 150.0f);
+    float rng = mm_def_float(@"mm_esp_range", 300.0f);
 
-    UILabel *rt = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 236.0, 190.0, 18.0)];
+    UILabel *rt = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 288.0, 190.0, 18.0)];
     rt.text = @"Rango ESP (m)";
     rt.textColor = [UIColor whiteColor];
     rt.font = [UIFont systemFontOfSize:13.0];
     [g_p_esp addSubview:rt];
 
-    g_range_val = [[UILabel alloc] initWithFrame:CGRectMake(200.0, 236.0, 78.0, 18.0)];
+    g_range_val = [[UILabel alloc] initWithFrame:CGRectMake(200.0, 288.0, 78.0, 18.0)];
     g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(rng + 0.5f)];
     g_range_val.textColor = [UIColor colorWithWhite:0.8 alpha:1.0];
     g_range_val.font = [UIFont systemFontOfSize:12.0];
     g_range_val.textAlignment = NSTextAlignmentRight;
     [g_p_esp addSubview:g_range_val];
 
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, 256.0, 272.0, 30.0)];
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, 306.0, 272.0, 30.0)];
     sl.minimumValue = 20.0f;
-    sl.maximumValue = 300.0f;
+    sl.maximumValue = 500.0f;
     sl.value = rng;
     sl.accessibilityIdentifier = @"mm_esp_range";
     sl.tintColor = mm_verde();
@@ -1135,13 +1232,6 @@ static void mm_build_ui(void)
     [sl addTarget:[MMTargets shared] action:@selector(onSlider:)
         forControlEvents:UIControlEventValueChanged];
     [g_p_esp addSubview:sl];
-
-    UILabel *na = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 292.0, 272.0, 40.0)];
-    na.text = @"v0.2.4: datos reales + salud y nombre real. Rojo = jugador, ambar = bot. Si no aparecen cajas mira INFO (esp2) o modmenu_status.txt.";
-    na.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
-    na.font = [UIFont systemFontOfSize:10.5];
-    na.numberOfLines = 3;
-    [g_p_esp addSubview:na];
 
     /* --- pagina MISC --- */
     UIView *r1 = mm_switch_row(@"Stream Mode (atenuar boton)", @"mm_stream", NO);
@@ -1194,6 +1284,19 @@ static void mm_position_panel(void)
     if (g_panel == nil || g_panel.superview == nil || g_btn == nil) return;
     CGRect rb = g_panel.superview.bounds;
     CGFloat w = MM_PANEL_W, h = MM_PANEL_H;
+
+    /* v0.2.4: si el operador movio el panel, se respeta su posicion */
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"mm_panel_pos"]) {
+        CGFloat cx = mm_def_float(@"mm_panel_x", w / 2.0 + 8.0);
+        CGFloat cy = mm_def_float(@"mm_panel_y", h / 2.0 + 34.0);
+        CGFloat px = cx - w / 2.0;
+        CGFloat py = cy - h / 2.0;
+        px = MAX(4.0, MIN(rb.size.width  - w - 4.0, px));
+        py = MAX(4.0, MIN(rb.size.height - h - 4.0, py));
+        g_panel.frame = CGRectMake(px, py, w, h);
+        return;
+    }
+
     CGPoint c = g_btn.center;
     CGFloat x = c.x - w / 2.0;
     CGFloat y = c.y + 34.0;
