@@ -12,6 +12,16 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.0 (20 oct) - STREAM MODE + PULIDO DEL ESP.
+ *    - nueva pagina VIS: Stream Mode (oculta panel y marca de agua; el boton
+ *      queda al 10% y sigue tocable para volver a abrirlo), contador de
+ *      jugadores/bots dibujados, estilo de caja (completa/esquinas) y tema de
+ *      color (clasico/neon/blanco);
+ *    - Stream Mode ya NO cierra el panel en cada latido: el operador puede
+ *      reabrir el menu con el boton atenuado y apagarlo cuando quiera;
+ *    - las nuevas opciones (mm_esp_count, mm_esp_box_style, mm_esp_theme) se
+ *      resetean al arranque igual que el resto de opciones.
+ *
  *  v0.2.9 (19 oct) - FASE D COMPLETA: SKINS (ARMAS + TRAJE) Y GUEST RESET.
  *    - nueva pagina SKINS: maestro, captura de IDs reales, campos de ID de
  *      arma y de traje, 5 presets verificados (0x0F6951, 0x0F9062, 0x0FB773,
@@ -116,8 +126,8 @@
  *    - si el puntero de GetHealth no valida, el ESP sigue funcionando sin
  *      salud (no tumba la cadena);
  *    - identidad (19 oct): menu en verde + marca de agua "Desarrollado por
- *      Jose Lopez @l0pez9801" abajo a la izquierda (tenue, no recibe toques,
- *      se atenua con Stream Mode);
+ *      Jose Lopez @l0pez9801" abajo a la izquierda (tenue, no recibe toques;
+ *      v0.3.0: Stream Mode la oculta del todo);
  *    - rango (19 oct): escaneo de hasta 200 pawns como el mod de referencia
  *      (antes se cortaba a 24) y fuera el minimo de 4 px que ocultaba a los
  *      lejanos; slider hasta 500 m;
@@ -169,7 +179,8 @@
  *    - los toggles y sliders se guardan (NSUserDefaults): persisten entre
  *      partidas; el ESP REAL se conecta en la build siguiente (v0.2.2) -
  *      esta build valida la UI y la interaccion en dispositivo;
- *    - Stream Mode: atenua el boton casi hasta desaparecer (para grabar);
+ *    - Stream Mode: atenua el boton casi hasta desaparecer y oculta la
+ *      marca de agua (para grabar);
  *    - la ventana overlay DEJA PASAR los toques fuera del boton/panel: el
  *      juego se sigue jugando igual;
  *    - se conserva el instrumental de diagnostico de la fase A: latido en el
@@ -193,7 +204,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.9-esp"
+#define MODMENU_VERSION     "0.3.0-vis"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -209,7 +220,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.9";
+const char *modmenu_build_id = "modmenu-vis-0.3.0";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -218,6 +229,7 @@ static UIView   *g_panel = nil;   /* panel desplegable                        */
 static UISegmentedControl *g_seg = nil;
 static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
+static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
 static UIView   *g_p_misc = nil;
 static UIView   *g_p_skins = nil;
 static UIView   *g_p_info = nil;
@@ -260,6 +272,8 @@ typedef struct {
 } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
+static int          g_count_players = 0; /* v0.3.0: dibujados por tipo     */
+static int          g_count_bots = 0;
 static UIView      *g_esp   = nil;    /* lienzo MMCanvasView              */
 static CADisplayLink *g_link = nil;   /* latido de dibujo ~30 fps         */
 static NSString    *g_probe = nil;    /* texto de la sonda (fase B)       */
@@ -307,6 +321,84 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
 @end
 
 /*---------------------------------------------------------------------------
+ * v0.3.0: ayudas de dibujo del pulido ESP.
+ *   - tema 0 clasico: jugador rojo / bot ambar;
+ *   - tema 1 neon:    jugador verde / bot cian;
+ *   - tema 2 blanco:  jugador blanco / bot gris claro.
+ *--------------------------------------------------------------------------*/
+static void mm_esp_color(int robot, int tema, CGFloat *r, CGFloat *g, CGFloat *b)
+{
+    if (tema == 1) {
+        if (robot) { *r = 0.20; *g = 0.85; *b = 1.00; }
+        else       { *r = 0.30; *g = 1.00; *b = 0.45; }
+    } else if (tema == 2) {
+        if (robot) { *r = 0.78; *g = 0.84; *b = 0.90; }
+        else       { *r = 1.00; *g = 1.00; *b = 1.00; }
+    } else {
+        if (robot) { *r = 1.00; *g = 0.72; *b = 0.20; }
+        else       { *r = 1.00; *g = 0.25; *b = 0.25; }
+    }
+}
+
+/* Caja completa o solo esquinas. Deja el path en el contexto; el llamador
+   decide el grosor/color y hace el stroke. */
+static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
+{
+    CGContextBeginPath(ctx);
+    if (estilo != 1) {
+        CGContextAddRect(ctx, r);
+        return;
+    }
+
+    CGFloat x0 = CGRectGetMinX(r), x1 = CGRectGetMaxX(r);
+    CGFloat y0 = CGRectGetMinY(r), y1 = CGRectGetMaxY(r);
+    CGFloat len = MIN(16.0, MIN(r.size.width, r.size.height) * 0.30);
+    CGFloat maxLen = MIN(r.size.width, r.size.height) * 0.50;
+    if (maxLen < 1.0) maxLen = 1.0;
+    if (len > maxLen) len = maxLen;
+    if (len < 1.0) len = 1.0;
+
+    /* superior izquierda */
+    CGContextMoveToPoint(ctx, x0, y0 + len);
+    CGContextAddLineToPoint(ctx, x0, y0);
+    CGContextAddLineToPoint(ctx, x0 + len, y0);
+    /* superior derecha */
+    CGContextMoveToPoint(ctx, x1 - len, y0);
+    CGContextAddLineToPoint(ctx, x1, y0);
+    CGContextAddLineToPoint(ctx, x1, y0 + len);
+    /* inferior derecha */
+    CGContextMoveToPoint(ctx, x1, y1 - len);
+    CGContextAddLineToPoint(ctx, x1, y1);
+    CGContextAddLineToPoint(ctx, x1 - len, y1);
+    /* inferior izquierda */
+    CGContextMoveToPoint(ctx, x0 + len, y1);
+    CGContextAddLineToPoint(ctx, x0, y1);
+    CGContextAddLineToPoint(ctx, x0, y1 - len);
+}
+
+/* Contador pequeno arriba a la izquierda: cuantos jugadores y bots se estan
+   dibujando en esta pasada (no la lista total del juego). */
+static void mm_draw_esp_count(CGContextRef ctx)
+{
+    UIFont *f = [UIFont fontWithName:@"Menlo-Bold" size:12.0];
+    if (f == nil) f = [UIFont boldSystemFontOfSize:12.0];
+    NSString *s = [NSString stringWithFormat:@"JUG %d   BOT %d",
+                   g_count_players, g_count_bots];
+    NSDictionary *attr = @{ NSFontAttributeName: f,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:0.88 green:1.0 blue:0.90 alpha:1.0] };
+    CGSize ts = [s sizeWithAttributes:attr];
+    CGFloat x = 12.0, y = 42.0;
+    CGRect bg = CGRectMake(x, y, ts.width + 16.0, ts.height + 8.0);
+    CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.58);
+    CGContextFillRect(ctx, bg);
+    CGContextSetLineWidth(ctx, 1.0);
+    CGContextSetRGBStrokeColor(ctx, 0.16, 0.88, 0.38, 0.55);
+    CGContextStrokeRect(ctx, bg);
+    [s drawAtPoint:CGPointMake(x + 8.0, y + 4.0) withAttributes:attr];
+}
+
+/*---------------------------------------------------------------------------
  * Lienzo del ESP (v0.2.2): pinta las cajas ENCIMA del juego pero DEBAJO del
  * boton y del panel (va el primero dentro de la capa). No recibe toques.
  *--------------------------------------------------------------------------*/
@@ -315,7 +407,6 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
 @implementation MMCanvasView
 - (void)drawRect:(CGRect)rect
 {
-    if (g_box_count <= 0) return;
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (ctx == NULL) return;
 
@@ -330,6 +421,16 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
     BOOL lineasTop = mm_def_bool(@"mm_esp_lines_top", NO);    /* v0.2.5 */
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
     BOOL conRelleno = mm_def_bool(@"mm_esp_fill", NO);
+    BOOL conCuenta  = mm_def_bool(@"mm_esp_count", NO);       /* v0.3.0 */
+    int  estiloCaja = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
+    int  tema       = (int)mm_def_float(@"mm_esp_theme", 0.0f);
+    if (estiloCaja != 1) estiloCaja = 0;
+    if (tema < 0 || tema > 2) tema = 0;
+
+    if (g_box_count <= 0) {
+        if (conCuenta) mm_draw_esp_count(ctx);
+        return;
+    }
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
@@ -340,8 +441,8 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
         if (!b->alive) continue;
         CGRect r = CGRectMake(b->x, b->y, b->w, b->h);
 
-        CGFloat cr = 1.00, cg = 0.25, cb = 0.25;            /* jugador: rojo  */
-        if (b->robot) { cr = 1.00; cg = 0.72; cb = 0.20; }  /* bot: ambar     */
+        CGFloat cr = 1.00, cg = 0.25, cb = 0.25;
+        mm_esp_color(b->robot, tema, &cr, &cg, &cb);
 
         if (conLineas) {
             /* v0.2.5: origen elegible. OFF = borde inferior -> pies de la caja;
@@ -372,12 +473,16 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
                 CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.12);
                 CGContextFillRect(ctx, r);
             }
+            /* v0.3.0: borde completo o solo esquinas, con el mismo contorno
+               negro para que se lea sobre cualquier fondo. */
             CGContextSetLineWidth(ctx, 3.4);
             CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
-            CGContextStrokeRect(ctx, r);
+            mm_esp_box_path(ctx, r, estiloCaja);
+            CGContextStrokePath(ctx);
             CGContextSetLineWidth(ctx, 1.7);
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
-            CGContextStrokeRect(ctx, r);
+            mm_esp_box_path(ctx, r, estiloCaja);
+            CGContextStrokePath(ctx);
         }
 
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
@@ -430,6 +535,8 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
              drawAtPoint:CGPointMake(r.origin.x, CGRectGetMaxY(r) + 2.0)
              withAttributes:attr];
     }
+
+    if (conCuenta) mm_draw_esp_count(ctx);
 }
 @end
 
@@ -445,6 +552,8 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
 - (void)onSkinWeaponSet;
 - (void)onSkinCharSet;
 - (void)onSkinPreset:(UISegmentedControl *)s;
+- (void)onBoxStyle:(UISegmentedControl *)s;
+- (void)onTheme:(UISegmentedControl *)s;
 - (void)onTextDone:(id)sender;
 - (void)onGuestReset;
 @end
@@ -521,10 +630,13 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
 - (void)onSeg:(UISegmentedControl *)s
 {
     NSInteger i = s.selectedSegmentIndex;
+    if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
+    if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
     if (g_p_esp   != nil) g_p_esp.hidden   = (i != 0);
-    if (g_p_misc  != nil) g_p_misc.hidden  = (i != 1);
-    if (g_p_skins != nil) g_p_skins.hidden = (i != 2);
-    if (g_p_info  != nil) g_p_info.hidden  = (i != 3);
+    if (g_p_vis   != nil) g_p_vis.hidden   = (i != 1);
+    if (g_p_misc  != nil) g_p_misc.hidden  = (i != 2);
+    if (g_p_skins != nil) g_p_skins.hidden = (i != 3);
+    if (g_p_info  != nil) g_p_info.hidden  = (i != 4);
 }
 
 - (void)onSwitch:(UISwitch *)s
@@ -533,7 +645,13 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
     if (k.length == 0) return;
     [[NSUserDefaults standardUserDefaults] setBool:s.on forKey:k];
     if ([k isEqualToString:@"mm_esp_master"]) mm_apply_esp_lock();
-    if ([k isEqualToString:@"mm_stream"])     mm_apply_stream();
+    if ([k isEqualToString:@"mm_stream"]) {
+        mm_apply_stream();
+        /* Al activarlo desde VIS se cierra el panel para dejar limpia la
+           grabacion; al reabrirlo con el boton atenuado ya no se vuelve a
+           cerrar solo (v0.3.0). */
+        if (s.on) mm_set_panel(NO);
+    }
     if ([k hasPrefix:@"mm_skin_"])            mm_skin_apply();
     mm_write_status(@"ajuste");
 }
@@ -544,6 +662,23 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
     if (g_range_val != nil)
         g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(s.value + 0.5f)];
     mm_write_status(@"ajuste");
+}
+
+/* v0.3.0: estilo de caja y tema de color del ESP. El lienzo lee la clave en
+   cada repintado, asi que el cambio es inmediato. */
+- (void)onBoxStyle:(UISegmentedControl *)s
+{
+    NSInteger v = (s.selectedSegmentIndex == 1) ? 1 : 0;
+    [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"mm_esp_box_style"];
+    mm_write_status(@"estilo caja");
+}
+
+- (void)onTheme:(UISegmentedControl *)s
+{
+    NSInteger v = s.selectedSegmentIndex;
+    if (v < 0 || v > 2) v = 0;
+    [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"mm_esp_theme"];
+    mm_write_status(@"tema esp");
 }
 
 /* v0.2.9: fase D. Aplicar los dos IDs, activar el maestro si hay alguno y
@@ -752,6 +887,7 @@ static void mm_reset_options(void)
                            @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
                            @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
                            @"mm_esp_fill", @"mm_esp_range", @"mm_stream",
+                           @"mm_esp_count", @"mm_esp_box_style", @"mm_esp_theme",
                            @"mm_skin_master", @"mm_skin_capture",
                            @"mm_skin_weapon", @"mm_skin_char" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
@@ -1357,6 +1493,8 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 static void mm_esp_collect_real(void)
 {
     g_box_count = 0;
+    g_count_players = 0;
+    g_count_bots = 0;
     g_esp_players = 0;
     g_hp_diag = nil;                       /* v0.2.6: muestra nueva por pasada */
     if (g_fp_state != 1) mm_game_resolve();
@@ -1582,12 +1720,16 @@ static void mm_esp_collect_real(void)
             break;
         }
         nuevos[drawn++] = nb;
+        if (robot) g_count_bots++;
+        else       g_count_players++;
     }
 
     memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
-    g_esp_diag = [NSString stringWithFormat:@"cam=ok lista=%d cajas=%d hp=%s%@",
-                  total, drawn, (g_fp_health != NULL) ? "ok" : "no",
+    g_esp_diag = [NSString stringWithFormat:
+                  @"cam=ok lista=%d cajas=%d jug=%d bot=%d hp=%s%@",
+                  total, drawn, g_count_players, g_count_bots,
+                  (g_fp_health != NULL) ? "ok" : "no",
                   (g_hp_diag != nil)
                       ? [NSString stringWithFormat:@" [%@]", g_hp_diag]
                       : @""];
@@ -2226,11 +2368,11 @@ static void mm_write_status(NSString *nota)
             @"escenas=%d estado=%@\n"
             @"ventanas=%d\n"
             @"boton=%s panel=%s via=%s\n"
-            @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d arriba=%d rango=%d\n"
+            @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d arriba=%d rango=%d contador=%d estilo=%d tema=%d\n"
             @"stream=%d\n"
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
-            @"esp_real=%@ jugadores=%d\n"
+            @"esp_real=%@ lista=%d dibujados=%d jug=%d bot=%d\n"
             @"skins=%d cap=%d hooks=%d/3 arma=%u traje=%u ids=%d\n"
             @"skindump=%@\n"
             @"nojb=%@\n"
@@ -2248,12 +2390,16 @@ static void mm_write_status(NSString *nota)
             (int)mm_def_bool(@"mm_esp_lines", NO),
             (int)mm_def_bool(@"mm_esp_lines_top", NO),
             (int)mm_def_float(@"mm_esp_range", 300.0f),
+            (int)mm_def_bool(@"mm_esp_count", NO),
+            (int)mm_def_float(@"mm_esp_box_style", 0.0f),
+            (int)mm_def_float(@"mm_esp_theme", 0.0f),
             (int)mm_def_bool(@"mm_stream", NO),
             (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? "on" : "off",
             g_box_count,
             (g_link != nil && !g_link.paused) ? "activo" : "parado",
             g_probe != nil ? g_probe.UTF8String : "pendiente",
-            (g_esp_diag != nil) ? g_esp_diag : @"-", g_esp_players,
+            (g_esp_diag != nil) ? g_esp_diag : @"-",
+            g_esp_players, g_box_count, g_count_players, g_count_bots,
             (int)g_mm_skin_on, (int)g_mm_skin_capture, g_mm_skin_hooks_ok,
             (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
             g_mm_skin_log_n,
@@ -2397,7 +2543,7 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:x];
 
-    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"MISC", @"SKINS", @"INFO"]];
+    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"VIS", @"MISC", @"SKINS", @"INFO"]];
     g_seg.frame = CGRectMake(10.0, 36.0, MM_PANEL_W - 20.0, 30.0);
     g_seg.selectedSegmentIndex = 0;
     if ([g_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
@@ -2406,23 +2552,28 @@ static void mm_build_ui(void)
     else
         g_seg.tintColor = mm_verde();
     [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.88 alpha:1.0] }
+            [UIColor colorWithWhite:0.88 alpha:1.0],
+            NSFontAttributeName: [UIFont boldSystemFontOfSize:11.0] }
                           forState:UIControlStateNormal];
     [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor whiteColor] }
+            [UIColor whiteColor],
+            NSFontAttributeName: [UIFont boldSystemFontOfSize:11.0] }
                           forState:UIControlStateSelected];
     [g_seg addTarget:[MMTargets shared] action:@selector(onSeg:)
         forControlEvents:UIControlEventValueChanged];
     [g_panel addSubview:g_seg];
 
     g_p_esp  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    g_p_vis  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_misc = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_skins = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_info = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    g_p_vis.hidden = YES;
     g_p_misc.hidden = YES;
     g_p_skins.hidden = YES;
     g_p_info.hidden = YES;
     [g_panel addSubview:g_p_esp];
+    [g_panel addSubview:g_p_vis];
     [g_panel addSubview:g_p_misc];
     [g_panel addSubview:g_p_skins];
     [g_panel addSubview:g_p_info];
@@ -2482,19 +2633,114 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_esp addSubview:sl];
 
-    /* --- pagina MISC --- */
-    UIView *r1 = mm_switch_row(@"Stream Mode (atenuar boton)", @"mm_stream", NO);
-    r1.frame = CGRectMake(0, 2.0, 284.0, 34.0);
-    [g_p_misc addSubview:r1];
+    /* --- pagina VIS (v0.3.0: Stream Mode + pulido ESP) --- */
+    UIView *vr = mm_switch_row(@"Stream Mode (ocultar UI)", @"mm_stream", NO);
+    vr.frame = CGRectMake(0, 2.0, 284.0, 34.0);
+    [g_p_vis addSubview:vr];
 
-    UILabel *d1 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 48.0, 272.0, 18.0)];
+    UILabel *vd = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 40.0, 272.0, 44.0)];
+    vd.text = @"Cierra el panel y oculta la marca de agua. El boton MENU "
+              @"queda al 10% y sigue tocable para volver.";
+    vd.numberOfLines = 0;
+    vd.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
+    vd.font = [UIFont systemFontOfSize:10.5];
+    [g_p_vis addSubview:vd];
+
+    UILabel *vh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 90.0, 272.0, 18.0)];
+    vh.text = @"ESP EN PANTALLA";
+    vh.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
+    vh.font = [UIFont boldSystemFontOfSize:11.0];
+    [g_p_vis addSubview:vh];
+
+    UISwitch *cs = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
+    cs.on = mm_def_bool(@"mm_esp_count", NO);
+    cs.onTintColor = mm_verde();
+    cs.accessibilityIdentifier = @"mm_esp_count";
+    cs.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    [cs addTarget:[MMTargets shared] action:@selector(onSwitch:)
+        forControlEvents:UIControlEventValueChanged];
+    UIView *csr = mm_row(@"Contador JUG / BOT", cs);
+    csr.frame = CGRectMake(0, 108.0, 284.0, 31.0);
+    [g_p_vis addSubview:csr];
+    [g_sub_switches addObject:cs];
+
+    UILabel *vsl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 144.0, 272.0, 15.0)];
+    vsl.text = @"Estilo de caja";
+    vsl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    vsl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_vis addSubview:vsl];
+
+    UISegmentedControl *bs = [[UISegmentedControl alloc]
+        initWithItems:@[@"Completa", @"Esquinas"]];
+    bs.frame = CGRectMake(6.0, 160.0, 272.0, 30.0);
+    bs.selectedSegmentIndex =
+        ((int)mm_def_float(@"mm_esp_box_style", 0.0f) == 1) ? 1 : 0;
+    if ([bs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        bs.selectedSegmentTintColor =
+            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
+    else
+        bs.tintColor = mm_verde();
+    [bs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor colorWithWhite:0.88 alpha:1.0],
+            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
+                      forState:UIControlStateNormal];
+    [bs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor whiteColor],
+            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
+                      forState:UIControlStateSelected];
+    [bs addTarget:[MMTargets shared] action:@selector(onBoxStyle:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_vis addSubview:bs];
+
+    UILabel *vtl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 196.0, 272.0, 15.0)];
+    vtl.text = @"Tema de color";
+    vtl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    vtl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_vis addSubview:vtl];
+
+    UISegmentedControl *ts = [[UISegmentedControl alloc]
+        initWithItems:@[@"Clasico", @"Neon", @"Blanco"]];
+    ts.frame = CGRectMake(6.0, 212.0, 272.0, 30.0);
+    {
+        int t = (int)mm_def_float(@"mm_esp_theme", 0.0f);
+        if (t < 0 || t > 2) t = 0;
+        ts.selectedSegmentIndex = t;
+    }
+    if ([ts respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        ts.selectedSegmentTintColor =
+            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
+    else
+        ts.tintColor = mm_verde();
+    [ts setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor colorWithWhite:0.88 alpha:1.0],
+            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
+                      forState:UIControlStateNormal];
+    [ts setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor whiteColor],
+            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
+                      forState:UIControlStateSelected];
+    [ts addTarget:[MMTargets shared] action:@selector(onTheme:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_vis addSubview:ts];
+
+    UILabel *vn = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 252.0, 272.0, 76.0)];
+    vn.text = @"El contador refleja solo lo que se esta dibujando, despues "
+              @"de los filtros Jugadores/Bots y del rango. El estilo y el tema "
+              @"se aplican al instante.";
+    vn.numberOfLines = 0;
+    vn.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
+    vn.font = [UIFont systemFontOfSize:10.5];
+    [g_p_vis addSubview:vn];
+
+    /* --- pagina MISC --- */
+    UILabel *d1 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 6.0, 272.0, 18.0)];
     d1.text = @"Cuenta / datos locales";
     d1.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
     d1.font = [UIFont boldSystemFontOfSize:12.0];
     [g_p_misc addSubview:d1];
 
     UIButton *gr = [UIButton buttonWithType:UIButtonTypeCustom];
-    gr.frame = CGRectMake(6.0, 70.0, 272.0, 36.0);
+    gr.frame = CGRectMake(6.0, 28.0, 272.0, 36.0);
     gr.backgroundColor = [UIColor colorWithRed:0.48 green:0.08 blue:0.08 alpha:0.95];
     gr.layer.cornerRadius = 8.0;
     gr.layer.borderWidth = 1.0;
@@ -2507,7 +2753,7 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:gr];
 
-    UILabel *d2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 114.0, 272.0, 76.0)];
+    UILabel *d2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 72.0, 272.0, 76.0)];
     d2.text = @"Borra Documents, Library, tmp y la keychain de invitado. "
               @"El juego se cierra y al reabrir entra como invitado nuevo. "
               @"Usar solo en un equipo desechable.";
@@ -2516,8 +2762,9 @@ static void mm_build_ui(void)
     d2.font = [UIFont systemFontOfSize:10.5];
     [g_p_misc addSubview:d2];
 
-    UILabel *d3 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 198.0, 272.0, 40.0)];
-    d3.text = @"Skins (armas y traje): pestana SKINS.";
+    UILabel *d3 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 156.0, 272.0, 44.0)];
+    d3.text = @"Skins (armas y traje): pestana SKINS. Stream Mode y ajustes "
+              @"visuales del ESP: pestana VIS.";
     d3.numberOfLines = 0;
     d3.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
     d3.font = [UIFont systemFontOfSize:11.0];
@@ -2698,9 +2945,17 @@ static void mm_apply_esp_lock(void)
 static void mm_apply_stream(void)
 {
     BOOL on = mm_def_bool(@"mm_stream", NO);
-    if (g_btn != nil) g_btn.alpha = on ? 0.15 : 1.0;
-    if (g_marca != nil) g_marca.alpha = on ? 0.15 : 1.0;
-    if (on && g_panel_open) mm_set_panel(NO);
+    /* v0.3.0: el boton queda al 10% (no desaparece) para poder reabrir el
+       panel y apagar Stream Mode; la marca de agua se oculta de verdad.
+       Cerrar el panel es decision de onSwitch, no de este latido. */
+    if (g_btn != nil) {
+        g_btn.alpha = on ? 0.10 : 1.0;
+        g_btn.userInteractionEnabled = YES;
+    }
+    if (g_marca != nil) {
+        g_marca.alpha = on ? 0.0 : 1.0;
+        g_marca.hidden = on;
+    }
 }
 
 static void mm_position_panel(void)
@@ -2772,8 +3027,8 @@ static void mm_refresh_info(void)
             @"ventanas %d  via %s\n"
             @"uptime   %d s\n"
             @"panel    %@\n"
-            @"esp      %@   rango %d m\n"
-            @"render   %@   cajas %d\n"
+            @"esp      %@   rango %d m   caja %d   tema %d\n"
+            @"render   %@   cajas %d   JUG %d   BOT %d\n"
             @"esp2     %@\n"
             @"probe    %@\n"
             @"skins    %@\n"
@@ -2790,9 +3045,11 @@ static void mm_refresh_info(void)
             (int)mm_uptime(),
             g_panel_open ? @"abierto" : @"cerrado",
             mm_def_bool(@"mm_esp_master", NO) ? @"ON" : @"off",
-            (int)mm_def_float(@"mm_esp_range", 150.0f),
+            (int)mm_def_float(@"mm_esp_range", 300.0f),
+            (int)mm_def_float(@"mm_esp_box_style", 0.0f),
+            (int)mm_def_float(@"mm_esp_theme", 0.0f),
             (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? @"ON" : @"off",
-            g_box_count,
+            g_box_count, g_count_players, g_count_bots,
             (g_esp_diag != nil) ? g_esp_diag : @"-",
             (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar"),
             mm_skin_resumen(),
