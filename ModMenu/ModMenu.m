@@ -288,6 +288,7 @@ static void mm_apply_stream(void);
 static void mm_refresh_info(void);
 static void mm_write_status(NSString *nota);
 static BOOL mm_def_bool(NSString *k, BOOL d);
+static float mm_def_float(NSString *k, float d);
 static void mm_esp_frame(double t);
 static void mm_esp_collect_real(void);
 static void mm_probe_run(void);
