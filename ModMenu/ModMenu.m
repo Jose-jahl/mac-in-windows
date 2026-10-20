@@ -12,6 +12,15 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.8b (19 oct) - HOTFIX DEL TEST: SIN ANOGS.
+ *    - el test de la 0.2.8 en el equipo crasheo a los pocos segundos de
+ *      abrir, justo cuando el hilo NoJB armaba p00/p01 (t = 8 s). Esta build
+ *      retira los dos parches: NO se escribe en anogs. Se conservan los 39
+ *      swizzles, que no tocan codigo ejecutable de frameworks ajenas;
+ *    - el codigo de anogs queda compilado pero apagado con
+ *      g_nojb_anogs_enabled = NO, para reactivarlo solo cuando se identifique
+ *      la causa (o se migre a dlsym con verificacion de prologo).
+ *
  *  v0.2.8 (19 oct) - FASE C, parte 1: NOJB (ANTIDETECT).
  *    - se replican los 39 swizzles ObjC del mod de referencia (GL), leidos de
  *      su dylib en el laboratorio: checksums (APMRemoteConfig.checksumEnabled,
@@ -162,7 +171,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.8-esp"
+#define MODMENU_VERSION     "0.2.8b-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -178,7 +187,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.8";
+const char *modmenu_build_id = "modmenu-esp-0.2.8b";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -746,6 +755,11 @@ static int         g_nojb_anogs[2];             /* 0 pend / 1 armado / -1 skip /
 static int         g_nojb_anogs_log[2];         /* para no repetir el aviso       */
 static BOOL        g_nojb_started = NO;
 
+/* v0.2.8b: anogs OFF. La 0.2.8 crasheo a los pocos segundos en el test,
+   justo cuando el hilo NoJB armaba p00/p01 (t = 8 s). No se escribe en anogs
+   hasta identificar la causa. Poner YES solo con un fix verificado. */
+static const BOOL  g_nojb_anogs_enabled = NO;
+
 /* Sustitutos genericos. En arm64 los cero viajan en x0/w0 y en d0, asi que
    sirven tanto para BOOL/objeto/puntero como para double. */
 static id     mm_hk_obj(id self, SEL _cmd, ...)  { (void)self; (void)_cmd; return nil; }
@@ -935,6 +949,12 @@ static NSString *mm_nojb_resumen(void)
     int swz = 0;
     for (int i = 0; i < MM_NOJB_COUNT; i++) if (g_nojb_state[i] == 1) swz++;
 
+    if (!g_nojb_anogs_enabled) {
+        return [NSString stringWithFormat:@"swz=%d/%d anogs=off img=%s",
+                swz, MM_NOJB_COUNT,
+                (mm_anogs_base() != 0) ? "si" : "no"];
+    }
+
     const char *e0 = "pend", *e1 = "pend";
     if (g_nojb_anogs[0] == 1) e0 = "ok";
     else if (g_nojb_anogs[0] == -1) e0 = "skip";
@@ -956,10 +976,11 @@ static void mm_nojb_step(void)
     @autoreleasepool {
         g_nojb_passes++;
         int done = mm_nojb_try_swizzles();
-        if (mm_uptime() >= 8.0) mm_nojb_try_anogs();
+        if (g_nojb_anogs_enabled && mm_uptime() >= 8.0) mm_nojb_try_anogs();
 
-        BOOL todo = (done >= MM_NOJB_COUNT)
-                    && (g_nojb_anogs[0] != 0) && (g_nojb_anogs[1] != 0);
+        BOOL todo = (done >= MM_NOJB_COUNT);
+        if (g_nojb_anogs_enabled)
+            todo = todo && (g_nojb_anogs[0] != 0) && (g_nojb_anogs[1] != 0);
         if (todo || g_nojb_passes >= 90) {
             NSLog(@"%s nojb fin: %@ (pasadas=%d)", MM_TAG, mm_nojb_resumen(), g_nojb_passes);
             return;
@@ -975,7 +996,7 @@ static void mm_nojb_start(void)
 {
     if (g_nojb_started) return;
     g_nojb_started = YES;
-    NSLog(@"%s nojb: inicio (fase C v0.2.8)", MM_TAG);
+    NSLog(@"%s nojb: inicio (fase C v0.2.8b, anogs OFF)", MM_TAG);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                        mm_nojb_step();
