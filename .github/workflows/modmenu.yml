@@ -39,6 +39,7 @@ jobs:
                 -framework Foundation \
                 -framework QuartzCore \
                 -framework CoreGraphics \
+                -framework Security \
                 -o ModMenu.dylib \
                 ModMenu/ModMenu.m
           echo "compilado"

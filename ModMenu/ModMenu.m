@@ -12,6 +12,25 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.2.9 (19 oct) - FASE D COMPLETA: SKINS (ARMAS + TRAJE) Y GUEST RESET.
+ *    - nueva pagina SKINS: maestro, captura de IDs reales, campos de ID de
+ *      arma y de traje, 5 presets verificados (0x0F6951, 0x0F9062, 0x0FB773,
+ *      0x0FDE84, 0x100595), boton Aplicar y Dump IDs;
+ *    - los hooks de skin se instalan SOLO con el maestro o la captura ON y se
+ *      restauran al apagarlos. Antes de escribir se comprueba el prologo de
+ *      1.0.57; si no coincide, el sitio se salta (nunca se parchea a ciegas);
+ *    - trampolin real (no el de GL): una funcion naked ejecuta los primeros
+ *      16 bytes originales y salta a entry+16, asi el hook PUEDE llamar al
+ *      original sin recursion. Offsets verificados: 0x2A90084 (arma),
+ *      0x587CFD4 (inventario) y 0x1049844 (traje; el 0x1049835 de GL estaba
+ *      desalineado y corrompia la funcion anterior);
+ *    - captura pasiva: con Capturar ON los hooks llaman al original, registran
+ *      los IDs y escriben Documents/CODM_SkinDump.txt (sin cambiar nada);
+ *    - MISC: Reset guest con confirmacion; borra Documents, Library/Application
+ *      Support, Library/Caches, Library/Preferences y tmp, limpia la keychain
+ *      de contrasenas genericas y cierra con _exit(0) tras el aviso;
+ *    - las opciones nuevas tambien se resetean en cada arranque (v0.2.7).
+ *
  *  v0.2.8b (19 oct) - HOTFIX DEL TEST: SIN ANOGS.
  *    - el test de la 0.2.8 en el equipo crasheo a los pocos segundos de
  *      abrir, justo cuando el hilo NoJB armaba p00/p01 (t = 8 s). Esta build
@@ -160,6 +179,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Security/Security.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #include <unistd.h>
@@ -168,10 +188,12 @@
 #include <mach/vm_region.h>
 #include <mach-o/dyld.h>
 #include <libkern/OSCacheControl.h>
+#include <pthread.h>
+#include <stdlib.h>
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.2.8b-esp"
+#define MODMENU_VERSION     "0.2.9-esp"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -187,7 +209,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-esp-0.2.8b";
+const char *modmenu_build_id = "modmenu-esp-0.2.9";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -197,10 +219,24 @@ static UISegmentedControl *g_seg = nil;
 static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
 static UIView   *g_p_misc = nil;
+static UIView   *g_p_skins = nil;
 static UIView   *g_p_info = nil;
 static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
 static UILabel  *g_range_val = nil;
 static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
+
+/* v0.2.9: controles de la pagina SKINS */
+static UISwitch *g_skin_master_sw = nil;
+static UISwitch *g_skin_capture_sw = nil;
+static UITextField *g_skin_weapon_tf = nil;
+static UITextField *g_skin_char_tf = nil;
+static UISegmentedControl *g_skin_preset_seg = nil;
+static UILabel *g_skin_status = nil;
+
+/* Presets verificados en el dylib de GL (kPresetWeaponSkins, 0x51b30). */
+static const uint32_t g_skin_presets[6] = {
+    0u, 0x0F6951u, 0x0F9062u, 0x0FB773u, 0x0FDE84u, 0x100595u
+};
 
 static const char *g_via   = "-";     /* donde quedo colgada la UI        */
 static BOOL  g_panel_open  = NO;
@@ -241,6 +277,19 @@ static BOOL mm_def_bool(NSString *k, BOOL d);
 static void mm_esp_frame(double t);
 static void mm_esp_collect_real(void);
 static void mm_probe_run(void);
+
+/* v0.2.9: fase D (skins + guest reset) */
+static void mm_skin_apply(void);
+static void mm_skin_refresh_status(void);
+static void mm_skin_sync_ui(void);
+static NSString *mm_skin_resumen(void);
+static NSString *mm_skin_dump_write(void);
+static int mm_skin_count(void);
+static uint32_t mm_skin_parse_field(UITextField *tf);
+static void mm_skin_set_weapon(uint32_t v);
+static void mm_skin_set_char(uint32_t v);
+static void mm_guest_reset_prompt(void);
+static void mm_show_alert(NSString *titulo, NSString *msg);
 
 /*---------------------------------------------------------------------------
  * Vista raiz que DEJA PASAR los toques: si nadie (boton/panel) los consume,
@@ -391,6 +440,13 @@ static void mm_probe_run(void);
 + (MMTargets *)shared;
 - (void)onFrame:(CADisplayLink *)link;
 - (void)onPanelPan:(UIPanGestureRecognizer *)g;
+- (void)onSkinApply;
+- (void)onSkinDump;
+- (void)onSkinWeaponSet;
+- (void)onSkinCharSet;
+- (void)onSkinPreset:(UISegmentedControl *)s;
+- (void)onTextDone:(id)sender;
+- (void)onGuestReset;
 @end
 
 @implementation MMTargets
@@ -427,7 +483,12 @@ static void mm_probe_run(void);
     }
 }
 
-- (void)onClose { mm_set_panel(NO); }
+- (void)onClose
+{
+    if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
+    if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
+    mm_set_panel(NO);
+}
 
 /* v0.2.4: arrastre del panel por su franja superior, con memoria. */
 - (void)onPanelPan:(UIPanGestureRecognizer *)g
@@ -460,9 +521,10 @@ static void mm_probe_run(void);
 - (void)onSeg:(UISegmentedControl *)s
 {
     NSInteger i = s.selectedSegmentIndex;
-    if (g_p_esp  != nil) g_p_esp.hidden  = (i != 0);
-    if (g_p_misc != nil) g_p_misc.hidden = (i != 1);
-    if (g_p_info != nil) g_p_info.hidden = (i != 2);
+    if (g_p_esp   != nil) g_p_esp.hidden   = (i != 0);
+    if (g_p_misc  != nil) g_p_misc.hidden  = (i != 1);
+    if (g_p_skins != nil) g_p_skins.hidden = (i != 2);
+    if (g_p_info  != nil) g_p_info.hidden  = (i != 3);
 }
 
 - (void)onSwitch:(UISwitch *)s
@@ -472,6 +534,7 @@ static void mm_probe_run(void);
     [[NSUserDefaults standardUserDefaults] setBool:s.on forKey:k];
     if ([k isEqualToString:@"mm_esp_master"]) mm_apply_esp_lock();
     if ([k isEqualToString:@"mm_stream"])     mm_apply_stream();
+    if ([k hasPrefix:@"mm_skin_"])            mm_skin_apply();
     mm_write_status(@"ajuste");
 }
 
@@ -481,6 +544,82 @@ static void mm_probe_run(void);
     if (g_range_val != nil)
         g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(s.value + 0.5f)];
     mm_write_status(@"ajuste");
+}
+
+/* v0.2.9: fase D. Aplicar los dos IDs, activar el maestro si hay alguno y
+   (re)instalar los hooks. */
+- (void)onSkinApply
+{
+    uint32_t w = mm_skin_parse_field(g_skin_weapon_tf);
+    uint32_t c = mm_skin_parse_field(g_skin_char_tf);
+    mm_skin_set_weapon(w);
+    mm_skin_set_char(c);
+    if (w != 0 || c != 0) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
+        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
+    }
+    mm_skin_apply();
+    mm_show_alert(@"Skins", [NSString stringWithFormat:@"arma  %u\ntraje %u\n%@",
+                             w, c, mm_skin_resumen()]);
+}
+
+- (void)onSkinWeaponSet
+{
+    uint32_t v = mm_skin_parse_field(g_skin_weapon_tf);
+    mm_skin_set_weapon(v);
+    if (v != 0) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
+        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
+    }
+    mm_skin_apply();
+}
+
+- (void)onSkinCharSet
+{
+    uint32_t v = mm_skin_parse_field(g_skin_char_tf);
+    mm_skin_set_char(v);
+    if (v != 0) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
+        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
+    }
+    mm_skin_apply();
+}
+
+- (void)onSkinPreset:(UISegmentedControl *)s
+{
+    NSInteger i = s.selectedSegmentIndex;
+    if (i < 0 || i >= 6) return;
+    uint32_t v = g_skin_presets[i];
+    mm_skin_set_weapon(v);
+    if (v != 0) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
+        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
+    }
+    mm_skin_apply();
+}
+
+- (void)onSkinDump
+{
+    NSString *p = mm_skin_dump_write();
+    if (p != nil) {
+        mm_show_alert(@"Dump de skins",
+                      [NSString stringWithFormat:@"%d IDs capturados\n%@",
+                       mm_skin_count(), p]);
+    } else {
+        mm_show_alert(@"Dump de skins",
+                      @"No se pudo escribir CODM_SkinDump.txt");
+    }
+}
+
+- (void)onTextDone:(id)sender
+{
+    if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
+    if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
+}
+
+- (void)onGuestReset
+{
+    mm_guest_reset_prompt();
 }
 
 - (void)onFrame:(CADisplayLink *)link
@@ -612,7 +751,9 @@ static void mm_reset_options(void)
         NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
                            @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
                            @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
-                           @"mm_esp_fill", @"mm_esp_range", @"mm_stream" ];
+                           @"mm_esp_fill", @"mm_esp_range", @"mm_stream",
+                           @"mm_skin_master", @"mm_skin_capture",
+                           @"mm_skin_weapon", @"mm_skin_char" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
     } @catch (NSException *e) {
@@ -996,7 +1137,7 @@ static void mm_nojb_start(void)
 {
     if (g_nojb_started) return;
     g_nojb_started = YES;
-    NSLog(@"%s nojb: inicio (fase C v0.2.8b, anogs OFF)", MM_TAG);
+    NSLog(@"%s nojb: inicio (fase C v0.2.9, anogs OFF)", MM_TAG);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                        mm_nojb_step();
@@ -1452,6 +1593,614 @@ static void mm_esp_collect_real(void)
                       : @""];
 }
 
+/*---------------------------------------------------------------------------
+ * FASE D v0.2.9 - SKINS (armas + traje) Y DUMP.
+ *
+ * Los tres sitios son las funciones que usa el mod de referencia (GL) para
+ * cambiar la skin en cliente. Verificados contra cod 1.0.57:
+ *   0x2A90084  GetWeaponSkinID        (4 args, devuelve skin en w0/x0)
+ *   0x587CFD4  GetWeaponSkinId_Inv    (inventario/loadout)
+ *   0x1049844  GetSuitId              (2 args; el 0x1049835 de GL esta 15
+ *                                      bytes antes, a media instruccion, y su
+ *                                      escritura de 16 bytes rompia la funcion
+ *                                      anterior: aqui se usa la entrada real)
+ *
+ * El trampolin es una funcion naked que ejecuta los primeros 16 bytes
+ * originales y salta a entry+16. Asi el hook puede llamar al original sin
+ * recursion (el ApplyARM64Hook de GL dejaba orig = entrada parcheada).
+ *--------------------------------------------------------------------------*/
+
+#define MM_SKIN_RVA_W     0x2A90084ULL
+#define MM_SKIN_RVA_INV   0x587CFD4ULL
+#define MM_SKIN_RVA_SUIT  0x1049844ULL
+#define MM_SKIN_LOG_MAX   256
+
+static const uint8_t mm_skin_pro_w[16] = {
+    0xF6, 0x57, 0xBD, 0xA9, 0xF4, 0x4F, 0x01, 0xA9,
+    0xFD, 0x7B, 0x02, 0xA9, 0xFD, 0x83, 0x00, 0x91
+};
+static const uint8_t mm_skin_pro_inv[16] = {
+    0xFC, 0x6F, 0xBA, 0xA9, 0xFA, 0x67, 0x01, 0xA9,
+    0xF8, 0x5F, 0x02, 0xA9, 0xF6, 0x57, 0x03, 0xA9
+};
+static const uint8_t mm_skin_pro_suit[16] = {
+    0xF6, 0x57, 0xBD, 0xA9, 0xF4, 0x4F, 0x01, 0xA9,
+    0xFD, 0x7B, 0x02, 0xA9, 0xFD, 0x83, 0x00, 0x91
+};
+
+/* Destinos del trampolin (entry+16). Deben tener enlace externo para que el
+   ensamblador pueda referenciarlos con @PAGE/@PAGEOFF. */
+__attribute__((visibility("hidden"))) volatile uintptr_t g_mm_skin_tramp_w = 0;
+__attribute__((visibility("hidden"))) volatile uintptr_t g_mm_skin_tramp_inv = 0;
+__attribute__((visibility("hidden"))) volatile uintptr_t g_mm_skin_tramp_suit = 0;
+
+/* Trampolines naked: replican el prologo exacto y saltan al cuerpo original
+   (entry+16). No usan pila propia ni guardan x30: el retorno del original va
+   directo al hook que lo llamo. */
+__asm__(
+    ".text\n"
+    ".p2align 2\n"
+    ".globl _mm_skin_orig_w\n"
+    "_mm_skin_orig_w:\n"
+    "stp x22, x21, [sp, #-0x30]!\n"
+    "stp x20, x19, [sp, #0x10]\n"
+    "stp x29, x30, [sp, #0x20]\n"
+    "add x29, sp, #0x20\n"
+    "adrp x16, _g_mm_skin_tramp_w@PAGE\n"
+    "ldr x16, [x16, _g_mm_skin_tramp_w@PAGEOFF]\n"
+    "br x16\n"
+    ".globl _mm_skin_orig_inv\n"
+    "_mm_skin_orig_inv:\n"
+    "stp x28, x27, [sp, #-0x60]!\n"
+    "stp x26, x25, [sp, #0x10]\n"
+    "stp x24, x23, [sp, #0x20]\n"
+    "stp x22, x21, [sp, #0x30]\n"
+    "adrp x16, _g_mm_skin_tramp_inv@PAGE\n"
+    "ldr x16, [x16, _g_mm_skin_tramp_inv@PAGEOFF]\n"
+    "br x16\n"
+    ".globl _mm_skin_orig_suit\n"
+    "_mm_skin_orig_suit:\n"
+    "stp x22, x21, [sp, #-0x30]!\n"
+    "stp x20, x19, [sp, #0x10]\n"
+    "stp x29, x30, [sp, #0x20]\n"
+    "add x29, sp, #0x20\n"
+    "adrp x16, _g_mm_skin_tramp_suit@PAGE\n"
+    "ldr x16, [x16, _g_mm_skin_tramp_suit@PAGEOFF]\n"
+    "br x16\n"
+    ".text\n"
+);
+
+extern uint32_t mm_skin_orig_w(uint32_t, uint32_t, uint32_t, uint32_t);
+extern uint32_t mm_skin_orig_inv(void *, int, int, int);
+extern uint64_t mm_skin_orig_suit(void *, void *);
+
+static volatile int      g_mm_skin_on = 0;
+static volatile int      g_mm_skin_capture = 0;
+static volatile uint32_t g_mm_skin_weapon_id = 0;
+static volatile uint32_t g_mm_skin_char_id = 0;
+static volatile int      g_mm_skin_installed = 0;
+static int               g_mm_skin_hooks_ok = 0;
+static uintptr_t         g_mm_skin_base = 0;
+static NSString         *g_mm_skin_diag = nil;
+static NSString         *g_mm_skin_last_dump = nil;
+
+typedef struct {
+    uint32_t kind;      /* 1 arma / 2 inventario / 3 traje */
+    uint32_t a;
+    uint32_t b;
+} MMSkinLog;
+
+static MMSkinLog g_mm_skin_log[MM_SKIN_LOG_MAX];
+static int g_mm_skin_log_n = 0;
+static int g_mm_skin_log_drop = 0;
+static pthread_mutex_t g_mm_skin_log_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static const char *mm_skin_kind_name(uint32_t k)
+{
+    switch (k) {
+        case 1: return "WeaponSkin";
+        case 2: return "LoadoutSkin";
+        case 3: return "CharacterSuit";
+        default: return "?";
+    }
+}
+
+static void mm_skin_log_add(uint32_t kind, uint32_t a, uint32_t b)
+{
+    if (!g_mm_skin_capture || b == 0) return;
+    pthread_mutex_lock(&g_mm_skin_log_mtx);
+    for (int i = 0; i < g_mm_skin_log_n; i++) {
+        if (g_mm_skin_log[i].kind == kind &&
+            g_mm_skin_log[i].a == a &&
+            g_mm_skin_log[i].b == b) {
+            pthread_mutex_unlock(&g_mm_skin_log_mtx);
+            return;
+        }
+    }
+    if (g_mm_skin_log_n < MM_SKIN_LOG_MAX) {
+        g_mm_skin_log[g_mm_skin_log_n].kind = kind;
+        g_mm_skin_log[g_mm_skin_log_n].a = a;
+        g_mm_skin_log[g_mm_skin_log_n].b = b;
+        g_mm_skin_log_n++;
+    } else {
+        g_mm_skin_log_drop++;
+    }
+    pthread_mutex_unlock(&g_mm_skin_log_mtx);
+}
+
+__attribute__((noinline, used))
+static uint32_t mm_hook_skin_w(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    uint32_t real = mm_skin_orig_w(a, b, c, d);
+    mm_skin_log_add(1, a, b ? b : real);
+    if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
+    return real;
+}
+
+__attribute__((noinline, used))
+static uint32_t mm_hook_skin_inv(void *a, int b, int c, int d)
+{
+    uint32_t real = mm_skin_orig_inv(a, b, c, d);
+    mm_skin_log_add(2, (uint32_t)b, real);
+    if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
+    return real;
+}
+
+__attribute__((noinline, used))
+static uint64_t mm_hook_skin_suit(void *a, void *b)
+{
+    uint64_t real = mm_skin_orig_suit(a, b);
+    mm_skin_log_add(3, 0, (uint32_t)real);
+    if (g_mm_skin_on && g_mm_skin_char_id != 0) return (uint64_t)g_mm_skin_char_id;
+    return real;
+}
+
+typedef struct {
+    uint64_t rva;
+    const uint8_t *expect;
+    void *hook;
+    const char *name;
+    int installed;
+    uint8_t saved[16];
+} MMSkinSite;
+
+static MMSkinSite g_mm_skin_sites[3];
+
+static void mm_skin_sites_init(void)
+{
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    memset(g_mm_skin_sites, 0, sizeof(g_mm_skin_sites));
+
+    g_mm_skin_sites[0].rva = MM_SKIN_RVA_W;
+    g_mm_skin_sites[0].expect = mm_skin_pro_w;
+    g_mm_skin_sites[0].hook = (void *)mm_hook_skin_w;
+    g_mm_skin_sites[0].name = "arma";
+
+    g_mm_skin_sites[1].rva = MM_SKIN_RVA_INV;
+    g_mm_skin_sites[1].expect = mm_skin_pro_inv;
+    g_mm_skin_sites[1].hook = (void *)mm_hook_skin_inv;
+    g_mm_skin_sites[1].name = "inventario";
+
+    g_mm_skin_sites[2].rva = MM_SKIN_RVA_SUIT;
+    g_mm_skin_sites[2].expect = mm_skin_pro_suit;
+    g_mm_skin_sites[2].hook = (void *)mm_hook_skin_suit;
+    g_mm_skin_sites[2].name = "traje";
+}
+
+/* Escritura de 16 bytes con proteccion de pagina completa. */
+static int mm_skin_write16(uintptr_t addr, const void *src)
+{
+    if (addr == 0 || src == NULL) return -1;
+    size_t ps = (size_t)getpagesize();
+    uintptr_t page = addr & ~(uintptr_t)(ps - 1);
+    uintptr_t end = addr + 16;
+    size_t span = (size_t)(((end + ps - 1) & ~(uintptr_t)(ps - 1)) - page);
+    vm_prot_t prot = mm_orig_prot(addr);
+
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page,
+                                  (vm_size_t)span, FALSE, prot | VM_PROT_WRITE);
+    if (kr != KERN_SUCCESS) return -2;
+    memcpy((void *)addr, src, 16);
+    sys_icache_invalidate((void *)addr, 16);
+    kr = vm_protect(mach_task_self(), (vm_address_t)page,
+                    (vm_size_t)span, FALSE, prot);
+    if (kr != KERN_SUCCESS) return -3;
+    return (memcmp((void *)addr, src, 16) == 0) ? 0 : -4;
+}
+
+/* La base es la imagen principal (cod). Si existiera UserAssembly o
+   UnityFramework, se prueba tambien; nunca se acepta una base sin verificar
+   los dos prologos de las funciones de arma. */
+static uintptr_t mm_skin_find_base(void)
+{
+    uintptr_t h0 = (uintptr_t)_dyld_get_image_header(0);
+    uint32_t n = _dyld_image_count();
+    uintptr_t cand[32];
+    int nc = 0;
+
+    if (h0 != 0) cand[nc++] = h0;
+    for (uint32_t i = 0; i < n && nc < 32; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm == NULL) continue;
+        if (strstr(nm, "UserAssembly") == NULL &&
+            strstr(nm, "UnityFramework") == NULL &&
+            strstr(nm, "/cod") == NULL) continue;
+        uintptr_t h = (uintptr_t)_dyld_get_image_header(i);
+        if (h == 0 || h == h0) continue;
+        cand[nc++] = h;
+    }
+
+    for (int i = 0; i < nc; i++) {
+        uint8_t b[16];
+        if (!mm_vm_read(cand[i] + MM_SKIN_RVA_W, b, 16)) continue;
+        if (memcmp(b, mm_skin_pro_w, 16) != 0) continue;
+        if (!mm_vm_read(cand[i] + MM_SKIN_RVA_INV, b, 16)) continue;
+        if (memcmp(b, mm_skin_pro_inv, 16) != 0) continue;
+        return cand[i];
+    }
+    return 0;
+}
+
+static int mm_skin_install_all(void)
+{
+    mm_skin_sites_init();
+    if (g_mm_skin_base == 0) g_mm_skin_base = mm_skin_find_base();
+    if (g_mm_skin_base == 0) {
+        g_mm_skin_diag = @"base no encontrada";
+        NSLog(@"%s skins: base no encontrada", MM_TAG);
+        return 0;
+    }
+
+    g_mm_skin_tramp_w    = g_mm_skin_base + MM_SKIN_RVA_W + 16;
+    g_mm_skin_tramp_inv  = g_mm_skin_base + MM_SKIN_RVA_INV + 16;
+    g_mm_skin_tramp_suit = g_mm_skin_base + MM_SKIN_RVA_SUIT + 16;
+
+    int ok = 0;
+    for (int i = 0; i < 3; i++) {
+        MMSkinSite *site = &g_mm_skin_sites[i];
+        uintptr_t target = g_mm_skin_base + (uintptr_t)site->rva;
+        uint8_t cur[16];
+        if (!mm_vm_read(target, cur, 16)) {
+            g_mm_skin_diag = [NSString stringWithFormat:@"%s ilegible", site->name];
+            NSLog(@"%s skins: %s ilegible en 0x%lX", MM_TAG, site->name,
+                  (unsigned long)target);
+            continue;
+        }
+        if (memcmp(cur, site->expect, 16) != 0) {
+            g_mm_skin_diag = [NSString stringWithFormat:@"%s prologo distinto", site->name];
+            NSLog(@"%s skins: %s prologo distinto en 0x%lX", MM_TAG, site->name,
+                  (unsigned long)target);
+            continue;
+        }
+        memcpy(site->saved, cur, 16);
+        uint8_t patch[16];
+        uint64_t stub = 0xD61F020058000050ULL;  /* ldr x16,#8 ; br x16 */
+        memcpy(patch, &stub, 8);
+        uintptr_t hp = (uintptr_t)site->hook;
+        memcpy(patch + 8, &hp, 8);
+        if (mm_skin_write16(target, patch) != 0) {
+            g_mm_skin_diag = [NSString stringWithFormat:@"%s no se pudo escribir", site->name];
+            NSLog(@"%s skins: %s no se pudo escribir en 0x%lX", MM_TAG, site->name,
+                  (unsigned long)target);
+            continue;
+        }
+        site->installed = 1;
+        ok++;
+    }
+
+    g_mm_skin_hooks_ok = ok;
+    g_mm_skin_installed = (ok > 0) ? 1 : 0;
+    if (ok > 0) g_mm_skin_diag = [NSString stringWithFormat:@"hooks %d/3", ok];
+    NSLog(@"%s skins: hooks %d/3 base=0x%lX", MM_TAG, ok,
+          (unsigned long)g_mm_skin_base);
+    return ok;
+}
+
+static void mm_skin_uninstall_all(void)
+{
+    for (int i = 0; i < 3; i++) {
+        MMSkinSite *site = &g_mm_skin_sites[i];
+        if (!site->installed) continue;
+        uintptr_t target = g_mm_skin_base + (uintptr_t)site->rva;
+        if (mm_skin_write16(target, site->saved) != 0)
+            NSLog(@"%s skins: no se pudo restaurar %s", MM_TAG, site->name);
+        site->installed = 0;
+    }
+    g_mm_skin_installed = 0;
+    g_mm_skin_hooks_ok = 0;
+    g_mm_skin_diag = @"off";
+    NSLog(@"%s skins: hooks restaurados (off)", MM_TAG);
+}
+
+static void mm_skin_read_state(void)
+{
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    g_mm_skin_on = [ud boolForKey:@"mm_skin_master"] ? 1 : 0;
+    g_mm_skin_capture = [ud boolForKey:@"mm_skin_capture"] ? 1 : 0;
+    g_mm_skin_weapon_id = (uint32_t)[ud integerForKey:@"mm_skin_weapon"];
+    g_mm_skin_char_id = (uint32_t)[ud integerForKey:@"mm_skin_char"];
+}
+
+static int mm_skin_count(void)
+{
+    return g_mm_skin_log_n;
+}
+
+static NSString *mm_skin_resumen(void)
+{
+    const char *modo = g_mm_skin_on ? "ON" : (g_mm_skin_capture ? "captura" : "off");
+    return [NSString stringWithFormat:@"skins=%s hooks=%d/3 arma=%u traje=%u ids=%d",
+            modo, g_mm_skin_hooks_ok,
+            (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
+            g_mm_skin_log_n];
+}
+
+static void mm_skin_set_weapon(uint32_t v)
+{
+    g_mm_skin_weapon_id = v;
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)v
+                                               forKey:@"mm_skin_weapon"];
+    if (g_skin_weapon_tf != nil)
+        g_skin_weapon_tf.text = (v != 0) ? [NSString stringWithFormat:@"%u", v] : @"";
+}
+
+static void mm_skin_set_char(uint32_t v)
+{
+    g_mm_skin_char_id = v;
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)v
+                                               forKey:@"mm_skin_char"];
+    if (g_skin_char_tf != nil)
+        g_skin_char_tf.text = (v != 0) ? [NSString stringWithFormat:@"%u", v] : @"";
+}
+
+static uint32_t mm_skin_parse_field(UITextField *tf)
+{
+    if (tf == nil || tf.text.length == 0) return 0;
+    NSString *s = [tf.text stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (s.length == 0) return 0;
+    const char *c = s.UTF8String;
+    if (c == NULL || c[0] == '-') return 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(c, &end, 0);
+    if (end == c || v > 0xFFFFFFFFULL) return 0;
+    return (uint32_t)v;
+}
+
+static void mm_skin_sync_ui(void)
+{
+    if (g_skin_master_sw != nil) g_skin_master_sw.on = g_mm_skin_on ? YES : NO;
+    if (g_skin_capture_sw != nil) g_skin_capture_sw.on = g_mm_skin_capture ? YES : NO;
+    if (g_skin_weapon_tf != nil && !g_skin_weapon_tf.isFirstResponder)
+        g_skin_weapon_tf.text = (g_mm_skin_weapon_id != 0)
+            ? [NSString stringWithFormat:@"%u", g_mm_skin_weapon_id] : @"";
+    if (g_skin_char_tf != nil && !g_skin_char_tf.isFirstResponder)
+        g_skin_char_tf.text = (g_mm_skin_char_id != 0)
+            ? [NSString stringWithFormat:@"%u", g_mm_skin_char_id] : @"";
+    if (g_skin_preset_seg != nil) {
+        int sel = 0;
+        for (int i = 1; i < 6; i++)
+            if (g_skin_presets[i] == g_mm_skin_weapon_id) sel = i;
+        g_skin_preset_seg.selectedSegmentIndex = sel;
+    }
+}
+
+static void mm_skin_refresh_status(void)
+{
+    if (g_skin_status == nil) return;
+    @try {
+        NSString *base = (g_mm_skin_base != 0)
+            ? [NSString stringWithFormat:@"0x%lX", (unsigned long)g_mm_skin_base]
+            : @"-";
+        g_skin_status.text = [NSString stringWithFormat:
+            @"hooks %d/3  base %@\narma %u  traje %u\ncapturados %d  %@\n%@",
+            g_mm_skin_hooks_ok, base,
+            (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
+            g_mm_skin_log_n,
+            g_mm_skin_on ? @"ON" : (g_mm_skin_capture ? @"captura" : @"off"),
+            g_mm_skin_diag ?: @"-"];
+    } @catch (NSException *e) {}
+}
+
+static NSString *mm_skin_dump_write(void)
+{
+    @try {
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) {
+            g_mm_skin_diag = @"sin Documents";
+            return nil;
+        }
+
+        NSMutableString *s = [NSMutableString string];
+        [s appendFormat:@"CODM ModMenu %s - Skin ID dump\n", MODMENU_VERSION];
+        [s appendFormat:@"fecha\t%@\n", [NSDate date]];
+        [s appendFormat:@"arma_sel\t%u\n", (unsigned)g_mm_skin_weapon_id];
+        [s appendFormat:@"traje_sel\t%u\n", (unsigned)g_mm_skin_char_id];
+        [s appendFormat:@"hooks\t%d/3\tbase\t0x%lX\n\n", g_mm_skin_hooks_ok,
+         (unsigned long)g_mm_skin_base];
+        [s appendString:@"# tipo\tid1\tid2\n"];
+
+        pthread_mutex_lock(&g_mm_skin_log_mtx);
+        int n = g_mm_skin_log_n;
+        for (int i = 0; i < n; i++) {
+            [s appendFormat:@"%s\t%u\t%u\n",
+             mm_skin_kind_name(g_mm_skin_log[i].kind),
+             (unsigned)g_mm_skin_log[i].a,
+             (unsigned)g_mm_skin_log[i].b];
+        }
+        int drop = g_mm_skin_log_drop;
+        pthread_mutex_unlock(&g_mm_skin_log_mtx);
+
+        [s appendFormat:@"\n# total\t%d\tperdidos\t%d\n", n, drop];
+        NSString *path = [docs stringByAppendingPathComponent:@"CODM_SkinDump.txt"];
+        NSError *err = nil;
+        if (![s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err]) {
+            g_mm_skin_diag = [NSString stringWithFormat:@"error dump: %@",
+                              err.localizedDescription ?: @"?"];
+            NSLog(@"%s skins: dump fallo: %@", MM_TAG, err.localizedDescription);
+            return nil;
+        }
+        g_mm_skin_last_dump = path;
+        g_mm_skin_diag = [NSString stringWithFormat:@"dump %d IDs", n];
+        NSLog(@"%s skins: dump %d IDs en %@", MM_TAG, n, path);
+        mm_skin_refresh_status();
+        mm_write_status(@"dump skins");
+        return path;
+    } @catch (NSException *e) {
+        NSLog(@"%s skins: excepcion en dump: %@", MM_TAG, e.reason);
+        return nil;
+    }
+}
+
+/*---------------------------------------------------------------------------
+ * FASE D v0.2.9 - GUEST RESET.
+ * Replica el mecanismo de GL: borra los datos locales y la keychain de
+ * contrasenas genericas, avisa y cierra con _exit(0). El operador debe
+ * probarlo en un equipo desechable y con cuenta de invitado.
+ *--------------------------------------------------------------------------*/
+
+static UIViewController *mm_top_vc(void)
+{
+    @try {
+        UIWindow *w = mm_host_window();
+        UIViewController *vc = (w != nil) ? w.rootViewController : nil;
+        while (vc.presentedViewController != nil) vc = vc.presentedViewController;
+        return vc;
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static void mm_show_alert(NSString *titulo, NSString *msg)
+{
+    @try {
+        UIViewController *vc = mm_top_vc();
+        if (vc == nil) {
+            NSLog(@"%s alerta sin VC: %@ / %@", MM_TAG, titulo, msg);
+            return;
+        }
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:titulo
+                                                                  message:msg
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+        [vc presentViewController:a animated:YES completion:nil];
+    } @catch (NSException *e) {
+        NSLog(@"%s alerta: %@", MM_TAG, e.reason);
+    }
+}
+
+static void mm_guest_wipe(void)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *home = NSHomeDirectory();
+    NSArray *paths = @[
+        [home stringByAppendingPathComponent:@"Documents"],
+        [home stringByAppendingPathComponent:@"Library/Application Support"],
+        [home stringByAppendingPathComponent:@"Library/Caches"],
+        [home stringByAppendingPathComponent:@"Library/Preferences"],
+        [home stringByAppendingPathComponent:@"tmp"]
+    ];
+    for (NSString *p in paths) {
+        NSError *err = nil;
+        BOOL ok = [fm removeItemAtPath:p error:&err];
+        NSLog(@"%s guest: %@ (%@)", MM_TAG, p,
+              ok ? @"borrado" : (err.localizedDescription ?: @"no existia"));
+    }
+
+    NSDictionary *q = @{ (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword };
+    OSStatus st = SecItemDelete((__bridge CFDictionaryRef)q);
+    NSLog(@"%s guest: keychain generic=%d", MM_TAG, (int)st);
+}
+
+static void mm_guest_countdown(UIAlertController *a, int sec)
+{
+    if (a != nil) {
+        a.message = [NSString stringWithFormat:
+                     @"Fresh guest on relaunch in %d seconds.", sec];
+    }
+    if (sec <= 0) {
+        NSLog(@"%s guest: _exit(0)", MM_TAG);
+        _exit(0);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        mm_guest_countdown(a, sec - 1);
+    });
+}
+
+static void mm_guest_start_exit(void)
+{
+    UIViewController *vc = mm_top_vc();
+    UIAlertController *a = nil;
+    if (vc != nil) {
+        a = [UIAlertController alertControllerWithTitle:@"Guest Reset Done"
+                                                message:@"Fresh guest on relaunch in 3 seconds."
+                                         preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"Cerrar ahora"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *x) {
+            _exit(0);
+        }]];
+        [vc presentViewController:a animated:YES completion:nil];
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        mm_guest_countdown(a, 3);
+    });
+}
+
+static void mm_guest_reset_prompt(void)
+{
+    @try {
+        UIViewController *vc = mm_top_vc();
+        if (vc == nil) {
+            mm_guest_wipe();
+            _exit(0);
+            return;
+        }
+        UIAlertController *a = [UIAlertController
+            alertControllerWithTitle:@"Reset guest"
+                             message:@"Borra Documents, Library, tmp y la keychain. "
+                                     @"El juego se cerrara y al reabrir entrara como invitado nuevo."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+        [a addAction:[UIAlertAction actionWithTitle:@"Borrar y cerrar"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *x) {
+            mm_guest_wipe();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(0.35 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                mm_guest_start_exit();
+            });
+        }]];
+        [vc presentViewController:a animated:YES completion:nil];
+    } @catch (NSException *e) {
+        NSLog(@"%s guest reset: %@", MM_TAG, e.reason);
+    }
+}
+
+static void mm_skin_apply(void)
+{
+    mm_skin_read_state();
+    BOOL want = (g_mm_skin_on || g_mm_skin_capture);
+    if (want) {
+        if (!g_mm_skin_installed) mm_skin_install_all();
+    } else if (g_mm_skin_installed) {
+        mm_skin_uninstall_all();
+    }
+    mm_skin_sync_ui();
+    mm_skin_refresh_status();
+    mm_write_status(@"skins");
+}
+
 /* Reescritura atomica del archivo de estado que se puede leer sin syslog. */
 static void mm_write_status(NSString *nota)
 {
@@ -1477,6 +2226,8 @@ static void mm_write_status(NSString *nota)
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
             @"esp_real=%@ jugadores=%d\n"
+            @"skins=%d cap=%d hooks=%d/3 arma=%u traje=%u ids=%d\n"
+            @"skindump=%@\n"
             @"nojb=%@\n"
             @"nota=%@\n",
             MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), (int)getpid(),
@@ -1498,6 +2249,10 @@ static void mm_write_status(NSString *nota)
             (g_link != nil && !g_link.paused) ? "activo" : "parado",
             g_probe != nil ? g_probe.UTF8String : "pendiente",
             (g_esp_diag != nil) ? g_esp_diag : @"-", g_esp_players,
+            (int)g_mm_skin_on, (int)g_mm_skin_capture, g_mm_skin_hooks_ok,
+            (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
+            g_mm_skin_log_n,
+            (g_mm_skin_last_dump != nil) ? g_mm_skin_last_dump : @"-",
             mm_nojb_resumen(),
             nota];
 
@@ -1545,6 +2300,22 @@ static UIView *mm_switch_row(NSString *titulo, NSString *key, BOOL def)
     [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
         forControlEvents:UIControlEventValueChanged];
     return mm_row(titulo, sw);
+}
+
+/* v0.2.9: barra "Listo" para cerrar el teclado numerico de los campos de ID. */
+static UIToolbar *mm_skin_done_bar(void)
+{
+    UIToolbar *tb = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
+    tb.barStyle = UIBarStyleBlack;
+    tb.items = @[
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
+                                                      target:nil action:nil],
+        [[UIBarButtonItem alloc] initWithTitle:@"Listo"
+                                         style:UIBarButtonItemStyleDone
+                                        target:[MMTargets shared]
+                                        action:@selector(onTextDone:)]
+    ];
+    return tb;
 }
 
 /* Crea boton flotante + panel (una sola vez). */
@@ -1621,7 +2392,7 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:x];
 
-    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"MISC", @"INFO"]];
+    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"MISC", @"SKINS", @"INFO"]];
     g_seg.frame = CGRectMake(10.0, 36.0, MM_PANEL_W - 20.0, 30.0);
     g_seg.selectedSegmentIndex = 0;
     if ([g_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
@@ -1641,11 +2412,14 @@ static void mm_build_ui(void)
 
     g_p_esp  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_misc = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    g_p_skins = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_info = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_misc.hidden = YES;
+    g_p_skins.hidden = YES;
     g_p_info.hidden = YES;
     [g_panel addSubview:g_p_esp];
     [g_panel addSubview:g_p_misc];
+    [g_panel addSubview:g_p_skins];
     [g_panel addSubview:g_p_info];
 
     /* --- pagina ESP --- */
@@ -1709,16 +2483,191 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:r1];
 
     UILabel *d1 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 48.0, 272.0, 18.0)];
-    d1.text = @"Skins: fase D (pendiente)";
-    d1.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
-    d1.font = [UIFont systemFontOfSize:11.0];
+    d1.text = @"Cuenta / datos locales";
+    d1.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
+    d1.font = [UIFont boldSystemFontOfSize:12.0];
     [g_p_misc addSubview:d1];
 
-    UILabel *d2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 70.0, 272.0, 18.0)];
-    d2.text = @"Guest reset: fase D (pendiente)";
-    d2.textColor = [UIColor colorWithWhite:0.65 alpha:1.0];
-    d2.font = [UIFont systemFontOfSize:11.0];
+    UIButton *gr = [UIButton buttonWithType:UIButtonTypeCustom];
+    gr.frame = CGRectMake(6.0, 70.0, 272.0, 36.0);
+    gr.backgroundColor = [UIColor colorWithRed:0.48 green:0.08 blue:0.08 alpha:0.95];
+    gr.layer.cornerRadius = 8.0;
+    gr.layer.borderWidth = 1.0;
+    gr.layer.borderColor = [UIColor colorWithRed:1.0 green:0.45 blue:0.45 alpha:0.7].CGColor;
+    [gr setTitle:@"Reset guest (borrar datos)" forState:UIControlStateNormal];
+    [gr setTitleColor:[UIColor colorWithRed:1.0 green:0.9 blue:0.9 alpha:1.0]
+             forState:UIControlStateNormal];
+    gr.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+    [gr addTarget:[MMTargets shared] action:@selector(onGuestReset)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:gr];
+
+    UILabel *d2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 114.0, 272.0, 76.0)];
+    d2.text = @"Borra Documents, Library, tmp y la keychain de invitado. "
+              @"El juego se cierra y al reabrir entra como invitado nuevo. "
+              @"Usar solo en un equipo desechable.";
+    d2.numberOfLines = 0;
+    d2.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
+    d2.font = [UIFont systemFontOfSize:10.5];
     [g_p_misc addSubview:d2];
+
+    UILabel *d3 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 198.0, 272.0, 40.0)];
+    d3.text = @"Skins (armas y traje): pestana SKINS.";
+    d3.numberOfLines = 0;
+    d3.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
+    d3.font = [UIFont systemFontOfSize:11.0];
+    [g_p_misc addSubview:d3];
+
+    /* --- pagina SKINS (v0.2.9) --- */
+    mm_skin_read_state();
+
+    UISwitch *skm = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
+    skm.on = g_mm_skin_on ? YES : NO;
+    skm.onTintColor = mm_verde();
+    skm.accessibilityIdentifier = @"mm_skin_master";
+    skm.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    [skm addTarget:[MMTargets shared] action:@selector(onSwitch:)
+        forControlEvents:UIControlEventValueChanged];
+    g_skin_master_sw = skm;
+    UIView *skmr = mm_row(@"Skin changer (armas)", skm);
+    skmr.frame = CGRectMake(0, 0, 284.0, 31.0);
+    [g_p_skins addSubview:skmr];
+
+    UISwitch *skc = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
+    skc.on = g_mm_skin_capture ? YES : NO;
+    skc.onTintColor = [UIColor colorWithRed:0.30 green:0.65 blue:1.0 alpha:1.0];
+    skc.accessibilityIdentifier = @"mm_skin_capture";
+    skc.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    [skc addTarget:[MMTargets shared] action:@selector(onSwitch:)
+        forControlEvents:UIControlEventValueChanged];
+    g_skin_capture_sw = skc;
+    UIView *skcr = mm_row(@"Capturar IDs reales", skc);
+    skcr.frame = CGRectMake(0, 31.0, 284.0, 31.0);
+    [g_p_skins addSubview:skcr];
+
+    UILabel *wl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 66.0, 272.0, 15.0)];
+    wl.text = @"ID de skin (arma)";
+    wl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
+    wl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_skins addSubview:wl];
+
+    g_skin_weapon_tf = [[UITextField alloc] initWithFrame:CGRectMake(6.0, 82.0, 186.0, 30.0)];
+    g_skin_weapon_tf.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1.0];
+    g_skin_weapon_tf.layer.cornerRadius = 6.0;
+    g_skin_weapon_tf.layer.borderWidth = 1.0;
+    g_skin_weapon_tf.layer.borderColor =
+        [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.55].CGColor;
+    g_skin_weapon_tf.textColor = [UIColor whiteColor];
+    g_skin_weapon_tf.font = [UIFont fontWithName:@"Menlo" size:12.0] ?:
+                            [UIFont systemFontOfSize:12.0];
+    g_skin_weapon_tf.keyboardType = UIKeyboardTypeNumberPad;
+    g_skin_weapon_tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    g_skin_weapon_tf.spellCheckingType = UITextSpellCheckingTypeNo;
+    g_skin_weapon_tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    g_skin_weapon_tf.placeholder = @"ej. 100595";
+    g_skin_weapon_tf.text = (g_mm_skin_weapon_id != 0)
+        ? [NSString stringWithFormat:@"%u", g_mm_skin_weapon_id] : @"";
+    g_skin_weapon_tf.inputAccessoryView = mm_skin_done_bar();
+    [g_p_skins addSubview:g_skin_weapon_tf];
+
+    UIButton *wb = [UIButton buttonWithType:UIButtonTypeCustom];
+    wb.frame = CGRectMake(196.0, 82.0, 82.0, 30.0);
+    wb.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
+    wb.layer.cornerRadius = 6.0;
+    [wb setTitle:@"Aplicar" forState:UIControlStateNormal];
+    [wb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    wb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [wb addTarget:[MMTargets shared] action:@selector(onSkinWeaponSet)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_skins addSubview:wb];
+
+    UILabel *cl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 116.0, 272.0, 15.0)];
+    cl.text = @"ID de traje (personaje)";
+    cl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
+    cl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_skins addSubview:cl];
+
+    g_skin_char_tf = [[UITextField alloc] initWithFrame:CGRectMake(6.0, 132.0, 186.0, 30.0)];
+    g_skin_char_tf.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1.0];
+    g_skin_char_tf.layer.cornerRadius = 6.0;
+    g_skin_char_tf.layer.borderWidth = 1.0;
+    g_skin_char_tf.layer.borderColor =
+        [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.55].CGColor;
+    g_skin_char_tf.textColor = [UIColor whiteColor];
+    g_skin_char_tf.font = [UIFont fontWithName:@"Menlo" size:12.0] ?:
+                          [UIFont systemFontOfSize:12.0];
+    g_skin_char_tf.keyboardType = UIKeyboardTypeNumberPad;
+    g_skin_char_tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    g_skin_char_tf.spellCheckingType = UITextSpellCheckingTypeNo;
+    g_skin_char_tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    g_skin_char_tf.placeholder = @"ej. 0";
+    g_skin_char_tf.text = (g_mm_skin_char_id != 0)
+        ? [NSString stringWithFormat:@"%u", g_mm_skin_char_id] : @"";
+    g_skin_char_tf.inputAccessoryView = mm_skin_done_bar();
+    [g_p_skins addSubview:g_skin_char_tf];
+
+    UIButton *cb = [UIButton buttonWithType:UIButtonTypeCustom];
+    cb.frame = CGRectMake(196.0, 132.0, 82.0, 30.0);
+    cb.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
+    cb.layer.cornerRadius = 6.0;
+    [cb setTitle:@"Aplicar" forState:UIControlStateNormal];
+    [cb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [cb addTarget:[MMTargets shared] action:@selector(onSkinCharSet)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_skins addSubview:cb];
+
+    UILabel *pl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 168.0, 272.0, 15.0)];
+    pl.text = @"Presets de arma (verificados 1.0.57)";
+    pl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
+    pl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_skins addSubview:pl];
+
+    g_skin_preset_seg = [[UISegmentedControl alloc]
+        initWithItems:@[@"Off", @"P1", @"P2", @"P3", @"P4", @"P5"]];
+    g_skin_preset_seg.frame = CGRectMake(6.0, 184.0, 272.0, 30.0);
+    g_skin_preset_seg.selectedSegmentIndex = 0;
+    if ([g_skin_preset_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        g_skin_preset_seg.selectedSegmentTintColor =
+            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
+    else
+        g_skin_preset_seg.tintColor = mm_verde();
+    [g_skin_preset_seg addTarget:[MMTargets shared] action:@selector(onSkinPreset:)
+                 forControlEvents:UIControlEventValueChanged];
+    [g_p_skins addSubview:g_skin_preset_seg];
+
+    UIButton *ab = [UIButton buttonWithType:UIButtonTypeCustom];
+    ab.frame = CGRectMake(6.0, 220.0, 132.0, 32.0);
+    ab.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
+    ab.layer.cornerRadius = 7.0;
+    [ab setTitle:@"Aplicar ambos" forState:UIControlStateNormal];
+    [ab setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    ab.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [ab addTarget:[MMTargets shared] action:@selector(onSkinApply)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_skins addSubview:ab];
+
+    UIButton *db = [UIButton buttonWithType:UIButtonTypeCustom];
+    db.frame = CGRectMake(146.0, 220.0, 132.0, 32.0);
+    db.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
+    db.layer.cornerRadius = 7.0;
+    [db setTitle:@"Dump IDs" forState:UIControlStateNormal];
+    [db setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    db.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [db addTarget:[MMTargets shared] action:@selector(onSkinDump)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_skins addSubview:db];
+
+    g_skin_status = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 258.0, 272.0, 86.0)];
+    g_skin_status.numberOfLines = 0;
+    g_skin_status.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    g_skin_status.font = [UIFont fontWithName:@"Menlo" size:9.5] ?:
+                         [UIFont systemFontOfSize:9.5];
+    g_skin_status.text = @"hooks 0/3  base -\narma 0  traje 0\ncapturados 0  off\n-";
+    [g_p_skins addSubview:g_skin_status];
+
+    mm_skin_sync_ui();
+    mm_skin_refresh_status();
 
     /* --- pagina INFO --- */
     g_info = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 4.0, 272.0, 330.0)];
@@ -1789,6 +2738,8 @@ static void mm_set_panel(BOOL open)
                 g_panel.alpha = 1.0;
             }];
         } else {
+            if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
+            if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
             [UIView animateWithDuration:0.12 animations:^{
                 g_panel.alpha = 0.0;
             } completion:^(BOOL done) {
@@ -1805,6 +2756,7 @@ static void mm_set_panel(BOOL open)
 static void mm_refresh_info(void)
 {
     if (g_info == nil) return;
+    mm_skin_refresh_status();
     @try {
         NSString *txt = [NSString stringWithFormat:
             @"build    %s\n"
@@ -1819,6 +2771,8 @@ static void mm_refresh_info(void)
             @"render   %@   cajas %d\n"
             @"esp2     %@\n"
             @"probe    %@\n"
+            @"skins    %@\n"
+            @"skindump %@\n"
             @"nojb     %@\n",
             MODMENU_VERSION,
             mm_my_path(),
@@ -1836,6 +2790,8 @@ static void mm_refresh_info(void)
             g_box_count,
             (g_esp_diag != nil) ? g_esp_diag : @"-",
             (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar"),
+            mm_skin_resumen(),
+            (g_mm_skin_last_dump != nil) ? g_mm_skin_last_dump.lastPathComponent : @"-",
             mm_nojb_resumen()];
         g_info.text = txt;
     } @catch (NSException *e) {}
