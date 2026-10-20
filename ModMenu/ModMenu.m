@@ -1670,8 +1670,8 @@ __asm__(
     ".text\n"
 );
 
-extern uint32_t mm_skin_orig_w(uint32_t, uint32_t, uint32_t, uint32_t);
-extern uint32_t mm_skin_orig_inv(void *, int, int, int);
+extern uint32_t mm_skin_orig_w(void *, uintptr_t, uintptr_t, uintptr_t);
+extern uint32_t mm_skin_orig_inv(void *, uintptr_t, uintptr_t, uintptr_t);
 extern uint64_t mm_skin_orig_suit(void *, void *);
 
 static volatile int      g_mm_skin_on = 0;
@@ -1729,16 +1729,21 @@ static void mm_skin_log_add(uint32_t kind, uint32_t a, uint32_t b)
 }
 
 __attribute__((noinline, used))
-static uint32_t mm_hook_skin_w(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+static uint32_t mm_hook_skin_w(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
 {
-    uint32_t real = mm_skin_orig_w(a, b, c, d);
-    mm_skin_log_add(1, a, b ? b : real);
+    /* GL no llama al original cuando ya va a devolver el ID custom; la funcion
+       de arma tiene efectos laterales (1088 B) y asi se evita duplicarlos. */
+    uint32_t real = 0;
+    if (!(g_mm_skin_on && g_mm_skin_weapon_id != 0)) {
+        real = mm_skin_orig_w(a, b, c, d);
+    }
+    mm_skin_log_add(1, (uint32_t)(uintptr_t)a, (uint32_t)(b ? b : real));
     if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
     return real;
 }
 
 __attribute__((noinline, used))
-static uint32_t mm_hook_skin_inv(void *a, int b, int c, int d)
+static uint32_t mm_hook_skin_inv(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
 {
     uint32_t real = mm_skin_orig_inv(a, b, c, d);
     mm_skin_log_add(2, (uint32_t)b, real);
