@@ -12,6 +12,16 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.3 (20 oct) - PULIDO FINAL DE UI (SOLO UI).
+ *    - ESP mas fino y discreto: lineas/cajas hairline con sombra suave,
+ *      nombres 10.5, distancia 9.5 centrada y salud de 2.8 px;
+ *    - contador JUG/BOT redisenado: capsula glass oscura, borde hairline,
+ *      sin gradiente animado ni pulso; etiquetas 9 pt, numeros 13 pt y
+ *      separador central; conserva ancho dinamico, safe area y no-toques;
+ *    - marca de agua "Made by: Jose Lopez" y pie de INFO con autoria +
+ *      Telegram @l0pez9801 tappable (https://t.me/l0pez9801);
+ *    - sin tocar aim, NoJB, SKINS ni anogs; sin frameworks nuevos.
+ *
  *  v0.3.2 (20 oct) - CONTADOR JUG/BOT GLASS (SOLO UI).
  *    - el contador deja de ser un rectangulo plano pintado en el lienzo: pasa
  *      a una vista UIKit centrada arriba, con blur oscuro, gradiente
@@ -220,16 +230,16 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.2-glass-ui"
+#define MODMENU_VERSION     "0.3.3"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
 #define MM_SLOW_SECS        5               /* luego un latido cada 5 s    */
 #define MM_PANEL_W          300.0
 #define MM_PANEL_H          430.0
-#define MM_COUNT_H          34.0
-#define MM_COUNT_MIN_W      128.0
-#define MM_COUNT_PAD_X      18.0
+#define MM_COUNT_H          30.0
+#define MM_COUNT_MIN_W      132.0
+#define MM_COUNT_PAD_X      16.0
 
 /* v0.2.5: la posicion del pawn proyecta a la altura del cuello/cabeza. La
    caja se completa con dos puntos del mundo para cubrir el cuerpo entero:
@@ -239,7 +249,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.2";
+const char *modmenu_build_id = "modmenu-glass-0.3.3";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -393,7 +403,7 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 
     CGFloat x0 = CGRectGetMinX(r), x1 = CGRectGetMaxX(r);
     CGFloat y0 = CGRectGetMinY(r), y1 = CGRectGetMaxY(r);
-    CGFloat len = MIN(16.0, MIN(r.size.width, r.size.height) * 0.30);
+    CGFloat len = MIN(12.0, MIN(r.size.width, r.size.height) * 0.28);
     CGFloat maxLen = MIN(r.size.width, r.size.height) * 0.50;
     if (maxLen < 1.0) maxLen = 1.0;
     if (len > maxLen) len = maxLen;
@@ -430,8 +440,11 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
     if (ctx == NULL) return;
 
     CGRect bs = self.bounds;
-    UIFont *f = [UIFont fontWithName:@"Menlo-Bold" size:11.0];
-    if (f == nil) f = [UIFont boldSystemFontOfSize:11.0];
+    UIFont *fNombre = [UIFont systemFontOfSize:10.5 weight:UIFontWeightSemibold];
+    if (fNombre == nil) fNombre = [UIFont boldSystemFontOfSize:10.5];
+    UIFont *fDist = [UIFont monospacedDigitSystemFontOfSize:9.5
+                                                   weight:UIFontWeightMedium];
+    if (fDist == nil) fDist = [UIFont systemFontOfSize:9.5];
 
     BOOL conCajas  = mm_def_bool(@"mm_esp_box", NO);          /* v0.2.5 */
     BOOL conNombre = mm_def_bool(@"mm_esp_name", NO);
@@ -450,7 +463,6 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
 
-    CGContextSetLineWidth(ctx, 1.6);
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
         MMEspBox *b = &g_boxes[i];
         if (!b->alive) continue;
@@ -467,14 +479,14 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
             CGPoint hasta = CGPointMake(CGRectGetMidX(r),
                                         lineasTop ? CGRectGetMinY(r)
                                                   : CGRectGetMaxY(r));
-            /* v0.2.4: contorno negro + trazo grueso (antes se veia debil) */
-            CGContextSetLineWidth(ctx, 4.2);
-            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.45);
+            /* v0.3.3: hairline con sombra suave, no trazo grueso. */
+            CGContextSetLineWidth(ctx, 2.4);
+            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.34);
             CGContextMoveToPoint(ctx, desde.x, desde.y);
             CGContextAddLineToPoint(ctx, hasta.x, hasta.y);
             CGContextStrokePath(ctx);
-            CGContextSetLineWidth(ctx, 1.8);
-            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+            CGContextSetLineWidth(ctx, 1.0);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.80);
             CGContextMoveToPoint(ctx, desde.x, desde.y);
             CGContextAddLineToPoint(ctx, hasta.x, hasta.y);
             CGContextStrokePath(ctx);
@@ -485,17 +497,16 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
            nombres y la distancia quedan fuera: son toggles independientes. */
         if (conCajas) {
             if (conRelleno) {
-                CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.12);
+                CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.06);
                 CGContextFillRect(ctx, r);
             }
-            /* v0.3.0: borde completo o solo esquinas, con el mismo contorno
-               negro para que se lea sobre cualquier fondo. */
-            CGContextSetLineWidth(ctx, 3.4);
-            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
+            /* v0.3.3: borde completo o solo esquinas, hairline + sombra. */
+            CGContextSetLineWidth(ctx, 2.0);
+            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.38);
             mm_esp_box_path(ctx, r, estiloCaja);
             CGContextStrokePath(ctx);
-            CGContextSetLineWidth(ctx, 1.7);
-            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+            CGContextSetLineWidth(ctx, 0.9);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.84);
             mm_esp_box_path(ctx, r, estiloCaja);
             CGContextStrokePath(ctx);
         }
@@ -503,52 +514,72 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
            0.2.5 yo la habia ligado a el y con Cajas OFF desaparecia; el
            test la reporto como "no se ve"). Manda solo el toggle "Salud".
-           Ahora mas visible: marco negro + fondo + relleno por tramos
-           (verde/ambar/rojo); se dibuja tambien con vida 0 (se ve el marco)
-           a la izquierda de la caja, de pies a cabeza. */
+           v0.3.3: 2.8 px, marco fino y colores mas sobrios; se dibuja
+           tambien con vida 0 (se ve el fondo) a la izquierda de la caja. */
         if (conSalud && b->hp >= 0.0f && b->hpMax > 1.0f) {
             float fr = b->hp / b->hpMax;
             if (fr < 0.0f) fr = 0.0f;
             if (fr > 1.0f) fr = 1.0f;
-            CGFloat bwv = 4.0;
-            CGFloat bx  = r.origin.x - 8.0;
+            CGFloat bwv = 2.8;
+            CGFloat bx  = r.origin.x - 6.0;
+            if (bx < 2.0) bx = 2.0;
             CGFloat by  = r.origin.y;
             CGFloat bhh = r.size.height;
-            if (bhh < 6.0) bhh = 6.0;  /* minimo para que se vea de lejos */
-            /* marco negro alrededor de toda la barra */
-            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.80);
-            CGContextFillRect(ctx, CGRectMake(bx - 1.5, by - 1.5,
-                                              bwv + 3.0, bhh + 3.0));
+            if (bhh < 8.0) bhh = 8.0;  /* minimo para que se vea de lejos */
+            /* marco negro fino */
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.62);
+            CGContextFillRect(ctx, CGRectMake(bx - 1.0, by - 1.0,
+                                              bwv + 2.0, bhh + 2.0));
             /* fondo oscuro (se ve aunque la vida este en 0) */
-            CGContextSetRGBFillColor(ctx, 0.06, 0.10, 0.06, 0.90);
+            CGContextSetRGBFillColor(ctx, 0.05, 0.08, 0.06, 0.82);
             CGContextFillRect(ctx, CGRectMake(bx, by, bwv, bhh));
             /* relleno segun la vida */
-            CGFloat rr2 = 1.00, gg2 = 0.20;
-            if (fr > 0.5f)       { rr2 = 0.20; gg2 = 1.00; }
-            else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.75; }
+            CGFloat rr2 = 1.00, gg2 = 0.30, bb2 = 0.32;
+            if (fr > 0.5f)       { rr2 = 0.30; gg2 = 0.95; bb2 = 0.48; }
+            else if (fr > 0.25f) { rr2 = 1.00; gg2 = 0.72; bb2 = 0.26; }
             CGFloat fh2 = bhh * fr;
             if (fh2 > 0.0f) {
-                CGContextSetRGBFillColor(ctx, rr2, gg2, 0.20, 0.98);
+                CGContextSetRGBFillColor(ctx, rr2, gg2, bb2, 0.92);
                 CGContextFillRect(ctx, CGRectMake(bx, by + bhh - fh2,
                                                   bwv, fh2));
             }
         }
 
-        NSDictionary *attr = @{ NSFontAttributeName: f,
+        NSShadow *sh = [[NSShadow alloc] init];
+        sh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.82];
+        sh.shadowBlurRadius = 2.0;
+        sh.shadowOffset = CGSizeMake(0.0, 1.0);
+        NSDictionary *attr = @{ NSFontAttributeName: fNombre,
             NSForegroundColorAttributeName:
-                [UIColor colorWithRed:cr green:cg blue:cb alpha:1.0] };
+                [UIColor colorWithRed:cr green:cg blue:cb alpha:0.96],
+            NSShadowAttributeName: sh };
         if (conNombre) {
             NSString *nm = nil;
             if (b->hasName) nm = [NSString stringWithUTF8String:b->name];
             if (nm == nil || nm.length == 0)
                 nm = (b->robot ? @"BOT" : @"JUGADOR");
-            [nm drawAtPoint:CGPointMake(r.origin.x, r.origin.y - 15.0)
-             withAttributes:attr];
+            CGSize ns = [nm sizeWithAttributes:attr];
+            CGFloat nx = CGRectGetMidX(r) - ns.width / 2.0;
+            nx = MAX(2.0, MIN(bs.size.width - ns.width - 2.0, nx));
+            CGFloat ny = r.origin.y - ns.height - 1.0;
+            if (ny < 0.0) ny = 0.0;
+            [nm drawAtPoint:CGPointMake(nx, ny) withAttributes:attr];
         }
-        if (conDist && b->dist > 0.5f)
-            [[NSString stringWithFormat:@"%d m", (int)(b->dist + 0.5f)]
-             drawAtPoint:CGPointMake(r.origin.x, CGRectGetMaxY(r) + 2.0)
-             withAttributes:attr];
+        if (conDist && b->dist > 0.5f) {
+            NSDictionary *dattr = @{ NSFontAttributeName: fDist,
+                NSForegroundColorAttributeName:
+                    [UIColor colorWithRed:cr green:cg blue:cb alpha:0.90],
+                NSShadowAttributeName: sh };
+            NSString *ds = [NSString stringWithFormat:@"%d m",
+                            (int)(b->dist + 0.5f)];
+            CGSize dsz = [ds sizeWithAttributes:dattr];
+            CGFloat dx = CGRectGetMidX(r) - dsz.width / 2.0;
+            dx = MAX(2.0, MIN(bs.size.width - dsz.width - 2.0, dx));
+            CGFloat dy = CGRectGetMaxY(r) + 2.0;
+            if (dy + dsz.height > bs.size.height - 2.0)
+                dy = MAX(0.0, r.origin.y - dsz.height - 1.0);
+            [ds drawAtPoint:CGPointMake(dx, dy) withAttributes:dattr];
+        }
     }
 
 }
@@ -561,6 +592,7 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 + (MMTargets *)shared;
 - (void)onFrame:(CADisplayLink *)link;
 - (void)onPanelPan:(UIPanGestureRecognizer *)g;
+- (void)onTelegram;
 - (void)onSkinApply;
 - (void)onSkinDump;
 - (void)onSkinWeaponSet;
@@ -581,6 +613,18 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 }
 
 - (void)onTap { mm_set_panel(!g_panel_open); }
+
+/* v0.3.3: contacto de Telegram desde INFO. URL publica, sin APIs privadas. */
+- (void)onTelegram
+{
+    @try {
+        NSURL *u = [NSURL URLWithString:@"https://t.me/l0pez9801"];
+        if (u == nil) return;
+        [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
+    } @catch (NSException *e) {
+        NSLog(@"%s telegram: %@", MM_TAG, e.reason);
+    }
+}
 
 - (void)onPan:(UIPanGestureRecognizer *)g
 {
@@ -2527,24 +2571,61 @@ static void mm_layout_panel_glass(void)
 
 /*---------------------------------------------------------------------------
  * v0.3.2: contador JUG/BOT glass (SOLO UI).
- *   - mismo lenguaje que panel/boton: blur publico, gradiente animado,
- *     borde neon y glow; aqui el gradiente va SOBRE el blur para que se lea;
+ * v0.3.3: capsula sobria: blur oscuro, borde hairline y texto jerarquico.
  *   - el ancho sale del texto (minimo MM_COUNT_MIN_W) y se centra dentro de
  *     la safe area; no recibe toques ni tapa boton/panel.
  *--------------------------------------------------------------------------*/
+static NSAttributedString *mm_count_text(int players, int bots)
+{
+    UIFont *labelFont = [UIFont systemFontOfSize:9.0
+                                          weight:UIFontWeightSemibold];
+    if (labelFont == nil) labelFont = [UIFont boldSystemFontOfSize:9.0];
+    UIFont *numFont = [UIFont monospacedDigitSystemFontOfSize:13.0
+                                                     weight:UIFontWeightSemibold];
+    if (numFont == nil) numFont = [UIFont boldSystemFontOfSize:13.0];
+
+    NSString *s = [NSString stringWithFormat:@"JUG  %d   ·   BOT  %d",
+                   players, bots];
+    NSMutableAttributedString *a = [[NSMutableAttributedString alloc]
+        initWithString:s
+            attributes:@{ NSFontAttributeName: numFont,
+                          NSForegroundColorAttributeName:
+                              [UIColor colorWithWhite:0.97 alpha:1.0],
+                          NSKernAttributeName: @0.3 }];
+    NSRange rj = [s rangeOfString:@"JUG"];
+    NSRange rb = [s rangeOfString:@"BOT"];
+    NSRange rd = [s rangeOfString:@"·"];
+    if (rj.location != NSNotFound) {
+        [a addAttributes:@{ NSFontAttributeName: labelFont,
+                            NSForegroundColorAttributeName:
+                                [mm_neon_green() colorWithAlphaComponent:0.96],
+                            NSKernAttributeName: @1.1 } range:rj];
+    }
+    if (rb.location != NSNotFound) {
+        [a addAttributes:@{ NSFontAttributeName: labelFont,
+                            NSForegroundColorAttributeName:
+                                [mm_neon_purple() colorWithAlphaComponent:0.96],
+                            NSKernAttributeName: @1.1 } range:rb];
+    }
+    if (rd.location != NSNotFound) {
+        [a addAttributes:@{ NSFontAttributeName: labelFont,
+                            NSForegroundColorAttributeName:
+                                [UIColor colorWithWhite:0.52 alpha:1.0] }
+                    range:rd];
+    }
+    return a;
+}
+
 static void mm_layout_count_glass(void)
 {
     if (g_count_glass == nil || g_root == nil || g_count_label == nil) return;
 
-    UIFont *font = g_count_label.font;
-    if (font == nil) font = [UIFont boldSystemFontOfSize:12.0];
-
-    NSString *text = g_count_label.attributedText.string;
-    if (text.length == 0) {
-        text = [NSString stringWithFormat:@"JUG %d   BOT %d",
-                g_count_players, g_count_bots];
-    }
-    CGSize ts = [text sizeWithAttributes:@{ NSFontAttributeName: font }];
+    NSAttributedString *text = g_count_label.attributedText;
+    if (text.length == 0) text = mm_count_text(g_count_players, g_count_bots);
+    CGSize ts = [text boundingRectWithSize:CGSizeMake(1000.0, MM_COUNT_H)
+                                   options:NSStringDrawingUsesLineFragmentOrigin |
+                                           NSStringDrawingUsesFontLeading
+                                   context:nil].size;
 
     UIEdgeInsets safe = g_root.safeAreaInsets;
     CGFloat avail = g_root.bounds.size.width - safe.left - safe.right;
@@ -2564,7 +2645,7 @@ static void mm_layout_count_glass(void)
     if (g_count_neon != nil)  g_count_neon.frame = b;
     if (g_count_blur != nil)  g_count_blur.frame = b;
     if (g_count_shade != nil) g_count_shade.frame = b;
-    if (g_count_label != nil) g_count_label.frame = CGRectInset(b, 10.0, 0.0);
+    if (g_count_label != nil) g_count_label.frame = CGRectInset(b, MM_COUNT_PAD_X, 0.0);
     g_count_glass.layer.shadowPath =
         [UIBezierPath bezierPathWithRoundedRect:b
                                    cornerRadius:MM_COUNT_H / 2.0].CGPath;
@@ -2577,41 +2658,8 @@ static void mm_update_count_glass_text(int players, int bots)
     g_count_last_players = players;
     g_count_last_bots = bots;
 
-    UIFont *font = g_count_label.font;
-    if (font == nil) font = [UIFont boldSystemFontOfSize:12.0];
-    NSString *s = [NSString stringWithFormat:@"JUG %d   BOT %d",
-                   players, bots];
-    NSMutableAttributedString *a = [[NSMutableAttributedString alloc]
-        initWithString:s
-            attributes:@{ NSFontAttributeName: font,
-                          NSForegroundColorAttributeName:
-                              [UIColor colorWithWhite:0.97 alpha:1.0] }];
-    NSRange rj = [s rangeOfString:@"JUG"];
-    NSRange rb = [s rangeOfString:@"BOT"];
-    if (rj.location != NSNotFound)
-        [a addAttribute:NSForegroundColorAttributeName
-                   value:mm_neon_green() range:rj];
-    if (rb.location != NSNotFound)
-        [a addAttribute:NSForegroundColorAttributeName
-                   value:mm_neon_purple() range:rb];
-    g_count_label.attributedText = a;
+    g_count_label.attributedText = mm_count_text(players, bots);
     mm_layout_count_glass();
-}
-
-static void mm_start_count_pulse(void)
-{
-    if (g_count_glass == nil) return;
-    if ([g_count_glass.layer animationForKey:@"mmCountPulse"] != nil) return;
-    CABasicAnimation *pulse =
-        [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
-    pulse.fromValue = @0.40;
-    pulse.toValue = @0.82;
-    pulse.duration = 3.3;
-    pulse.autoreverses = YES;
-    pulse.repeatCount = HUGE_VALF;
-    pulse.timingFunction = [CAMediaTimingFunction
-                            functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [g_count_glass.layer addAnimation:pulse forKey:@"mmCountPulse"];
 }
 
 static BOOL mm_count_glass_visible(void)
@@ -2629,7 +2677,7 @@ static void mm_build_count_glass(void)
     CGFloat radius = MM_COUNT_H / 2.0;
     g_count_glass = [[UIView alloc] initWithFrame:
                      CGRectMake(0.0, 0.0, MM_COUNT_MIN_W, MM_COUNT_H)];
-    g_count_glass.backgroundColor = [UIColor clearColor];
+    g_count_glass.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.18];
     g_count_glass.opaque = NO;
     g_count_glass.userInteractionEnabled = NO;
     g_count_glass.clipsToBounds = NO;
@@ -2637,75 +2685,68 @@ static void mm_build_count_glass(void)
     g_count_glass.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
                                      UIViewAutoresizingFlexibleRightMargin;
     g_count_glass.layer.cornerRadius = radius;
-    g_count_glass.layer.borderWidth = 1.25;
+    g_count_glass.layer.borderWidth = 0.8;
     g_count_glass.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.95].CGColor;
-    g_count_glass.layer.shadowColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
-    g_count_glass.layer.shadowOpacity = 0.62;
-    g_count_glass.layer.shadowRadius = 13.0;
-    g_count_glass.layer.shadowOffset = CGSizeZero;
+        [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    g_count_glass.layer.shadowColor = [UIColor blackColor].CGColor;
+    g_count_glass.layer.shadowOpacity = 0.40;
+    g_count_glass.layer.shadowRadius = 8.0;
+    g_count_glass.layer.shadowOffset = CGSizeMake(0.0, 2.0);
 
     g_count_blur = [[UIVisualEffectView alloc] initWithEffect:
                     [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
     g_count_blur.frame = g_count_glass.bounds;
     g_count_blur.userInteractionEnabled = NO;
-    g_count_blur.alpha = 0.92;
+    g_count_blur.alpha = 0.88;
     g_count_blur.layer.cornerRadius = radius;
     g_count_blur.clipsToBounds = YES;
     [g_count_glass addSubview:g_count_blur];
 
-    /* El gradiente se agrega DESPUES del blur: queda por encima del vidrio y
-       por debajo de la sombra/etiqueta. Asi el verde/morado se ve de verdad. */
+    /* v0.3.3: brillo superior estatico, sin gradiente verde/morado animado. */
     g_count_neon = [CAGradientLayer layer];
     g_count_neon.frame = g_count_glass.bounds;
     g_count_neon.cornerRadius = radius;
     g_count_neon.masksToBounds = YES;
     g_count_neon.startPoint = CGPointMake(0.0, 0.0);
-    g_count_neon.endPoint = CGPointMake(1.0, 1.0);
-    g_count_neon.locations = @[@0.0, @0.34, @0.68, @1.0];
-    CGColorRef c1 = [UIColor colorWithRed:0.10 green:0.96 blue:0.52 alpha:0.58].CGColor;
-    CGColorRef c2 = [UIColor colorWithRed:0.00 green:0.58 blue:0.72 alpha:0.34].CGColor;
-    CGColorRef c3 = [UIColor colorWithRed:0.56 green:0.20 blue:1.00 alpha:0.56].CGColor;
-    CGColorRef c4 = [UIColor colorWithRed:0.18 green:0.03 blue:0.48 alpha:0.44].CGColor;
-    g_count_neon.colors = @[(__bridge id)c1, (__bridge id)c2,
-                            (__bridge id)c3, (__bridge id)c4];
+    g_count_neon.endPoint = CGPointMake(0.0, 1.0);
+    g_count_neon.colors = @[(__bridge id)[UIColor colorWithWhite:1.0
+                                                           alpha:0.10].CGColor,
+                            (__bridge id)[UIColor colorWithWhite:1.0
+                                                           alpha:0.0].CGColor];
     [g_count_glass.layer addSublayer:g_count_neon];
 
     g_count_shade = [[UIView alloc] initWithFrame:g_count_glass.bounds];
-    g_count_shade.backgroundColor =
-        [UIColor colorWithRed:0.01 green:0.02 blue:0.035 alpha:0.34];
+    g_count_shade.backgroundColor = [UIColor colorWithWhite:0.01 alpha:0.22];
     g_count_shade.userInteractionEnabled = NO;
     g_count_shade.layer.cornerRadius = radius;
     g_count_shade.clipsToBounds = YES;
-    g_count_shade.layer.borderWidth = 0.7;
+    g_count_shade.layer.borderWidth = 0.5;
     g_count_shade.layer.borderColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.28].CGColor;
+        [UIColor colorWithWhite:1.0 alpha:0.06].CGColor;
     [g_count_glass addSubview:g_count_shade];
 
     g_count_label = [[UILabel alloc] initWithFrame:
-                     CGRectInset(g_count_glass.bounds, 10.0, 0.0)];
-    UIFont *font = [UIFont fontWithName:@"Menlo-Bold" size:12.0];
-    if (font == nil) font = [UIFont boldSystemFontOfSize:12.0];
+                     CGRectInset(g_count_glass.bounds, MM_COUNT_PAD_X, 0.0)];
+    UIFont *font = [UIFont monospacedDigitSystemFontOfSize:13.0
+                                                   weight:UIFontWeightSemibold];
+    if (font == nil) font = [UIFont boldSystemFontOfSize:13.0];
     g_count_label.font = font;
     g_count_label.textAlignment = NSTextAlignmentCenter;
     g_count_label.backgroundColor = [UIColor clearColor];
     g_count_label.userInteractionEnabled = NO;
     g_count_label.adjustsFontSizeToFitWidth = YES;
-    g_count_label.minimumScaleFactor = 0.82;
+    g_count_label.minimumScaleFactor = 0.85;
     g_count_label.lineBreakMode = NSLineBreakByClipping;
     g_count_label.layer.shadowColor = [UIColor blackColor].CGColor;
-    g_count_label.layer.shadowOpacity = 0.80;
-    g_count_label.layer.shadowRadius = 2.0;
+    g_count_label.layer.shadowOpacity = 0.55;
+    g_count_label.layer.shadowRadius = 1.5;
     g_count_label.layer.shadowOffset = CGSizeMake(0.0, 1.0);
     [g_count_glass addSubview:g_count_label];
 
+    g_count_last_players = -1;
+    g_count_last_bots = -1;
     mm_update_count_glass_text(0, 0);
     mm_layout_count_glass();
-    mm_start_neon_gradient(g_count_neon);
-    mm_start_neon_border(g_count_glass.layer, mm_neon_green(),
-                         mm_neon_purple(), 7.0);
-    mm_start_count_pulse();
 }
 
 static void mm_refresh_count_glass(void)
@@ -2723,11 +2764,6 @@ static void mm_refresh_count_glass(void)
         g_count_glass.alpha = 1.0;
         mm_layout_count_glass();
     }
-    /* v0.3.1: reanuda las animaciones si iOS las purgo en segundo plano. */
-    mm_start_neon_gradient(g_count_neon);
-    mm_start_neon_border(g_count_glass.layer, mm_neon_green(),
-                         mm_neon_purple(), 7.0);
-    mm_start_count_pulse();
 }
 
 /* Fila generica del panel: titulo a la izquierda + control a la derecha. */
@@ -3361,11 +3397,72 @@ static void mm_build_ui(void)
     mm_skin_refresh_status();
 
     /* --- pagina INFO --- */
-    g_info = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 4.0, 272.0, 330.0)];
+    g_info = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 4.0, 272.0, 280.0)];
     g_info.numberOfLines = 0;
+    g_info.clipsToBounds = YES;
     g_info.textColor = [UIColor colorWithWhite:0.95 alpha:1.0];
-    g_info.font = [UIFont fontWithName:@"Menlo" size:10.0] ?: [UIFont systemFontOfSize:10.0];
+    g_info.font = [UIFont fontWithName:@"Menlo" size:9.5] ?: [UIFont systemFontOfSize:9.5];
     [g_p_info addSubview:g_info];
+
+    /* v0.3.3: pie de autoria + contacto Telegram tappable. */
+    UIView *foot = [[UIView alloc] initWithFrame:CGRectMake(6.0, 288.0, 272.0, 54.0)];
+    foot.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.55];
+    foot.layer.cornerRadius = 9.0;
+    foot.layer.borderWidth = 0.6;
+    foot.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    [g_p_info addSubview:foot];
+
+    UILabel *made = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 5.0, 252.0, 12.0)];
+    made.text = @"Made by: Jose Lopez";
+    made.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
+    made.font = [UIFont systemFontOfSize:9.5 weight:UIFontWeightMedium];
+    [foot addSubview:made];
+
+    UIButton *tg = [UIButton buttonWithType:UIButtonTypeCustom];
+    tg.frame = CGRectMake(0.0, 19.0, 272.0, 32.0);
+    tg.backgroundColor = [UIColor clearColor];
+    tg.accessibilityLabel = @"Telegram @l0pez9801";
+    tg.accessibilityIdentifier = @"mm_telegram";
+    [tg addTarget:[MMTargets shared] action:@selector(onTelegram)
+        forControlEvents:UIControlEventTouchUpInside];
+    [foot addSubview:tg];
+
+    UIView *badge = [[UIView alloc] initWithFrame:CGRectMake(8.0, 4.0, 24.0, 24.0)];
+    badge.backgroundColor = [UIColor colorWithRed:0.16 green:0.58 blue:0.96 alpha:1.0];
+    badge.layer.cornerRadius = 12.0;
+    badge.userInteractionEnabled = NO;
+    [tg addSubview:badge];
+
+    UIImage *planeImg = [UIImage systemImageNamed:@"paperplane.fill"];
+    UIImageView *plane = [[UIImageView alloc] initWithFrame:CGRectMake(4.0, 4.0, 16.0, 16.0)];
+    plane.image = [planeImg imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    plane.tintColor = [UIColor whiteColor];
+    plane.contentMode = UIViewContentModeScaleAspectFit;
+    plane.userInteractionEnabled = NO;
+    [badge addSubview:plane];
+
+    UILabel *handle = [[UILabel alloc] initWithFrame:CGRectMake(40.0, 1.0, 190.0, 15.0)];
+    handle.text = @"@l0pez9801";
+    handle.textColor = [UIColor colorWithWhite:0.98 alpha:1.0];
+    handle.font = [UIFont fontWithName:@"Menlo-Bold" size:11.5] ?:
+                  [UIFont boldSystemFontOfSize:11.5];
+    handle.userInteractionEnabled = NO;
+    [tg addSubview:handle];
+
+    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(40.0, 16.0, 190.0, 11.0)];
+    sub.text = @"Telegram · tocar para abrir";
+    sub.textColor = [UIColor colorWithWhite:0.58 alpha:1.0];
+    sub.font = [UIFont systemFontOfSize:8.5];
+    sub.userInteractionEnabled = NO;
+    [tg addSubview:sub];
+
+    UILabel *chev = [[UILabel alloc] initWithFrame:CGRectMake(244.0, 5.0, 18.0, 20.0)];
+    chev.text = @"›";
+    chev.textColor = [UIColor colorWithWhite:0.55 alpha:1.0];
+    chev.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightMedium];
+    chev.textAlignment = NSTextAlignmentRight;
+    chev.userInteractionEnabled = NO;
+    [tg addSubview:chev];
 
     mm_apply_esp_lock();
 }
@@ -3570,10 +3667,21 @@ static BOOL mm_place_ui(void)
            va POR DEBAJO del boton/panel (indice 1; el lienzo esta en 0). */
         if (g_marca == nil) {
             g_marca = [[UILabel alloc] init];
-            g_marca.text = @"Desarrollado por Jose Lopez  @l0pez9801";
-            g_marca.font = [UIFont boldSystemFontOfSize:10.0];
-            g_marca.textColor =
-                [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.38];
+            UIFont *wmFont = [UIFont fontWithName:@"Menlo" size:9.5] ?:
+                             [UIFont systemFontOfSize:9.5];
+            g_marca.font = wmFont;
+            NSMutableAttributedString *wm = [[NSMutableAttributedString alloc]
+                initWithString:@"●  Made by: Jose Lopez"
+                    attributes:@{ NSFontAttributeName: wmFont,
+                                  NSForegroundColorAttributeName:
+                                      [UIColor colorWithWhite:0.72 alpha:0.42],
+                                  NSKernAttributeName: @0.35 }];
+            [wm addAttributes:@{ NSFontAttributeName:
+                                     [UIFont systemFontOfSize:8.0],
+                                 NSForegroundColorAttributeName:
+                                     [mm_neon_green() colorWithAlphaComponent:0.62] }
+                         range:NSMakeRange(0, 1)];
+            g_marca.attributedText = wm;
             g_marca.backgroundColor = [UIColor clearColor];
             g_marca.userInteractionEnabled = NO;
         }
@@ -3584,8 +3692,10 @@ static BOOL mm_place_ui(void)
         [g_marca sizeToFit];
         {
             CGRect rm = g_marca.frame;
-            rm.origin.x = 12.0;
-            rm.origin.y = g_root.bounds.size.height - rm.size.height - 10.0;
+            UIEdgeInsets safe = g_root.safeAreaInsets;
+            rm.origin.x = safe.left + 14.0;
+            rm.origin.y = g_root.bounds.size.height - rm.size.height -
+                          MAX(10.0, safe.bottom + 4.0);
             g_marca.frame = rm;
         }
 
