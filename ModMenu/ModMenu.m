@@ -12,6 +12,13 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.4 (20 oct) - QA/PERF: mismo look que v0.3.3.
+ *    - el ESP deja de crear NSShadow + 2 NSDictionary por caja y por frame;
+ *      ahora prepara colores/atributos una vez por frame y los reutiliza;
+ *    - sin cambios visuales, de deteccion ni de logica; baja la presion de
+ *      autorelease y el coste de CPU con muchas cajas;
+ *    - mismas rutas, toggles, aim, NoJB, SKINS y anogs OFF.
+ *
  *  v0.3.3 (20 oct) - PULIDO FINAL DE UI (SOLO UI).
  *    - ESP mas fino y discreto: lineas/cajas hairline con sombra suave,
  *      nombres 10.5, distancia 9.5 centrada y salud de 2.8 px;
@@ -230,7 +237,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.3"
+#define MODMENU_VERSION     "0.3.4"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -249,7 +256,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.3";
+const char *modmenu_build_id = "modmenu-glass-0.3.4";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -463,13 +470,44 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
 
+    /* v0.3.4: colores y atributos de texto se preparan UNA vez por frame.
+       Antes se creaba un NSShadow + dos NSDictionary por cada caja a 30 fps;
+       con muchas cajas eso generaba presion de autorelease innecesaria. */
+    CGFloat crJug = 1.00, cgJug = 0.25, cbJug = 0.25;
+    CGFloat crBot = 1.00, cgBot = 0.25, cbBot = 0.25;
+    mm_esp_color(0, tema, &crJug, &cgJug, &cbJug);
+    mm_esp_color(1, tema, &crBot, &cgBot, &cbBot);
+
+    NSShadow *txtShadow = [[NSShadow alloc] init];
+    txtShadow.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.82];
+    txtShadow.shadowBlurRadius = 2.0;
+    txtShadow.shadowOffset = CGSizeMake(0.0, 1.0);
+
+    NSDictionary *nameJug = @{ NSFontAttributeName: fNombre,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:crJug green:cgJug blue:cbJug alpha:0.96],
+        NSShadowAttributeName: txtShadow };
+    NSDictionary *nameBot = @{ NSFontAttributeName: fNombre,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:crBot green:cgBot blue:cbBot alpha:0.96],
+        NSShadowAttributeName: txtShadow };
+    NSDictionary *distJug = @{ NSFontAttributeName: fDist,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:crJug green:cgJug blue:cbJug alpha:0.90],
+        NSShadowAttributeName: txtShadow };
+    NSDictionary *distBot = @{ NSFontAttributeName: fDist,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:crBot green:cgBot blue:cbBot alpha:0.90],
+        NSShadowAttributeName: txtShadow };
+
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
         MMEspBox *b = &g_boxes[i];
         if (!b->alive) continue;
         CGRect r = CGRectMake(b->x, b->y, b->w, b->h);
 
-        CGFloat cr = 1.00, cg = 0.25, cb = 0.25;
-        mm_esp_color(b->robot, tema, &cr, &cg, &cb);
+        CGFloat cr = b->robot ? crBot : crJug;
+        CGFloat cg = b->robot ? cgBot : cgJug;
+        CGFloat cb = b->robot ? cbBot : cbJug;
 
         if (conLineas) {
             /* v0.2.5: origen elegible. OFF = borde inferior -> pies de la caja;
@@ -545,14 +583,7 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
             }
         }
 
-        NSShadow *sh = [[NSShadow alloc] init];
-        sh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.82];
-        sh.shadowBlurRadius = 2.0;
-        sh.shadowOffset = CGSizeMake(0.0, 1.0);
-        NSDictionary *attr = @{ NSFontAttributeName: fNombre,
-            NSForegroundColorAttributeName:
-                [UIColor colorWithRed:cr green:cg blue:cb alpha:0.96],
-            NSShadowAttributeName: sh };
+        NSDictionary *attr = b->robot ? nameBot : nameJug;
         if (conNombre) {
             NSString *nm = nil;
             if (b->hasName) nm = [NSString stringWithUTF8String:b->name];
@@ -566,10 +597,7 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
             [nm drawAtPoint:CGPointMake(nx, ny) withAttributes:attr];
         }
         if (conDist && b->dist > 0.5f) {
-            NSDictionary *dattr = @{ NSFontAttributeName: fDist,
-                NSForegroundColorAttributeName:
-                    [UIColor colorWithRed:cr green:cg blue:cb alpha:0.90],
-                NSShadowAttributeName: sh };
+            NSDictionary *dattr = b->robot ? distBot : distJug;
             NSString *ds = [NSString stringWithFormat:@"%d m",
                             (int)(b->dist + 0.5f)];
             CGSize dsz = [ds sizeWithAttributes:dattr];
