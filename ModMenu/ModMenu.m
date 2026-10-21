@@ -12,6 +12,14 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.7 (21 oct) - LICENCIA en FusionCore (migra KeyGate): verifica un token
+ *    ES256 (firma r||s -> DER -> Security.framework) guardado en el Keychain,
+ *    con HWID = SHA256(identifierForVendor + uuid-keychain + sal). Sin 2a dylib
+ *    ni claves plist (mata el vector F-04). ENFORCE en modo OBSERVACION por
+ *    defecto (g_lic_enforce=NO): verifica y registra, NO bloquea features, hasta
+ *    validar en equipo (leccion anogs). La clave publica embebida es placeholder:
+ *    `fusion license pubkey` imprime la de produccion. PENDIENTE device.
+ *
  *  v0.3.6 (21 oct) - F-02: trampolin de skins con RELOCACION en runtime.
  *    - fuera los trampolines naked con prologo de 16 B hardcodeado; ahora un
  *      relocador arm64 (mm_reloc_one/mm_build_tramp) copia el prologo REAL y
@@ -241,6 +249,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
+#import <CommonCrypto/CommonCrypto.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #include <unistd.h>
@@ -254,7 +263,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.6"
+#define MODMENU_VERSION     "0.3.7"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -273,7 +282,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.6";
+const char *modmenu_build_id = "modmenu-glass-0.3.7";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -3928,6 +3937,195 @@ static void mm_tick(void)
     }
 }
 
+/*==========================================================================
+ * v0.3.7 — LICENCIA (cliente en FusionCore; migra KeyGate).
+ *
+ * Verifica un token ES256 que la app guarda en el Keychain tras activar contra
+ * el servidor. Reemplaza a KeyGate (2a dylib + claves CODMGateKey/Device en el
+ * plist = el vector estatico F-04): aqui todo vive DENTRO del carrier, el token
+ * en Keychain, cero claves plist.
+ *
+ * Security.framework verifica firmas ECDSA en DER (X9.62); el token JWS trae la
+ * firma en r||s (64 B), asi que se convierte r||s -> DER antes de verificar.
+ *
+ * ENFORCE: g_lic_enforce arranca en NO (modo observacion) — verifica, registra
+ * y expone el estado, pero NO bloquea features, hasta validar en equipo. Activar
+ * el bloqueo sin probar podria dejar fuera a usuarios validos (leccion anogs).
+ *==========================================================================*/
+
+static BOOL      g_lic_valid = NO;
+static BOOL      g_lic_enforce = NO;        /* OFF hasta validar en dispositivo */
+static NSString *g_lic_reason = nil;
+static NSString *g_lic_sku = nil;
+static NSArray  *g_lic_feats = nil;
+static long      g_lic_exp = 0;
+
+/* Clave publica ES256 (punto sin comprimir 0x04 || X(32) || Y(32), 65 B).
+   PLACEHOLDER: reemplazar por la de produccion (imprimela con `fusion license pubkey`).
+   Con el placeholder la verificacion fallara (reason="firma invalida"), que es lo
+   correcto hasta pegar la real. */
+static const uint8_t MM_LIC_PUBKEY[65] = { 0x04 };  /* resto en cero = placeholder */
+
+#define MM_LIC_SERVICE @"com.fusion.license"
+
+static NSData *mm_lic_kc_get(NSString *acct)
+{
+    NSDictionary *q = @{ (__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
+                         (__bridge id)kSecAttrService:MM_LIC_SERVICE,
+                         (__bridge id)kSecAttrAccount:acct,
+                         (__bridge id)kSecReturnData:@YES,
+                         (__bridge id)kSecMatchLimit:(__bridge id)kSecMatchLimitOne };
+    CFTypeRef r = NULL;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &r) == errSecSuccess && r)
+        return (__bridge_transfer NSData *)r;
+    return nil;
+}
+static void mm_lic_kc_set(NSString *acct, NSData *data)
+{
+    NSDictionary *q = @{ (__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
+                         (__bridge id)kSecAttrService:MM_LIC_SERVICE,
+                         (__bridge id)kSecAttrAccount:acct };
+    SecItemDelete((__bridge CFDictionaryRef)q);
+    NSMutableDictionary *add = [q mutableCopy];
+    add[(__bridge id)kSecValueData] = data;
+    add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+    SecItemAdd((__bridge CFDictionaryRef)add, NULL);
+}
+
+/* uuid por dispositivo guardado en Keychain: sobrevive reinstalaciones. */
+static NSString *mm_lic_device_uuid(void)
+{
+    NSData *d = mm_lic_kc_get(@"device_uuid");
+    if (d) return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    NSString *u = [[NSUUID UUID] UUIDString];
+    mm_lic_kc_set(@"device_uuid", [u dataUsingEncoding:NSUTF8StringEncoding]);
+    return u;
+}
+/* HWID = SHA256(identifierForVendor + uuid-keychain + sal). El cliente manda este
+   mismo HWID al activar, asi que el token lo trae igual. */
+static NSString *mm_lic_hwid(void)
+{
+    NSString *idfv = [[UIDevice currentDevice].identifierForVendor UUIDString] ?: @"nil";
+    NSString *mix = [NSString stringWithFormat:@"%@|%@|fusion_hwid_v1", idfv, mm_lic_device_uuid()];
+    NSData *in = [mix dataUsingEncoding:NSUTF8StringEncoding];
+    uint8_t out[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(in.bytes, (CC_LONG)in.length, out);
+    NSMutableString *h = [NSMutableString string];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [h appendFormat:@"%02x", out[i]];
+    return h;
+}
+
+static NSData *mm_b64url(NSString *s)
+{
+    NSMutableString *m = [s mutableCopy];
+    [m replaceOccurrencesOfString:@"-" withString:@"+" options:0 range:NSMakeRange(0, m.length)];
+    [m replaceOccurrencesOfString:@"_" withString:@"/" options:0 range:NSMakeRange(0, m.length)];
+    while (m.length % 4) [m appendString:@"="];
+    return [[NSData alloc] initWithBase64EncodedString:m options:0];
+}
+/* un INTEGER DER a partir de un entero big-endian de 'len' bytes */
+static NSData *mm_der_int(const uint8_t *b, int len)
+{
+    int i = 0; while (i < len - 1 && b[i] == 0) i++;     /* quita ceros a la izquierda */
+    int n = len - i;
+    BOOL pad = (b[i] & 0x80) != 0;                        /* bit alto -> prefijo 0x00 */
+    NSMutableData *d = [NSMutableData data];
+    uint8_t tag = 0x02, l = (uint8_t)(n + (pad ? 1 : 0));
+    [d appendBytes:&tag length:1]; [d appendBytes:&l length:1];
+    if (pad) { uint8_t z = 0; [d appendBytes:&z length:1]; }
+    [d appendBytes:(b + i) length:n];
+    return d;
+}
+/* firma r||s (64 B) -> SEQUENCE{INTEGER r, INTEGER s} (DER), que es lo que pide
+   SecKeyVerifySignature para ECDSA. */
+static NSData *mm_ec_rs_to_der(NSData *rs)
+{
+    if (rs.length != 64) return nil;
+    const uint8_t *p = rs.bytes;
+    NSData *rI = mm_der_int(p, 32), *sI = mm_der_int(p + 32, 32);
+    NSMutableData *der = [NSMutableData data];
+    uint8_t seq = 0x30, l = (uint8_t)(rI.length + sI.length);
+    [der appendBytes:&seq length:1]; [der appendBytes:&l length:1];
+    [der appendData:rI]; [der appendData:sI];
+    return der;
+}
+
+/* verifica firma + exp + hwid; rellena g_lic_*. Devuelve YES si valida. */
+static BOOL mm_lic_verify_token(NSString *token)
+{
+    g_lic_reason = @"sin token"; g_lic_sku = nil; g_lic_feats = nil; g_lic_exp = 0;
+    if (token.length == 0) return NO;
+    NSArray *parts = [token componentsSeparatedByString:@"."];
+    if (parts.count != 3) { g_lic_reason = @"malformado"; return NO; }
+    NSData *sig = mm_b64url(parts[2]);
+    if (sig.length != 64) { g_lic_reason = @"firma no es r||s(64)"; return NO; }
+
+    NSData *pk = [NSData dataWithBytes:MM_LIC_PUBKEY length:sizeof(MM_LIC_PUBKEY)];
+    NSDictionary *attr = @{ (__bridge id)kSecAttrKeyType:(__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+                            (__bridge id)kSecAttrKeyClass:(__bridge id)kSecAttrKeyClassPublic,
+                            (__bridge id)kSecAttrKeySizeInBits:@256 };
+    CFErrorRef err = NULL;
+    SecKeyRef key = SecKeyCreateWithData((__bridge CFDataRef)pk, (__bridge CFDictionaryRef)attr, &err);
+    if (!key) { g_lic_reason = @"pubkey invalida"; if (err) CFRelease(err); return NO; }
+    NSData *der = mm_ec_rs_to_der(sig);
+    NSString *hp = [NSString stringWithFormat:@"%@.%@", parts[0], parts[1]];
+    BOOL ok = der && SecKeyVerifySignature(key, kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
+                                           (__bridge CFDataRef)[hp dataUsingEncoding:NSUTF8StringEncoding],
+                                           (__bridge CFDataRef)der, &err);
+    CFRelease(key); if (err) CFRelease(err);
+    if (!ok) { g_lic_reason = @"firma invalida"; return NO; }
+
+    NSDictionary *p = [NSJSONSerialization JSONObjectWithData:mm_b64url(parts[1]) options:0 error:nil];
+    if (![p isKindOfClass:[NSDictionary class]]) { g_lic_reason = @"payload ilegible"; return NO; }
+    long exp = [p[@"exp"] longValue], now = (long)time(NULL);
+    g_lic_exp = exp;
+    if (exp && now > exp) { g_lic_reason = @"expirada"; return NO; }
+    NSString *hwid = p[@"hwid"];
+    if (hwid.length && ![hwid isEqualToString:mm_lic_hwid()]) { g_lic_reason = @"hwid no coincide"; return NO; }
+    g_lic_sku = p[@"sku"]; g_lic_feats = p[@"feats"]; g_lic_reason = @"valida";
+    return YES;
+}
+
+/* token desde Keychain; si no, desde Documents/fusion_license.txt (para pruebas) */
+static NSString *mm_lic_load_token(BOOL *fromFile)
+{
+    *fromFile = NO;
+    NSData *d = mm_lic_kc_get(@"token");
+    if (d) return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *t = [NSString stringWithContentsOfFile:[docs stringByAppendingPathComponent:@"fusion_license.txt"]
+                                            encoding:NSUTF8StringEncoding error:nil];
+    if (t.length) { *fromFile = YES; return [t stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]; }
+    return nil;
+}
+
+/* feature habilitada por la licencia ("all" o el nombre). Lista para cuando se
+   active el enforce; en observacion no se consulta aun. */
+static BOOL mm_lic_has_feat(NSString *feat)
+{
+    if (!g_lic_enforce) return YES;                 /* observacion: todo permitido */
+    if (!g_lic_valid) return NO;
+    if ([g_lic_feats containsObject:@"all"]) return YES;
+    return [g_lic_feats containsObject:feat];
+}
+
+static void mm_lic_check(void)
+{
+    BOOL fromFile = NO;
+    NSString *token = mm_lic_load_token(&fromFile);
+    g_lic_valid = token ? mm_lic_verify_token(token) : (g_lic_reason = @"sin token", NO);
+    if (g_lic_valid && fromFile)                     /* migrar el token de archivo al Keychain */
+        mm_lic_kc_set(@"token", [token dataUsingEncoding:NSUTF8StringEncoding]);
+    long now = (long)time(NULL);
+    NSString *st = [NSString stringWithFormat:@"lic=%@ sku=%@ reason=%@ exp_dias=%ld enforce=%@",
+                    g_lic_valid ? @"si" : @"no", g_lic_sku ?: @"-", g_lic_reason ?: @"-",
+                    g_lic_exp ? (g_lic_exp - now) / 86400 : 0, g_lic_enforce ? @"si" : @"no"];
+    NSLog(@"%s licencia: %@ (hwid=%@…)", MM_TAG, st, [mm_lic_hwid() substringToIndex:12]);
+    mm_write_status([@"licencia " stringByAppendingString:st]);
+    /* ENFORCE (cuando se valide en equipo): if (g_lic_enforce && !g_lic_valid)
+       -> no instalar hooks / apagar feats; por ahora solo observa. */
+}
+
 __attribute__((constructor)) static void modmenu_init(void)
 {
     g_t0 = [NSDate date].timeIntervalSinceReferenceDate;
@@ -3935,6 +4133,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     NSLog(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
           MM_TAG, MODMENU_VERSION, mm_my_path(), (int)getpid());
     mm_write_status(@"arranque (opciones a fabrica)");
+    mm_lic_check();       /* v0.3.7: licencia (observacion; migra KeyGate) */
     mm_nojb_start();      /* v0.2.8: fase C (antidetect) en segundo plano */
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
