@@ -228,7 +228,7 @@
 #define MM_PANEL_W          300.0
 #define MM_PANEL_H          430.0
 #define MM_COUNT_H          34.0
-#define MM_COUNT_MIN_W      150.0
+#define MM_COUNT_MIN_W      128.0
 #define MM_COUNT_PAD_X      18.0
 
 /* v0.2.5: la posicion del pawn proyecta a la altura del cuello/cabeza. La
