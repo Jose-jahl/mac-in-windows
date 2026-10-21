@@ -12,6 +12,13 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.1 (20 oct) - INTERFAZ GLASS NEON (SOLO UI).
+ *    - panel y boton con vidrio oscuro (UIBlurEffectStyleDark) + gradiente
+ *      animado verde/morado (CAGradientLayer), borde neon que cambia y glow;
+ *    - cabecera, pestanas y boton reestilados; los toggles y el ESP no cambian;
+ *    - no toca aim, NoJB, SKINS ni anogs y no anade frameworks: UIKit,
+ *      QuartzCore y CoreGraphics ya estaban enlazados por el CI.
+ *
  *  v0.3.0 (20 oct) - STREAM MODE + PULIDO DEL ESP.
  *    - nueva pagina VIS: Stream Mode (oculta panel y marca de agua; el boton
  *      queda al 10% y sigue tocable para volver a abrirlo), contador de
@@ -204,7 +211,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.0-vis"
+#define MODMENU_VERSION     "0.3.1-glass"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -220,12 +227,16 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-vis-0.3.0";
+const char *modmenu_build_id = "modmenu-glass-0.3.1";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
 static UIView   *g_panel = nil;   /* panel desplegable                        */
+static CAGradientLayer *g_panel_neon = nil; /* v0.3.1: fondo glass neon       */
+static UIVisualEffectView *g_panel_blur = nil;
+static UIView   *g_panel_shade = nil;
+static CAGradientLayer *g_btn_neon = nil;   /* v0.3.1: boton glass neon       */
 static UISegmentedControl *g_seg = nil;
 static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
@@ -2427,6 +2438,86 @@ static UIColor *mm_verde(void)
     return [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:1.0];
 }
 
+/*---------------------------------------------------------------------------
+ * v0.3.1: estetica glass neon (SOLO UI).
+ *   - verde/morado con CAGradientLayer animado y borde que cambia de color;
+ *   - blur publico de UIKit, sin private APIs y sin frameworks nuevos.
+ *--------------------------------------------------------------------------*/
+static UIColor *mm_neon_green(void)
+{
+    return [UIColor colorWithRed:0.20 green:1.00 blue:0.58 alpha:1.0];
+}
+
+static UIColor *mm_neon_purple(void)
+{
+    return [UIColor colorWithRed:0.63 green:0.30 blue:1.00 alpha:1.0];
+}
+
+static void mm_start_neon_gradient(CAGradientLayer *g)
+{
+    if (g == nil || g.colors.count < 2) return;
+    if ([g animationForKey:@"mmNeonColors"] == nil) {
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"colors"];
+        a.fromValue = g.colors;
+        a.toValue = [[g.colors reverseObjectEnumerator] allObjects];
+        a.duration = 9.0;
+        a.autoreverses = YES;
+        a.repeatCount = HUGE_VALF;
+        a.timingFunction = [CAMediaTimingFunction
+                            functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [g addAnimation:a forKey:@"mmNeonColors"];
+    }
+    if ([g animationForKey:@"mmNeonStart"] == nil) {
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"startPoint"];
+        a.fromValue = [NSValue valueWithCGPoint:g.startPoint];
+        a.toValue = [NSValue valueWithCGPoint:CGPointMake(1.0, 0.0)];
+        a.duration = 7.0;
+        a.autoreverses = YES;
+        a.repeatCount = HUGE_VALF;
+        a.timingFunction = [CAMediaTimingFunction
+                            functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [g addAnimation:a forKey:@"mmNeonStart"];
+    }
+    if ([g animationForKey:@"mmNeonEnd"] == nil) {
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"endPoint"];
+        a.fromValue = [NSValue valueWithCGPoint:g.endPoint];
+        a.toValue = [NSValue valueWithCGPoint:CGPointMake(0.0, 1.0)];
+        a.duration = 7.0;
+        a.autoreverses = YES;
+        a.repeatCount = HUGE_VALF;
+        a.timingFunction = [CAMediaTimingFunction
+                            functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [g addAnimation:a forKey:@"mmNeonEnd"];
+    }
+}
+
+static void mm_start_neon_border(CALayer *l, UIColor *a, UIColor *b,
+                                 CFTimeInterval duracion)
+{
+    if (l == nil || a == nil || b == nil) return;
+    if ([l animationForKey:@"mmNeonBorder"] != nil) return;
+    CABasicAnimation *x = [CABasicAnimation animationWithKeyPath:@"borderColor"];
+    x.fromValue = (__bridge id)a.CGColor;
+    x.toValue = (__bridge id)b.CGColor;
+    x.duration = duracion;
+    x.autoreverses = YES;
+    x.repeatCount = HUGE_VALF;
+    x.timingFunction = [CAMediaTimingFunction
+                        functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [l addAnimation:x forKey:@"mmNeonBorder"];
+}
+
+static void mm_layout_panel_glass(void)
+{
+    if (g_panel == nil) return;
+    CGRect b = g_panel.bounds;
+    if (g_panel_neon != nil)  g_panel_neon.frame = b;
+    if (g_panel_blur != nil)  g_panel_blur.frame = b;
+    if (g_panel_shade != nil) g_panel_shade.frame = b;
+    g_panel.layer.shadowPath =
+        [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:18.0].CGPath;
+}
+
 /* Fila generica del panel: titulo a la izquierda + control a la derecha. */
 static UIView *mm_row(NSString *titulo, UIView *ctrl)
 {
@@ -2473,23 +2564,73 @@ static UIToolbar *mm_skin_done_bar(void)
 /* Crea boton flotante + panel (una sola vez). */
 static void mm_build_ui(void)
 {
-    /* --- boton flotante --- */
+    /* --- boton flotante (v0.3.1: glass neon) --- */
     if (g_btn == nil) {
         g_btn = [UIButton buttonWithType:UIButtonTypeCustom];
         g_btn.bounds = CGRectMake(0, 0, 54.0, 54.0);
-        g_btn.backgroundColor = [UIColor colorWithRed:0.02 green:0.10 blue:0.04 alpha:0.72];
+        g_btn.backgroundColor = [UIColor colorWithRed:0.02 green:0.08 blue:0.05 alpha:0.86];
         g_btn.layer.cornerRadius = 27.0;
-        g_btn.layer.borderWidth = 1.5;
-        g_btn.layer.borderColor = mm_verde().CGColor;
+        g_btn.layer.borderWidth = 1.2;
+        g_btn.layer.borderColor =
+            [mm_neon_green() colorWithAlphaComponent:0.90].CGColor;
+        g_btn.layer.shadowColor =
+            [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
+        g_btn.layer.shadowOpacity = 0.55;
+        g_btn.layer.shadowRadius = 12.0;
+        g_btn.layer.shadowOffset = CGSizeZero;
+        g_btn.clipsToBounds = NO;
         [g_btn setTitle:@"MENU" forState:UIControlStateNormal];
-        [g_btn setTitleColor:[UIColor colorWithRed:0.78 green:1.0 blue:0.84 alpha:1.0]
+        [g_btn setTitleColor:[UIColor colorWithWhite:0.97 alpha:1.0]
                     forState:UIControlStateNormal];
-        g_btn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
+        UIFont *bf = [UIFont fontWithName:@"Menlo-Bold" size:10.0];
+        if (bf == nil) bf = [UIFont boldSystemFontOfSize:10.0];
+        g_btn.titleLabel.font = bf;
         [g_btn addTarget:[MMTargets shared] action:@selector(onTap)
         forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:[MMTargets shared] action:@selector(onPan:)];
         [g_btn addGestureRecognizer:pan];
+
+        g_btn_neon = [CAGradientLayer layer];
+        g_btn_neon.frame = g_btn.bounds;
+        g_btn_neon.cornerRadius = 27.0;
+        g_btn_neon.masksToBounds = YES;
+        g_btn_neon.startPoint = CGPointMake(0.0, 0.0);
+        g_btn_neon.endPoint = CGPointMake(1.0, 1.0);
+        g_btn_neon.locations = @[@0.0, @0.38, @0.72, @1.0];
+        CGColorRef bg1 = [UIColor colorWithRed:0.02 green:0.20 blue:0.10 alpha:0.96].CGColor;
+        CGColorRef bg2 = [UIColor colorWithRed:0.05 green:0.48 blue:0.30 alpha:0.90].CGColor;
+        CGColorRef bg3 = [UIColor colorWithRed:0.34 green:0.09 blue:0.58 alpha:0.96].CGColor;
+        CGColorRef bg4 = [UIColor colorWithRed:0.09 green:0.28 blue:0.17 alpha:0.94].CGColor;
+        g_btn_neon.colors = @[(__bridge id)bg1, (__bridge id)bg2,
+                              (__bridge id)bg3, (__bridge id)bg4];
+        [g_btn.layer insertSublayer:g_btn_neon atIndex:0];
+
+        CAGradientLayer *shine = [CAGradientLayer layer];
+        shine.frame = g_btn.bounds;
+        shine.cornerRadius = 27.0;
+        shine.startPoint = CGPointMake(0.0, 0.0);
+        shine.endPoint = CGPointMake(0.0, 1.0);
+        CGColorRef sh1 = [UIColor colorWithWhite:1.0 alpha:0.20].CGColor;
+        CGColorRef sh2 = [UIColor colorWithWhite:1.0 alpha:0.0].CGColor;
+        shine.colors = @[(__bridge id)sh1, (__bridge id)sh2];
+        [g_btn.layer insertSublayer:shine atIndex:1];
+
+        g_btn.layer.shadowPath =
+            [UIBezierPath bezierPathWithOvalInRect:g_btn.bounds].CGPath;
+        mm_start_neon_gradient(g_btn_neon);
+        mm_start_neon_border(g_btn.layer, mm_neon_green(), mm_neon_purple(), 6.0);
+
+        CABasicAnimation *pulse =
+            [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+        pulse.fromValue = @0.35;
+        pulse.toValue = @0.78;
+        pulse.duration = 3.2;
+        pulse.autoreverses = YES;
+        pulse.repeatCount = HUGE_VALF;
+        pulse.timingFunction = [CAMediaTimingFunction
+                                functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [g_btn.layer addAnimation:pulse forKey:@"mmNeonPulse"];
     }
 
     /* --- lienzo del ESP + latido de dibujo (~30 fps) --- */
@@ -2509,15 +2650,60 @@ static void mm_build_ui(void)
 
     if (g_panel != nil) return;
 
-    /* --- panel --- */
+    /* --- panel (v0.3.1: vidrio oscuro + gradiente neon animado) --- */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MM_PANEL_W, MM_PANEL_H)];
-    g_panel.backgroundColor = [UIColor colorWithRed:0.02 green:0.09 blue:0.04 alpha:0.93];
-    g_panel.layer.cornerRadius = 14.0;
-    g_panel.layer.borderWidth = 1.2;
-    g_panel.layer.borderColor = [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.65].CGColor;
-    g_panel.clipsToBounds = YES;
+    g_panel.backgroundColor = [UIColor colorWithRed:0.01 green:0.02 blue:0.03 alpha:0.42];
+    g_panel.layer.cornerRadius = 18.0;
+    g_panel.layer.borderWidth = 1.1;
+    g_panel.layer.borderColor =
+        [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
+    g_panel.layer.shadowColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.90].CGColor;
+    g_panel.layer.shadowOpacity = 0.55;
+    g_panel.layer.shadowRadius = 18.0;
+    g_panel.layer.shadowOffset = CGSizeMake(0.0, 8.0);
+    g_panel.clipsToBounds = NO;
     g_panel.hidden = YES;
     g_panel.alpha = 0.0;
+
+    g_panel_neon = [CAGradientLayer layer];
+    g_panel_neon.frame = g_panel.bounds;
+    g_panel_neon.cornerRadius = 18.0;
+    g_panel_neon.masksToBounds = YES;
+    g_panel_neon.startPoint = CGPointMake(0.0, 0.0);
+    g_panel_neon.endPoint = CGPointMake(1.0, 1.0);
+    g_panel_neon.locations = @[@0.0, @0.35, @0.68, @1.0];
+    CGColorRef p1 = [UIColor colorWithRed:0.08 green:0.88 blue:0.45 alpha:0.72].CGColor;
+    CGColorRef p2 = [UIColor colorWithRed:0.00 green:0.62 blue:0.72 alpha:0.42].CGColor;
+    CGColorRef p3 = [UIColor colorWithRed:0.58 green:0.18 blue:1.00 alpha:0.68].CGColor;
+    CGColorRef p4 = [UIColor colorWithRed:0.22 green:0.03 blue:0.52 alpha:0.58].CGColor;
+    g_panel_neon.colors = @[(__bridge id)p1, (__bridge id)p2,
+                            (__bridge id)p3, (__bridge id)p4];
+    [g_panel.layer insertSublayer:g_panel_neon atIndex:0];
+
+    g_panel_blur = [[UIVisualEffectView alloc] initWithEffect:
+                    [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
+    g_panel_blur.frame = g_panel.bounds;
+    g_panel_blur.userInteractionEnabled = NO;
+    g_panel_blur.alpha = 0.85;
+    g_panel_blur.layer.cornerRadius = 18.0;
+    g_panel_blur.clipsToBounds = YES;
+    [g_panel addSubview:g_panel_blur];
+
+    g_panel_shade = [[UIView alloc] initWithFrame:g_panel.bounds];
+    g_panel_shade.backgroundColor =
+        [UIColor colorWithRed:0.01 green:0.015 blue:0.025 alpha:0.54];
+    g_panel_shade.userInteractionEnabled = NO;
+    g_panel_shade.layer.cornerRadius = 18.0;
+    g_panel_shade.clipsToBounds = YES;
+    g_panel_shade.layer.borderWidth = 0.8;
+    g_panel_shade.layer.borderColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.30].CGColor;
+    [g_panel addSubview:g_panel_shade];
+
+    mm_layout_panel_glass();
+    mm_start_neon_gradient(g_panel_neon);
+    mm_start_neon_border(g_panel.layer, mm_neon_green(), mm_neon_purple(), 8.0);
 
     /* v0.2.4: zona de arrastre del panel (franja superior). Va ANTES que el
        titulo y la X para no taparlos. */
@@ -2529,17 +2715,42 @@ static void mm_build_ui(void)
     [dz addGestureRecognizer:dpan];
     [g_panel addSubview:dz];
 
-    UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 9.0, 220.0, 20.0)];
-    h.text = [NSString stringWithFormat:@"ModMenu %s", MODMENU_VERSION];
-    h.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
-    h.font = [UIFont boldSystemFontOfSize:15.0];
+    UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 8.0, 222.0, 20.0)];
+    UIFont *hf = [UIFont fontWithName:@"Menlo-Bold" size:13.5];
+    if (hf == nil) hf = [UIFont boldSystemFontOfSize:13.5];
+    UIFont *vf = [UIFont fontWithName:@"Menlo-Bold" size:9.5];
+    if (vf == nil) vf = [UIFont boldSystemFontOfSize:9.5];
+    NSMutableAttributedString *ht = [[NSMutableAttributedString alloc]
+        initWithString:@"MODMENU"
+            attributes:@{ NSFontAttributeName: hf,
+                          NSForegroundColorAttributeName: mm_neon_green(),
+                          NSKernAttributeName: @1.2 }];
+    [ht appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"  "
+            attributes:@{ NSFontAttributeName: hf }]];
+    [ht appendAttributedString:[[NSAttributedString alloc]
+        initWithString:[NSString stringWithFormat:@"%s", MODMENU_VERSION]
+            attributes:@{ NSFontAttributeName: vf,
+                          NSForegroundColorAttributeName:
+                              [mm_neon_purple() colorWithAlphaComponent:0.95],
+                          NSKernAttributeName: @0.3 }]];
+    h.attributedText = ht;
+    h.adjustsFontSizeToFitWidth = YES;
+    h.minimumScaleFactor = 0.8;
     [g_panel addSubview:h];
 
     UIButton *x = [UIButton buttonWithType:UIButtonTypeCustom];
     x.frame = CGRectMake(MM_PANEL_W - 46.0, 5.0, 40.0, 28.0);
+    x.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.55];
+    x.layer.cornerRadius = 14.0;
+    x.layer.borderWidth = 0.7;
+    x.layer.borderColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.55].CGColor;
+    x.clipsToBounds = YES;
     [x setTitle:@"X" forState:UIControlStateNormal];
-    [x setTitleColor:[UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0] forState:UIControlStateNormal];
-    x.titleLabel.font = [UIFont boldSystemFontOfSize:15.0];
+    [x setTitleColor:[UIColor colorWithWhite:0.94 alpha:1.0]
+             forState:UIControlStateNormal];
+    x.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
     [x addTarget:[MMTargets shared] action:@selector(onClose)
         forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:x];
@@ -2547,13 +2758,19 @@ static void mm_build_ui(void)
     g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"VIS", @"MISC", @"SKINS", @"INFO"]];
     g_seg.frame = CGRectMake(10.0, 36.0, MM_PANEL_W - 20.0, 30.0);
     g_seg.selectedSegmentIndex = 0;
+    g_seg.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.50];
+    g_seg.layer.cornerRadius = 9.0;
+    g_seg.layer.masksToBounds = YES;
+    g_seg.layer.borderWidth = 0.6;
+    g_seg.layer.borderColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.35].CGColor;
     if ([g_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
         g_seg.selectedSegmentTintColor =
-            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
+            [UIColor colorWithRed:0.42 green:0.15 blue:0.78 alpha:0.92];
     else
-        g_seg.tintColor = mm_verde();
+        g_seg.tintColor = mm_neon_purple();
     [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.88 alpha:1.0],
+            [UIColor colorWithWhite:0.86 alpha:1.0],
             NSFontAttributeName: [UIFont boldSystemFontOfSize:11.0] }
                           forState:UIControlStateNormal];
     [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
@@ -2974,6 +3191,7 @@ static void mm_position_panel(void)
         px = MAX(4.0, MIN(rb.size.width  - w - 4.0, px));
         py = MAX(4.0, MIN(rb.size.height - h - 4.0, py));
         g_panel.frame = CGRectMake(px, py, w, h);
+        mm_layout_panel_glass();
         return;
     }
 
@@ -2984,6 +3202,7 @@ static void mm_position_panel(void)
     if (y + h > rb.size.height - 12.0) y = c.y - h - 34.0;   /* si no cabe abajo, arriba */
     y = MAX(34.0, MIN(rb.size.height - h - 12.0, y));
     g_panel.frame = CGRectMake(x, y, w, h);
+    mm_layout_panel_glass();
 }
 
 static void mm_set_panel(BOOL open)
@@ -2993,6 +3212,9 @@ static void mm_set_panel(BOOL open)
         g_panel_open = open;
         if (open) {
             mm_position_panel();
+            /* v0.3.1: si iOS purgo las animaciones (background), se reanudan. */
+            mm_start_neon_gradient(g_panel_neon);
+            mm_start_neon_border(g_panel.layer, mm_neon_green(), mm_neon_purple(), 8.0);
             g_panel.hidden = NO;
             g_panel.alpha = 0.0;
             [UIView animateWithDuration:0.15 animations:^{
