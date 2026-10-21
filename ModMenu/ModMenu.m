@@ -1871,51 +1871,146 @@ static const uint8_t mm_skin_pro_suit[16] = {
     0xFD, 0x7B, 0x02, 0xA9, 0xFD, 0x83, 0x00, 0x91
 };
 
-/* Destinos del trampolin (entry+16). Deben tener enlace externo para que el
-   ensamblador pueda referenciarlos con @PAGE/@PAGEOFF. */
-__attribute__((visibility("hidden"))) volatile uintptr_t g_mm_skin_tramp_w = 0;
-__attribute__((visibility("hidden"))) volatile uintptr_t g_mm_skin_tramp_inv = 0;
-__attribute__((visibility("hidden"))) volatile uintptr_t g_mm_skin_tramp_suit = 0;
+/*--------------------------------------------------------------------------
+ * F-02: trampolin con RELOCACION en runtime (en vez de prologo baked en ASM).
+ *
+ * ARM64 es de instrucciones fijas de 4 bytes, asi que el detour de 16 B = 4
+ * instrucciones SIEMPRE alineadas: aqui NUNCA se corta a media instruccion (ese
+ * es un problema de x86, no de arm64). El riesgo real es copiar una instruccion
+ * PC-RELATIVA (ADR, ADRP, B/BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, LDR-literal) a otra
+ * direccion sin recalcular su destino: los bytes crudos apuntarian al sitio
+ * equivocado. El relocador copia las instrucciones del prologo; las
+ * PC-independientes tal cual, las PC-relativas con el inmediato recalculado para
+ * la nueva direccion, y si encuentra una que no cabe en el rango del inmediato
+ * ABORTA (no instala el hook; nunca escribe un salto roto -> feature off, sin
+ * crash). Antes esto iba baked en ASM con los 16 bytes exactos: cualquier
+ * cambio de prologo lo rompia. Para la 1.0.57 (prologos stp/add, todos
+ * PC-independientes) la relocacion produce una copia identica, asi que el
+ * comportamiento actual no cambia; la ganancia es robustez ante versiones nuevas.
+ *--------------------------------------------------------------------------*/
 
-/* Trampolines naked: replican el prologo exacto y saltan al cuerpo original
-   (entry+16). No usan pila propia ni guardan x30: el retorno del original va
-   directo al hook que lo llamo. */
-__asm__(
-    ".text\n"
-    ".p2align 2\n"
-    ".globl _mm_skin_orig_w\n"
-    "_mm_skin_orig_w:\n"
-    "stp x22, x21, [sp, #-0x30]!\n"
-    "stp x20, x19, [sp, #0x10]\n"
-    "stp x29, x30, [sp, #0x20]\n"
-    "add x29, sp, #0x20\n"
-    "adrp x16, _g_mm_skin_tramp_w@PAGE\n"
-    "ldr x16, [x16, _g_mm_skin_tramp_w@PAGEOFF]\n"
-    "br x16\n"
-    ".globl _mm_skin_orig_inv\n"
-    "_mm_skin_orig_inv:\n"
-    "stp x28, x27, [sp, #-0x60]!\n"
-    "stp x26, x25, [sp, #0x10]\n"
-    "stp x24, x23, [sp, #0x20]\n"
-    "stp x22, x21, [sp, #0x30]\n"
-    "adrp x16, _g_mm_skin_tramp_inv@PAGE\n"
-    "ldr x16, [x16, _g_mm_skin_tramp_inv@PAGEOFF]\n"
-    "br x16\n"
-    ".globl _mm_skin_orig_suit\n"
-    "_mm_skin_orig_suit:\n"
-    "stp x22, x21, [sp, #-0x30]!\n"
-    "stp x20, x19, [sp, #0x10]\n"
-    "stp x29, x30, [sp, #0x20]\n"
-    "add x29, sp, #0x20\n"
-    "adrp x16, _g_mm_skin_tramp_suit@PAGE\n"
-    "ldr x16, [x16, _g_mm_skin_tramp_suit@PAGEOFF]\n"
-    "br x16\n"
-    ".text\n"
-);
+/* punteros al "original": apuntan al trampolin relocado (RX) de cada sitio. */
+typedef uint32_t (*mm_skin_fn4_t)(void *, uintptr_t, uintptr_t, uintptr_t);
+typedef uint64_t (*mm_skin_fn2_t)(void *, void *);
+static mm_skin_fn4_t g_mm_skin_orig_w    = 0;
+static mm_skin_fn4_t g_mm_skin_orig_inv  = 0;
+static mm_skin_fn2_t g_mm_skin_orig_suit = 0;
 
-extern uint32_t mm_skin_orig_w(void *, uintptr_t, uintptr_t, uintptr_t);
-extern uint32_t mm_skin_orig_inv(void *, uintptr_t, uintptr_t, uintptr_t);
-extern uint64_t mm_skin_orig_suit(void *, void *);
+static int64_t mm_sx(uint64_t v, int bits)   /* sign-extend de 'bits' */
+{
+    uint64_t m = 1ULL << (bits - 1);
+    return (int64_t)((v ^ m) - m);
+}
+static int mm_fits(int64_t v, int bits)      /* cabe en signed de 'bits'? */
+{
+    int64_t lo = -(1LL << (bits - 1)), hi = (1LL << (bits - 1)) - 1;
+    return v >= lo && v <= hi;
+}
+
+/* Copia/reloca UNA instruccion de 'ins' (en ins_va) para ejecutarse en new_va.
+   Escribe el resultado en *out. Devuelve 0 ok, -1 no relocable. */
+static int mm_reloc_one(uint32_t ins, uintptr_t ins_va, uintptr_t new_va, uint32_t *out)
+{
+    /* ADR  : 0ii10000 ... */
+    if ((ins & 0x9F000000u) == 0x10000000u) {
+        uint64_t imm = ((ins >> 5) & 0x7FFFFu) << 2 | ((ins >> 29) & 3u);
+        int64_t  tgt = (int64_t)ins_va + mm_sx(imm, 21);
+        int64_t  no  = tgt - (int64_t)new_va;
+        if (!mm_fits(no, 21)) return -1;
+        uint32_t u = (uint32_t)(no & 0x1FFFFF);
+        *out = (ins & 0x9F00001Fu) | ((u & 3u) << 29) | (((u >> 2) & 0x7FFFFu) << 5);
+        return 0;
+    }
+    /* ADRP : 1ii10000 ... (base de pagina) */
+    if ((ins & 0x9F000000u) == 0x90000000u) {
+        uint64_t imm = (((ins >> 5) & 0x7FFFFu) << 2 | ((ins >> 29) & 3u));
+        int64_t  tgt = (int64_t)(ins_va & ~0xFFFULL) + (mm_sx(imm, 21) << 12);
+        int64_t  no  = (tgt - (int64_t)(new_va & ~0xFFFULL)) >> 12;
+        if (!mm_fits(no, 21)) return -1;
+        uint32_t u = (uint32_t)(no & 0x1FFFFF);
+        *out = (ins & 0x9F00001Fu) | ((u & 3u) << 29) | (((u >> 2) & 0x7FFFFu) << 5);
+        return 0;
+    }
+    /* B / BL : 000101/100101 imm26 */
+    if ((ins & 0xFC000000u) == 0x14000000u || (ins & 0xFC000000u) == 0x94000000u) {
+        int64_t off = mm_sx(ins & 0x03FFFFFFu, 26) << 2;
+        int64_t tgt = (int64_t)ins_va + off;
+        int64_t no  = tgt - (int64_t)new_va;
+        if (!mm_fits(no, 28)) return -1;
+        *out = (ins & 0xFC000000u) | ((uint32_t)((no >> 2) & 0x03FFFFFFu));
+        return 0;
+    }
+    /* B.cond : 01010100 imm19 0 cond */
+    if ((ins & 0xFF000010u) == 0x54000000u) {
+        int64_t off = mm_sx((ins >> 5) & 0x7FFFFu, 19) << 2;
+        int64_t tgt = (int64_t)ins_va + off;
+        int64_t no  = tgt - (int64_t)new_va;
+        if (!mm_fits(no, 21)) return -1;
+        *out = (ins & 0xFF00001Fu) | (((uint32_t)((no >> 2) & 0x7FFFFu)) << 5);
+        return 0;
+    }
+    /* CBZ/CBNZ : sf 0110100 imm19 Rt */
+    if ((ins & 0x7E000000u) == 0x34000000u) {
+        int64_t off = mm_sx((ins >> 5) & 0x7FFFFu, 19) << 2;
+        int64_t tgt = (int64_t)ins_va + off;
+        int64_t no  = tgt - (int64_t)new_va;
+        if (!mm_fits(no, 21)) return -1;
+        *out = (ins & 0xFF00001Fu) | (((uint32_t)((no >> 2) & 0x7FFFFu)) << 5);
+        return 0;
+    }
+    /* TBZ/TBNZ : b5 0110110 imm14 Rt */
+    if ((ins & 0x7E000000u) == 0x36000000u) {
+        int64_t off = mm_sx((ins >> 5) & 0x3FFFu, 14) << 2;
+        int64_t tgt = (int64_t)ins_va + off;
+        int64_t no  = tgt - (int64_t)new_va;
+        if (!mm_fits(no, 16)) return -1;
+        *out = (ins & 0xFFF8001Fu) | (((uint32_t)((no >> 2) & 0x3FFFu)) << 5);
+        return 0;
+    }
+    /* LDR/LDRSW/PRFM literal : xx011000 imm19 Rt */
+    if ((ins & 0x3B000000u) == 0x18000000u) {
+        int64_t off = mm_sx((ins >> 5) & 0x7FFFFu, 19) << 2;
+        int64_t tgt = (int64_t)ins_va + off;
+        int64_t no  = tgt - (int64_t)new_va;
+        if (!mm_fits(no, 21)) return -1;
+        *out = (ins & 0xFF00001Fu) | (((uint32_t)((no >> 2) & 0x7FFFFu)) << 5);
+        return 0;
+    }
+    /* PC-independiente: copia verbatim */
+    *out = ins;
+    return 0;
+}
+
+/* Construye un trampolin RX que ejecuta el prologo relocado de 'src' (en src_va)
+   y salta a src_va+need (= entry+detour). Devuelve el puntero ejecutable o NULL. */
+static void *mm_build_tramp(const uint8_t *src, uintptr_t src_va, size_t need)
+{
+    size_t ps = (size_t)getpagesize();
+    vm_address_t addr = 0;
+    if (vm_allocate(mach_task_self(), &addr, ps, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return NULL;
+    uint32_t *out = (uint32_t *)addr;
+    size_t oi = 0, consumed = 0;
+    while (consumed < need) {
+        uint32_t ins;
+        memcpy(&ins, src + consumed, 4);
+        if (mm_reloc_one(ins, src_va + consumed, (uintptr_t)addr + oi * 4, &out[oi]) != 0) {
+            vm_deallocate(mach_task_self(), addr, ps);
+            return NULL;                      /* instruccion no relocable -> aborta */
+        }
+        oi++; consumed += 4;
+    }
+    /* salto absoluto al cuerpo original: ldr x16,#8 ; br x16 ; .quad cont */
+    uintptr_t cont = src_va + consumed;
+    out[oi++] = 0x58000050u;                  /* ldr x16, #8  */
+    out[oi++] = 0xD61F0200u;                  /* br  x16      */
+    memcpy(&out[oi], &cont, 8); oi += 2;
+    sys_icache_invalidate((void *)addr, oi * 4);
+    if (vm_protect(mach_task_self(), addr, ps, FALSE, VM_PROT_READ | VM_PROT_EXECUTE) != KERN_SUCCESS) {
+        vm_deallocate(mach_task_self(), addr, ps);
+        return NULL;
+    }
+    return (void *)addr;
+}
 
 static volatile int      g_mm_skin_on = 0;
 static volatile int      g_mm_skin_capture = 0;
@@ -1932,6 +2027,8 @@ typedef struct {
     uint32_t a;
     uint32_t b;
 } MMSkinLog;
+
+/* (MMSkinSite se define mas abajo; lleva un campo tramp para el trampolin RX.) */
 
 static MMSkinLog g_mm_skin_log[MM_SKIN_LOG_MAX];
 static int g_mm_skin_log_n = 0;
@@ -1978,7 +2075,7 @@ static uint32_t mm_hook_skin_w(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
        de arma tiene efectos laterales (1088 B) y asi se evita duplicarlos. */
     uint32_t real = 0;
     if (!(g_mm_skin_on && g_mm_skin_weapon_id != 0)) {
-        real = mm_skin_orig_w(a, b, c, d);
+        real = g_mm_skin_orig_w ? g_mm_skin_orig_w(a, b, c, d) : 0;
     }
     mm_skin_log_add(1, (uint32_t)(uintptr_t)a, (uint32_t)(b ? b : real));
     if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
@@ -1988,7 +2085,7 @@ static uint32_t mm_hook_skin_w(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
 __attribute__((noinline, used))
 static uint32_t mm_hook_skin_inv(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
 {
-    uint32_t real = mm_skin_orig_inv(a, b, c, d);
+    uint32_t real = g_mm_skin_orig_inv ? g_mm_skin_orig_inv(a, b, c, d) : 0;
     mm_skin_log_add(2, (uint32_t)b, real);
     if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
     return real;
@@ -1997,7 +2094,7 @@ static uint32_t mm_hook_skin_inv(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
 __attribute__((noinline, used))
 static uint64_t mm_hook_skin_suit(void *a, void *b)
 {
-    uint64_t real = mm_skin_orig_suit(a, b);
+    uint64_t real = g_mm_skin_orig_suit ? g_mm_skin_orig_suit(a, b) : 0;
     mm_skin_log_add(3, 0, (uint32_t)real);
     if (g_mm_skin_on && g_mm_skin_char_id != 0) return (uint64_t)g_mm_skin_char_id;
     return real;
@@ -2010,6 +2107,7 @@ typedef struct {
     const char *name;
     int installed;
     uint8_t saved[16];
+    void *tramp;        /* F-02: trampolin RX relocado (se construye una vez) */
 } MMSkinSite;
 
 static MMSkinSite g_mm_skin_sites[3];
@@ -2101,10 +2199,6 @@ static int mm_skin_install_all(void)
         return 0;
     }
 
-    g_mm_skin_tramp_w    = g_mm_skin_base + MM_SKIN_RVA_W + 16;
-    g_mm_skin_tramp_inv  = g_mm_skin_base + MM_SKIN_RVA_INV + 16;
-    g_mm_skin_tramp_suit = g_mm_skin_base + MM_SKIN_RVA_SUIT + 16;
-
     int ok = 0;
     for (int i = 0; i < 3; i++) {
         MMSkinSite *site = &g_mm_skin_sites[i];
@@ -2123,6 +2217,24 @@ static int mm_skin_install_all(void)
             continue;
         }
         memcpy(site->saved, cur, 16);
+
+        /* F-02: trampolin relocado desde los bytes REALES del prologo (una vez
+           por sitio; se reutiliza al togglear, sin fugas). Si alguna de las 4
+           instrucciones es PC-relativa y no se puede relocar, no se instala el
+           hook de este sitio: feature off, nunca un salto roto. */
+        if (site->tramp == NULL) {
+            site->tramp = mm_build_tramp(cur, target, 16);
+            if (site->tramp == NULL) {
+                g_mm_skin_diag = [NSString stringWithFormat:@"%s prologo no relocable", site->name];
+                NSLog(@"%s skins: %s prologo no relocable en 0x%lX", MM_TAG, site->name,
+                      (unsigned long)target);
+                continue;
+            }
+        }
+        if (i == 0)      g_mm_skin_orig_w    = (mm_skin_fn4_t)site->tramp;
+        else if (i == 1) g_mm_skin_orig_inv  = (mm_skin_fn4_t)site->tramp;
+        else             g_mm_skin_orig_suit = (mm_skin_fn2_t)site->tramp;
+
         uint8_t patch[16];
         uint64_t stub = 0xD61F020058000050ULL;  /* ldr x16,#8 ; br x16 */
         memcpy(patch, &stub, 8);
