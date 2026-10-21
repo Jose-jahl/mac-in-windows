@@ -12,6 +12,16 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.6 (21 oct) - F-02: trampolin de skins con RELOCACION en runtime.
+ *    - fuera los trampolines naked con prologo de 16 B hardcodeado; ahora un
+ *      relocador arm64 (mm_reloc_one/mm_build_tramp) copia el prologo REAL y
+ *      reubica ADR/ADRP/B/BL/B.cond/CBZ/TBZ/LDR-literal; si una instruccion no
+ *      es relocable, el sitio NO se instala (feature off, nunca un salto roto);
+ *    - para 1.0.57 (prologos stp/add, PC-independientes) la copia es identica,
+ *      asi que el comportamiento no cambia; la ganancia es robustez;
+ *    - math validada fuera de linea; PENDIENTE prueba en dispositivo (es hook
+ *      runtime). No cambia aim, NoJB, anogs(OFF), ESP ni deteccion.
+ *
  *  v0.3.5 (21 oct) - UI LIMPIA: sin diagnostico tecnico en pantalla.
  *    - INFO muestra solo presentacion del mod, funciones y contacto;
  *    - SKINS, MISC y los avisos de guest usan textos claros para el usuario;
@@ -244,7 +254,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.5"
+#define MODMENU_VERSION     "0.3.6"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -263,7 +273,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.5";
+const char *modmenu_build_id = "modmenu-glass-0.3.6";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
