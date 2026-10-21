@@ -12,6 +12,15 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.2 (20 oct) - CONTADOR JUG/BOT GLASS (SOLO UI).
+ *    - el contador deja de ser un rectangulo plano pintado en el lienzo: pasa
+ *      a una vista UIKit centrada arriba, con blur oscuro, gradiente
+ *      verde/morado animado, borde neon y glow, igual que panel y boton;
+ *    - ancho dinamico segun el texto, respeta la safe area (notch) y se
+ *      recentra al girar; no recibe toques y queda debajo de boton/panel;
+ *    - solo se muestra con ESP maestro + Contador ON y se oculta en Stream
+ *      Mode; no toca aim, NoJB, ESP, SKINS ni anogs.
+ *
  *  v0.3.1 (20 oct) - INTERFAZ GLASS NEON (SOLO UI).
  *    - panel y boton con vidrio oscuro (UIBlurEffectStyleDark) + gradiente
  *      animado verde/morado (CAGradientLayer), borde neon que cambia y glow;
@@ -211,13 +220,16 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.1-glass"
+#define MODMENU_VERSION     "0.3.2-glass-ui"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
 #define MM_SLOW_SECS        5               /* luego un latido cada 5 s    */
 #define MM_PANEL_W          300.0
 #define MM_PANEL_H          430.0
+#define MM_COUNT_H          34.0
+#define MM_COUNT_MIN_W      150.0
+#define MM_COUNT_PAD_X      18.0
 
 /* v0.2.5: la posicion del pawn proyecta a la altura del cuello/cabeza. La
    caja se completa con dos puntos del mundo para cubrir el cuerpo entero:
@@ -227,7 +239,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.1";
+const char *modmenu_build_id = "modmenu-glass-0.3.2";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -237,6 +249,13 @@ static CAGradientLayer *g_panel_neon = nil; /* v0.3.1: fondo glass neon       */
 static UIVisualEffectView *g_panel_blur = nil;
 static UIView   *g_panel_shade = nil;
 static CAGradientLayer *g_btn_neon = nil;   /* v0.3.1: boton glass neon       */
+static UIView   *g_count_glass = nil; /* v0.3.2: contador JUG/BOT glass   */
+static UIVisualEffectView *g_count_blur = nil;
+static UIView   *g_count_shade = nil;
+static CAGradientLayer *g_count_neon = nil;
+static UILabel  *g_count_label = nil;
+static int       g_count_last_players = -1;
+static int       g_count_last_bots = -1;
 static UISegmentedControl *g_seg = nil;
 static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
@@ -303,6 +322,8 @@ static float mm_def_float(NSString *k, float d);
 static void mm_esp_frame(double t);
 static void mm_esp_collect_real(void);
 static void mm_probe_run(void);
+static void mm_layout_count_glass(void);
+static void mm_refresh_count_glass(void);
 
 /* v0.2.9: fase D (skins + guest reset) */
 static void mm_skin_apply(void);
@@ -329,6 +350,14 @@ static void mm_show_alert(NSString *titulo, NSString *msg);
 {
     UIView *hit = [super hitTest:point withEvent:event];
     return (hit == self) ? nil : hit;
+}
+
+/* v0.3.2: al girar/cambiar de tamano, la vista raiz vuelve a centrar el
+   contador y recalcula su safe area sin esperar al siguiente latido. */
+- (void)layoutSubviews
+{
+    [super layoutSubviews];
+    mm_layout_count_glass();
 }
 @end
 
@@ -388,28 +417,6 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
     CGContextAddLineToPoint(ctx, x0, y1 - len);
 }
 
-/* Contador pequeno arriba a la izquierda: cuantos jugadores y bots se estan
-   dibujando en esta pasada (no la lista total del juego). */
-static void mm_draw_esp_count(CGContextRef ctx)
-{
-    UIFont *f = [UIFont fontWithName:@"Menlo-Bold" size:12.0];
-    if (f == nil) f = [UIFont boldSystemFontOfSize:12.0];
-    NSString *s = [NSString stringWithFormat:@"JUG %d   BOT %d",
-                   g_count_players, g_count_bots];
-    NSDictionary *attr = @{ NSFontAttributeName: f,
-        NSForegroundColorAttributeName:
-            [UIColor colorWithRed:0.88 green:1.0 blue:0.90 alpha:1.0] };
-    CGSize ts = [s sizeWithAttributes:attr];
-    CGFloat x = 12.0, y = 42.0;
-    CGRect bg = CGRectMake(x, y, ts.width + 16.0, ts.height + 8.0);
-    CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.58);
-    CGContextFillRect(ctx, bg);
-    CGContextSetLineWidth(ctx, 1.0);
-    CGContextSetRGBStrokeColor(ctx, 0.16, 0.88, 0.38, 0.55);
-    CGContextStrokeRect(ctx, bg);
-    [s drawAtPoint:CGPointMake(x + 8.0, y + 4.0) withAttributes:attr];
-}
-
 /*---------------------------------------------------------------------------
  * Lienzo del ESP (v0.2.2): pinta las cajas ENCIMA del juego pero DEBAJO del
  * boton y del panel (va el primero dentro de la capa). No recibe toques.
@@ -433,16 +440,12 @@ static void mm_draw_esp_count(CGContextRef ctx)
     BOOL lineasTop = mm_def_bool(@"mm_esp_lines_top", NO);    /* v0.2.5 */
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
     BOOL conRelleno = mm_def_bool(@"mm_esp_fill", NO);
-    BOOL conCuenta  = mm_def_bool(@"mm_esp_count", NO);       /* v0.3.0 */
     int  estiloCaja = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
     int  tema       = (int)mm_def_float(@"mm_esp_theme", 0.0f);
     if (estiloCaja != 1) estiloCaja = 0;
     if (tema < 0 || tema > 2) tema = 0;
 
-    if (g_box_count <= 0) {
-        if (conCuenta) mm_draw_esp_count(ctx);
-        return;
-    }
+    if (g_box_count <= 0) return;
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
@@ -548,7 +551,6 @@ static void mm_draw_esp_count(CGContextRef ctx)
              withAttributes:attr];
     }
 
-    if (conCuenta) mm_draw_esp_count(ctx);
 }
 @end
 
@@ -657,6 +659,7 @@ static void mm_draw_esp_count(CGContextRef ctx)
     if (k.length == 0) return;
     [[NSUserDefaults standardUserDefaults] setBool:s.on forKey:k];
     if ([k isEqualToString:@"mm_esp_master"]) mm_apply_esp_lock();
+    if ([k isEqualToString:@"mm_esp_count"]) mm_refresh_count_glass();
     if ([k isEqualToString:@"mm_stream"]) {
         mm_apply_stream();
         /* Al activarlo desde VIS se cierra el panel para dejar limpia la
@@ -925,12 +928,16 @@ static void mm_esp_frame(double t)
                 [g_esp setNeedsDisplay];
             }
             if (!g_esp.hidden) g_esp.hidden = YES;
+            mm_refresh_count_glass();
             return;
         }
         if (g_esp.hidden) g_esp.hidden = NO;
 
         static int s_tick = 0;              /* datos ~15 Hz, pintado a 30 fps */
-        if ((s_tick++ & 1) == 0) mm_esp_collect_real();
+        if ((s_tick++ & 1) == 0) {
+            mm_esp_collect_real();
+            mm_refresh_count_glass();       /* v0.3.2: contador glass */
+        }
         [g_esp setNeedsDisplay];
     } @catch (NSException *e) {}
 }
@@ -2518,6 +2525,211 @@ static void mm_layout_panel_glass(void)
         [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:18.0].CGPath;
 }
 
+/*---------------------------------------------------------------------------
+ * v0.3.2: contador JUG/BOT glass (SOLO UI).
+ *   - mismo lenguaje que panel/boton: blur publico, gradiente animado,
+ *     borde neon y glow; aqui el gradiente va SOBRE el blur para que se lea;
+ *   - el ancho sale del texto (minimo MM_COUNT_MIN_W) y se centra dentro de
+ *     la safe area; no recibe toques ni tapa boton/panel.
+ *--------------------------------------------------------------------------*/
+static void mm_layout_count_glass(void)
+{
+    if (g_count_glass == nil || g_root == nil || g_count_label == nil) return;
+
+    UIFont *font = g_count_label.font;
+    if (font == nil) font = [UIFont boldSystemFontOfSize:12.0];
+
+    NSString *text = g_count_label.attributedText.string;
+    if (text.length == 0) {
+        text = [NSString stringWithFormat:@"JUG %d   BOT %d",
+                g_count_players, g_count_bots];
+    }
+    CGSize ts = [text sizeWithAttributes:@{ NSFontAttributeName: font }];
+
+    UIEdgeInsets safe = g_root.safeAreaInsets;
+    CGFloat avail = g_root.bounds.size.width - safe.left - safe.right;
+    if (avail < 80.0) avail = g_root.bounds.size.width;
+    CGFloat maxW = MAX(80.0, avail - 16.0);
+    CGFloat width = ceil(ts.width) + MM_COUNT_PAD_X * 2.0;
+    if (width < MM_COUNT_MIN_W) width = MM_COUNT_MIN_W;
+    if (width > maxW) width = maxW;
+
+    CGFloat x = safe.left + round((avail - width) / 2.0);
+    CGFloat y = MAX(8.0, safe.top + 6.0);
+    CGRect f = CGRectMake(x, y, width, MM_COUNT_H);
+    if (!CGRectEqualToRect(g_count_glass.frame, f))
+        g_count_glass.frame = f;
+
+    CGRect b = g_count_glass.bounds;
+    if (g_count_neon != nil)  g_count_neon.frame = b;
+    if (g_count_blur != nil)  g_count_blur.frame = b;
+    if (g_count_shade != nil) g_count_shade.frame = b;
+    if (g_count_label != nil) g_count_label.frame = CGRectInset(b, 10.0, 0.0);
+    g_count_glass.layer.shadowPath =
+        [UIBezierPath bezierPathWithRoundedRect:b
+                                   cornerRadius:MM_COUNT_H / 2.0].CGPath;
+}
+
+static void mm_update_count_glass_text(int players, int bots)
+{
+    if (g_count_label == nil) return;
+    if (players == g_count_last_players && bots == g_count_last_bots) return;
+    g_count_last_players = players;
+    g_count_last_bots = bots;
+
+    UIFont *font = g_count_label.font;
+    if (font == nil) font = [UIFont boldSystemFontOfSize:12.0];
+    NSString *s = [NSString stringWithFormat:@"JUG %d   BOT %d",
+                   players, bots];
+    NSMutableAttributedString *a = [[NSMutableAttributedString alloc]
+        initWithString:s
+            attributes:@{ NSFontAttributeName: font,
+                          NSForegroundColorAttributeName:
+                              [UIColor colorWithWhite:0.97 alpha:1.0] }];
+    NSRange rj = [s rangeOfString:@"JUG"];
+    NSRange rb = [s rangeOfString:@"BOT"];
+    if (rj.location != NSNotFound)
+        [a addAttribute:NSForegroundColorAttributeName
+                   value:mm_neon_green() range:rj];
+    if (rb.location != NSNotFound)
+        [a addAttribute:NSForegroundColorAttributeName
+                   value:mm_neon_purple() range:rb];
+    g_count_label.attributedText = a;
+    mm_layout_count_glass();
+}
+
+static void mm_start_count_pulse(void)
+{
+    if (g_count_glass == nil) return;
+    if ([g_count_glass.layer animationForKey:@"mmCountPulse"] != nil) return;
+    CABasicAnimation *pulse =
+        [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+    pulse.fromValue = @0.40;
+    pulse.toValue = @0.82;
+    pulse.duration = 3.3;
+    pulse.autoreverses = YES;
+    pulse.repeatCount = HUGE_VALF;
+    pulse.timingFunction = [CAMediaTimingFunction
+                            functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [g_count_glass.layer addAnimation:pulse forKey:@"mmCountPulse"];
+}
+
+static BOOL mm_count_glass_visible(void)
+{
+    return g_count_glass != nil &&
+           mm_def_bool(@"mm_esp_master", NO) &&
+           mm_def_bool(@"mm_esp_count", NO) &&
+           !mm_def_bool(@"mm_stream", NO);
+}
+
+static void mm_build_count_glass(void)
+{
+    if (g_count_glass != nil) return;
+
+    CGFloat radius = MM_COUNT_H / 2.0;
+    g_count_glass = [[UIView alloc] initWithFrame:
+                     CGRectMake(0.0, 0.0, MM_COUNT_MIN_W, MM_COUNT_H)];
+    g_count_glass.backgroundColor = [UIColor clearColor];
+    g_count_glass.opaque = NO;
+    g_count_glass.userInteractionEnabled = NO;
+    g_count_glass.clipsToBounds = NO;
+    g_count_glass.hidden = YES;
+    g_count_glass.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+                                     UIViewAutoresizingFlexibleRightMargin;
+    g_count_glass.layer.cornerRadius = radius;
+    g_count_glass.layer.borderWidth = 1.25;
+    g_count_glass.layer.borderColor =
+        [mm_neon_green() colorWithAlphaComponent:0.95].CGColor;
+    g_count_glass.layer.shadowColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
+    g_count_glass.layer.shadowOpacity = 0.62;
+    g_count_glass.layer.shadowRadius = 13.0;
+    g_count_glass.layer.shadowOffset = CGSizeZero;
+
+    g_count_blur = [[UIVisualEffectView alloc] initWithEffect:
+                    [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
+    g_count_blur.frame = g_count_glass.bounds;
+    g_count_blur.userInteractionEnabled = NO;
+    g_count_blur.alpha = 0.92;
+    g_count_blur.layer.cornerRadius = radius;
+    g_count_blur.clipsToBounds = YES;
+    [g_count_glass addSubview:g_count_blur];
+
+    /* El gradiente se agrega DESPUES del blur: queda por encima del vidrio y
+       por debajo de la sombra/etiqueta. Asi el verde/morado se ve de verdad. */
+    g_count_neon = [CAGradientLayer layer];
+    g_count_neon.frame = g_count_glass.bounds;
+    g_count_neon.cornerRadius = radius;
+    g_count_neon.masksToBounds = YES;
+    g_count_neon.startPoint = CGPointMake(0.0, 0.0);
+    g_count_neon.endPoint = CGPointMake(1.0, 1.0);
+    g_count_neon.locations = @[@0.0, @0.34, @0.68, @1.0];
+    CGColorRef c1 = [UIColor colorWithRed:0.10 green:0.96 blue:0.52 alpha:0.58].CGColor;
+    CGColorRef c2 = [UIColor colorWithRed:0.00 green:0.58 blue:0.72 alpha:0.34].CGColor;
+    CGColorRef c3 = [UIColor colorWithRed:0.56 green:0.20 blue:1.00 alpha:0.56].CGColor;
+    CGColorRef c4 = [UIColor colorWithRed:0.18 green:0.03 blue:0.48 alpha:0.44].CGColor;
+    g_count_neon.colors = @[(__bridge id)c1, (__bridge id)c2,
+                            (__bridge id)c3, (__bridge id)c4];
+    [g_count_glass.layer addSublayer:g_count_neon];
+
+    g_count_shade = [[UIView alloc] initWithFrame:g_count_glass.bounds];
+    g_count_shade.backgroundColor =
+        [UIColor colorWithRed:0.01 green:0.02 blue:0.035 alpha:0.34];
+    g_count_shade.userInteractionEnabled = NO;
+    g_count_shade.layer.cornerRadius = radius;
+    g_count_shade.clipsToBounds = YES;
+    g_count_shade.layer.borderWidth = 0.7;
+    g_count_shade.layer.borderColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.28].CGColor;
+    [g_count_glass addSubview:g_count_shade];
+
+    g_count_label = [[UILabel alloc] initWithFrame:
+                     CGRectInset(g_count_glass.bounds, 10.0, 0.0)];
+    UIFont *font = [UIFont fontWithName:@"Menlo-Bold" size:12.0];
+    if (font == nil) font = [UIFont boldSystemFontOfSize:12.0];
+    g_count_label.font = font;
+    g_count_label.textAlignment = NSTextAlignmentCenter;
+    g_count_label.backgroundColor = [UIColor clearColor];
+    g_count_label.userInteractionEnabled = NO;
+    g_count_label.adjustsFontSizeToFitWidth = YES;
+    g_count_label.minimumScaleFactor = 0.82;
+    g_count_label.lineBreakMode = NSLineBreakByClipping;
+    g_count_label.layer.shadowColor = [UIColor blackColor].CGColor;
+    g_count_label.layer.shadowOpacity = 0.80;
+    g_count_label.layer.shadowRadius = 2.0;
+    g_count_label.layer.shadowOffset = CGSizeMake(0.0, 1.0);
+    [g_count_glass addSubview:g_count_label];
+
+    mm_update_count_glass_text(0, 0);
+    mm_layout_count_glass();
+    mm_start_neon_gradient(g_count_neon);
+    mm_start_neon_border(g_count_glass.layer, mm_neon_green(),
+                         mm_neon_purple(), 7.0);
+    mm_start_count_pulse();
+}
+
+static void mm_refresh_count_glass(void)
+{
+    if (g_count_glass == nil) return;
+
+    if (!mm_count_glass_visible()) {
+        if (!g_count_glass.hidden) g_count_glass.hidden = YES;
+        return;
+    }
+
+    mm_update_count_glass_text(g_count_players, g_count_bots);
+    if (g_count_glass.hidden) {
+        g_count_glass.hidden = NO;
+        g_count_glass.alpha = 1.0;
+        mm_layout_count_glass();
+    }
+    /* v0.3.1: reanuda las animaciones si iOS las purgo en segundo plano. */
+    mm_start_neon_gradient(g_count_neon);
+    mm_start_neon_border(g_count_glass.layer, mm_neon_green(),
+                         mm_neon_purple(), 7.0);
+    mm_start_count_pulse();
+}
+
 /* Fila generica del panel: titulo a la izquierda + control a la derecha. */
 static UIView *mm_row(NSString *titulo, UIView *ctrl)
 {
@@ -2568,15 +2780,15 @@ static void mm_build_ui(void)
     if (g_btn == nil) {
         g_btn = [UIButton buttonWithType:UIButtonTypeCustom];
         g_btn.bounds = CGRectMake(0, 0, 54.0, 54.0);
-        g_btn.backgroundColor = [UIColor colorWithRed:0.02 green:0.08 blue:0.05 alpha:0.86];
+        g_btn.backgroundColor = [UIColor colorWithRed:0.02 green:0.08 blue:0.05 alpha:0.92];
         g_btn.layer.cornerRadius = 27.0;
-        g_btn.layer.borderWidth = 1.2;
+        g_btn.layer.borderWidth = 1.5;
         g_btn.layer.borderColor =
-            [mm_neon_green() colorWithAlphaComponent:0.90].CGColor;
+            [mm_neon_green() colorWithAlphaComponent:1.0].CGColor;
         g_btn.layer.shadowColor =
             [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
-        g_btn.layer.shadowOpacity = 0.55;
-        g_btn.layer.shadowRadius = 12.0;
+        g_btn.layer.shadowOpacity = 0.68;
+        g_btn.layer.shadowRadius = 14.0;
         g_btn.layer.shadowOffset = CGSizeZero;
         g_btn.clipsToBounds = NO;
         [g_btn setTitle:@"MENU" forState:UIControlStateNormal];
@@ -2585,6 +2797,12 @@ static void mm_build_ui(void)
         UIFont *bf = [UIFont fontWithName:@"Menlo-Bold" size:10.0];
         if (bf == nil) bf = [UIFont boldSystemFontOfSize:10.0];
         g_btn.titleLabel.font = bf;
+        /* v0.3.2: un poco mas de contraste/glow en el texto del boton. */
+        g_btn.titleLabel.layer.shadowColor =
+            [mm_neon_green() colorWithAlphaComponent:0.70].CGColor;
+        g_btn.titleLabel.layer.shadowOpacity = 0.60;
+        g_btn.titleLabel.layer.shadowRadius = 3.0;
+        g_btn.titleLabel.layer.shadowOffset = CGSizeZero;
         [g_btn addTarget:[MMTargets shared] action:@selector(onTap)
         forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
@@ -2611,7 +2829,7 @@ static void mm_build_ui(void)
         shine.cornerRadius = 27.0;
         shine.startPoint = CGPointMake(0.0, 0.0);
         shine.endPoint = CGPointMake(0.0, 1.0);
-        CGColorRef sh1 = [UIColor colorWithWhite:1.0 alpha:0.20].CGColor;
+        CGColorRef sh1 = [UIColor colorWithWhite:1.0 alpha:0.26].CGColor;
         CGColorRef sh2 = [UIColor colorWithWhite:1.0 alpha:0.0].CGColor;
         shine.colors = @[(__bridge id)sh1, (__bridge id)sh2];
         [g_btn.layer insertSublayer:shine atIndex:1];
@@ -2623,8 +2841,8 @@ static void mm_build_ui(void)
 
         CABasicAnimation *pulse =
             [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
-        pulse.fromValue = @0.35;
-        pulse.toValue = @0.78;
+        pulse.fromValue = @0.48;
+        pulse.toValue = @0.86;
         pulse.duration = 3.2;
         pulse.autoreverses = YES;
         pulse.repeatCount = HUGE_VALF;
@@ -2632,6 +2850,9 @@ static void mm_build_ui(void)
                                 functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         [g_btn.layer addAnimation:pulse forKey:@"mmNeonPulse"];
     }
+
+    /* --- contador JUG/BOT (v0.3.2: glass flotante arriba) --- */
+    if (g_count_glass == nil) mm_build_count_glass();
 
     /* --- lienzo del ESP + latido de dibujo (~30 fps) --- */
     if (g_esp == nil) {
@@ -3158,6 +3379,7 @@ static void mm_apply_esp_lock(void)
     BOOL on = mm_def_bool(@"mm_esp_master", NO);
     for (UISwitch *s in g_sub_switches)
         s.superview.alpha = on ? 1.0 : 0.5;
+    mm_refresh_count_glass();   /* v0.3.2: el maestro tambien manda */
 }
 
 static void mm_apply_stream(void)
@@ -3174,6 +3396,8 @@ static void mm_apply_stream(void)
         g_marca.alpha = on ? 0.0 : 1.0;
         g_marca.hidden = on;
     }
+    /* v0.3.2: el contador tambien forma parte de la UI que Stream oculta. */
+    mm_refresh_count_glass();
 }
 
 static void mm_position_panel(void)
@@ -3320,6 +3544,15 @@ static BOOL mm_place_ui(void)
                                      UIViewAutoresizingFlexibleHeight;
             [g_root insertSubview:g_esp atIndex:0];
         }
+
+        /* v0.3.2: el contador glass va encima del lienzo/agua pero DEBAJO del
+           boton y del panel (indice 1). No recibe toques. */
+        if (g_count_glass == nil) mm_build_count_glass();
+        if (g_count_glass.superview != g_root) {
+            [g_count_glass removeFromSuperview];
+            [g_root insertSubview:g_count_glass atIndex:1];
+        }
+        mm_layout_count_glass();
 
         if (g_btn.superview != g_root) {
             [g_btn removeFromSuperview];
