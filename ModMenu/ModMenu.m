@@ -12,6 +12,13 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.3.5 (21 oct) - UI LIMPIA: sin diagnostico tecnico en pantalla.
+ *    - INFO muestra solo presentacion del mod, funciones y contacto;
+ *    - SKINS, MISC y los avisos de guest usan textos claros para el usuario;
+ *    - el diagnostico sigue en Documents/modmenu_status.txt y en el syslog,
+ *      pero ya no aparece dentro del panel;
+ *    - logica de SKINS, aim, NoJB, anogs, ESP y deteccion intacta.
+ *
  *  v0.3.4 (20 oct) - QA/PERF: mismo look que v0.3.3.
  *    - el ESP deja de crear NSShadow + 2 NSDictionary por caja y por frame;
  *      ahora prepara colores/atributos una vez por frame y los reutiliza;
@@ -237,7 +244,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.4"
+#define MODMENU_VERSION     "0.3.5"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -256,7 +263,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.4";
+const char *modmenu_build_id = "modmenu-glass-0.3.5";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -781,7 +788,7 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
         if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
     }
     mm_skin_apply();
-    mm_show_alert(@"Skins", [NSString stringWithFormat:@"arma  %u\ntraje %u\n%@",
+    mm_show_alert(@"Skins", [NSString stringWithFormat:@"Arma: %u\nTraje: %u\n%@",
                              w, c, mm_skin_resumen()]);
 }
 
@@ -824,12 +831,15 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 {
     NSString *p = mm_skin_dump_write();
     if (p != nil) {
-        mm_show_alert(@"Dump de skins",
-                      [NSString stringWithFormat:@"%d IDs capturados\n%@",
-                       mm_skin_count(), p]);
+        int n = mm_skin_count();
+        mm_show_alert(@"IDs de skins",
+                      n > 0
+                      ? [NSString stringWithFormat:
+                         @"Se guardaron %d IDs en CODM_SkinDump.txt", n]
+                      : @"No se capturaron IDs.");
     } else {
-        mm_show_alert(@"Dump de skins",
-                      @"No se pudo escribir CODM_SkinDump.txt");
+        mm_show_alert(@"IDs de skins",
+                      @"No se pudo guardar el archivo de IDs.");
     }
 }
 
@@ -2168,11 +2178,9 @@ static int mm_skin_count(void)
 
 static NSString *mm_skin_resumen(void)
 {
-    const char *modo = g_mm_skin_on ? "ON" : (g_mm_skin_capture ? "captura" : "off");
-    return [NSString stringWithFormat:@"skins=%s hooks=%d/3 arma=%u traje=%u ids=%d",
-            modo, g_mm_skin_hooks_ok,
-            (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
-            g_mm_skin_log_n];
+    if (g_mm_skin_on) return @"Skins activos";
+    if (g_mm_skin_capture) return @"Capturando IDs";
+    return @"Skins inactivos";
 }
 
 static void mm_skin_set_weapon(uint32_t v)
@@ -2229,16 +2237,17 @@ static void mm_skin_refresh_status(void)
 {
     if (g_skin_status == nil) return;
     @try {
-        NSString *base = (g_mm_skin_base != 0)
-            ? [NSString stringWithFormat:@"0x%lX", (unsigned long)g_mm_skin_base]
+        NSString *estado = @"inactivo";
+        if (g_mm_skin_on) estado = @"activo";
+        else if (g_mm_skin_capture) estado = @"capturando";
+        NSString *arma = (g_mm_skin_weapon_id != 0)
+            ? [NSString stringWithFormat:@"%u", (unsigned)g_mm_skin_weapon_id]
+            : @"-";
+        NSString *traje = (g_mm_skin_char_id != 0)
+            ? [NSString stringWithFormat:@"%u", (unsigned)g_mm_skin_char_id]
             : @"-";
         g_skin_status.text = [NSString stringWithFormat:
-            @"hooks %d/3  base %@\narma %u  traje %u\ncapturados %d  %@\n%@",
-            g_mm_skin_hooks_ok, base,
-            (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
-            g_mm_skin_log_n,
-            g_mm_skin_on ? @"ON" : (g_mm_skin_capture ? @"captura" : @"off"),
-            g_mm_skin_diag ?: @"-"];
+            @"Estado: %@\nArma: %@\nTraje: %@", estado, arma, traje];
     } @catch (NSException *e) {}
 }
 
@@ -2358,7 +2367,7 @@ static void mm_guest_countdown(UIAlertController *a, int sec)
 {
     if (a != nil) {
         a.message = [NSString stringWithFormat:
-                     @"Fresh guest on relaunch in %d seconds.", sec];
+                     @"El juego se cerrará en %d segundos.", sec];
     }
     if (sec <= 0) {
         NSLog(@"%s guest: _exit(0)", MM_TAG);
@@ -2376,8 +2385,8 @@ static void mm_guest_start_exit(void)
     UIViewController *vc = mm_top_vc();
     UIAlertController *a = nil;
     if (vc != nil) {
-        a = [UIAlertController alertControllerWithTitle:@"Guest Reset Done"
-                                                message:@"Fresh guest on relaunch in 3 seconds."
+        a = [UIAlertController alertControllerWithTitle:@"Datos borrados"
+                                                message:@"El juego se cerrará en 3 segundos."
                                          preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"Cerrar ahora"
                                               style:UIAlertActionStyleDestructive
@@ -2402,9 +2411,9 @@ static void mm_guest_reset_prompt(void)
             return;
         }
         UIAlertController *a = [UIAlertController
-            alertControllerWithTitle:@"Reset guest"
-                             message:@"Borra Documents, Library, tmp y la keychain. "
-                                     @"El juego se cerrara y al reabrir entrara como invitado nuevo."
+            alertControllerWithTitle:@"Restablecer invitado"
+                             message:@"Se borrarán los datos locales de la cuenta de invitado. "
+                                     @"El juego se cerrará y al reabrir entrará como un invitado nuevo."
                       preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
                                               style:UIAlertActionStyleCancel
@@ -3227,9 +3236,9 @@ static void mm_build_ui(void)
     [g_p_vis addSubview:ts];
 
     UILabel *vn = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 252.0, 272.0, 76.0)];
-    vn.text = @"El contador refleja solo lo que se esta dibujando, despues "
-              @"de los filtros Jugadores/Bots y del rango. El estilo y el tema "
-              @"se aplican al instante.";
+    vn.text = @"El contador muestra solo los jugadores y bots visibles "
+              @"según los filtros y el rango. El estilo y el tema se aplican "
+              @"al instante.";
     vn.numberOfLines = 0;
     vn.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
     vn.font = [UIFont systemFontOfSize:10.5];
@@ -3237,7 +3246,7 @@ static void mm_build_ui(void)
 
     /* --- pagina MISC --- */
     UILabel *d1 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 6.0, 272.0, 18.0)];
-    d1.text = @"Cuenta / datos locales";
+    d1.text = @"Cuenta invitado";
     d1.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
     d1.font = [UIFont boldSystemFontOfSize:12.0];
     [g_p_misc addSubview:d1];
@@ -3248,7 +3257,7 @@ static void mm_build_ui(void)
     gr.layer.cornerRadius = 8.0;
     gr.layer.borderWidth = 1.0;
     gr.layer.borderColor = [UIColor colorWithRed:1.0 green:0.45 blue:0.45 alpha:0.7].CGColor;
-    [gr setTitle:@"Reset guest (borrar datos)" forState:UIControlStateNormal];
+    [gr setTitle:@"Restablecer invitado" forState:UIControlStateNormal];
     [gr setTitleColor:[UIColor colorWithRed:1.0 green:0.9 blue:0.9 alpha:1.0]
              forState:UIControlStateNormal];
     gr.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
@@ -3257,8 +3266,8 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:gr];
 
     UILabel *d2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 72.0, 272.0, 76.0)];
-    d2.text = @"Borra Documents, Library, tmp y la keychain de invitado. "
-              @"El juego se cierra y al reabrir entra como invitado nuevo. "
+    d2.text = @"Borra los datos locales de la cuenta de invitado. "
+              @"El juego se cierra y al reabrir entra como un invitado nuevo. "
               @"Usar solo en un equipo desechable.";
     d2.numberOfLines = 0;
     d2.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
@@ -3266,8 +3275,8 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:d2];
 
     UILabel *d3 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 156.0, 272.0, 44.0)];
-    d3.text = @"Skins (armas y traje): pestana SKINS. Stream Mode y ajustes "
-              @"visuales del ESP: pestana VIS.";
+    d3.text = @"Skins: pestaña SKINS. Stream Mode y ajustes visuales: "
+              @"pestaña VIS.";
     d3.numberOfLines = 0;
     d3.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
     d3.font = [UIFont systemFontOfSize:11.0];
@@ -3373,7 +3382,7 @@ static void mm_build_ui(void)
     [g_p_skins addSubview:cb];
 
     UILabel *pl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 168.0, 272.0, 15.0)];
-    pl.text = @"Presets de arma (verificados 1.0.57)";
+    pl.text = @"Presets de arma";
     pl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
     pl.font = [UIFont systemFontOfSize:11.0];
     [g_p_skins addSubview:pl];
@@ -3406,7 +3415,7 @@ static void mm_build_ui(void)
     db.frame = CGRectMake(146.0, 220.0, 132.0, 32.0);
     db.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
     db.layer.cornerRadius = 7.0;
-    [db setTitle:@"Dump IDs" forState:UIControlStateNormal];
+    [db setTitle:@"Guardar IDs" forState:UIControlStateNormal];
     [db setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     db.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
     [db addTarget:[MMTargets shared] action:@selector(onSkinDump)
@@ -3418,7 +3427,7 @@ static void mm_build_ui(void)
     g_skin_status.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
     g_skin_status.font = [UIFont fontWithName:@"Menlo" size:9.5] ?:
                          [UIFont systemFontOfSize:9.5];
-    g_skin_status.text = @"hooks 0/3  base -\narma 0  traje 0\ncapturados 0  off\n-";
+    g_skin_status.text = @"Estado: inactivo\nArma: -\nTraje: -";
     [g_p_skins addSubview:g_skin_status];
 
     mm_skin_sync_ui();
@@ -3584,50 +3593,51 @@ static void mm_set_panel(BOOL open)
     }
 }
 
-/* Texto vivo de la pagina INFO (se refresca en cada tick). */
+/* v0.3.5: INFO limpia. El diagnostico tecnico ya no se muestra aqui:
+   sigue en Documents/modmenu_status.txt y en el syslog. */
 static void mm_refresh_info(void)
 {
     if (g_info == nil) return;
     mm_skin_refresh_status();
+    if (g_info.attributedText.length > 0) return;
     @try {
-        NSString *txt = [NSString stringWithFormat:
-            @"build    %s\n"
-            @"ruta     %s\n"
-            @"pid      %d\n"
-            @"ios      %@\n"
-            @"escena   %d (%@)\n"
-            @"ventanas %d  via %s\n"
-            @"uptime   %d s\n"
-            @"panel    %@\n"
-            @"esp      %@   rango %d m   caja %d   tema %d\n"
-            @"render   %@   cajas %d   JUG %d   BOT %d\n"
-            @"esp2     %@\n"
-            @"probe    %@\n"
-            @"skins    %@\n"
-            @"skindump %@\n"
-            @"nojb     %@\n",
-            MODMENU_VERSION,
-            mm_my_path(),
-            (int)getpid(),
-            [UIDevice currentDevice].systemVersion,
-            mm_scene_count(),
-            mm_scene_state(),
-            mm_window_count(),
-            g_via,
-            (int)mm_uptime(),
-            g_panel_open ? @"abierto" : @"cerrado",
-            mm_def_bool(@"mm_esp_master", NO) ? @"ON" : @"off",
-            (int)mm_def_float(@"mm_esp_range", 300.0f),
-            (int)mm_def_float(@"mm_esp_box_style", 0.0f),
-            (int)mm_def_float(@"mm_esp_theme", 0.0f),
-            (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? @"ON" : @"off",
-            g_box_count, g_count_players, g_count_bots,
-            (g_esp_diag != nil) ? g_esp_diag : @"-",
-            (g_probe_ok == 1) ? @"ok" : (g_probe == nil ? @"pendiente" : @"revisar"),
-            mm_skin_resumen(),
-            (g_mm_skin_last_dump != nil) ? g_mm_skin_last_dump.lastPathComponent : @"-",
-            mm_nojb_resumen()];
-        g_info.text = txt;
+        UIFont *titleFont = [UIFont fontWithName:@"Menlo-Bold" size:17.0] ?:
+                            [UIFont boldSystemFontOfSize:17.0];
+        UIFont *verFont = [UIFont fontWithName:@"Menlo-Bold" size:10.0] ?:
+                          [UIFont boldSystemFontOfSize:10.0];
+        UIFont *bodyFont = [UIFont systemFontOfSize:11.0];
+        UIFont *itemFont = [UIFont systemFontOfSize:12.5];
+        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+        ps.lineSpacing = 3.0;
+
+        NSMutableAttributedString *t = [[NSMutableAttributedString alloc]
+            initWithString:@"MOD MENU\n"
+                attributes:@{ NSFontAttributeName: titleFont,
+                              NSForegroundColorAttributeName: mm_neon_green(),
+                              NSKernAttributeName: @1.4 }];
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:[NSString stringWithFormat:@"v%s\n\n", MODMENU_VERSION]
+                attributes:@{ NSFontAttributeName: verFont,
+                              NSForegroundColorAttributeName:
+                                  [mm_neon_purple() colorWithAlphaComponent:0.95] }]];
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"Personalización visual para CODM\n\n"
+                attributes:@{ NSFontAttributeName: bodyFont,
+                              NSForegroundColorAttributeName:
+                                  [UIColor colorWithWhite:0.62 alpha:1.0],
+                              NSParagraphStyleAttributeName: ps }]];
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"ESP\nContador JUG / BOT\nSkins\nStream Mode\n"
+                attributes:@{ NSFontAttributeName: itemFont,
+                              NSForegroundColorAttributeName:
+                                  [UIColor colorWithWhite:0.95 alpha:1.0],
+                              NSParagraphStyleAttributeName: ps }]];
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"\nTodo desde un solo panel."
+                attributes:@{ NSFontAttributeName: bodyFont,
+                              NSForegroundColorAttributeName:
+                                  [UIColor colorWithWhite:0.52 alpha:1.0] }]];
+        g_info.attributedText = t;
     } @catch (NSException *e) {}
 }
 
