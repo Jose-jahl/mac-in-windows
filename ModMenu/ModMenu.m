@@ -445,6 +445,10 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 /* v0.4.0: FPS del lienzo (lo actualiza mm_esp_frame a partir del timestamp). */
 static double g_fps = 0.0;
 
+/* fwd: el acento del tema se define mas abajo, pero drawRect/helpers lo usan aqui. */
+static UIColor *mm_neon_green(void);
+static UIColor *mm_neon_purple(void);
+
 /* v0.4.0 (#1 crosshair): mira central con sombra, color de acento del tema. */
 static void mm_draw_crosshair(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
 {
