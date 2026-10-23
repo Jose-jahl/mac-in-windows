@@ -263,7 +263,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.3.7"
+#define MODMENU_VERSION     "0.4.0"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -282,7 +282,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.3.7";
+const char *modmenu_build_id = "modmenu-glass-0.4.0";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -304,24 +304,11 @@ static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
 static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
 static UIView   *g_p_misc = nil;
-static UIView   *g_p_skins = nil;
 static UIView   *g_p_info = nil;
+static UIView   *g_p_more = nil;  /* v0.4.0: pagina EXTRA (features nuevas)    */
 static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
 static UILabel  *g_range_val = nil;
 static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
-
-/* v0.2.9: controles de la pagina SKINS */
-static UISwitch *g_skin_master_sw = nil;
-static UISwitch *g_skin_capture_sw = nil;
-static UITextField *g_skin_weapon_tf = nil;
-static UITextField *g_skin_char_tf = nil;
-static UISegmentedControl *g_skin_preset_seg = nil;
-static UILabel *g_skin_status = nil;
-
-/* Presets verificados en el dylib de GL (kPresetWeaponSkins, 0x51b30). */
-static const uint32_t g_skin_presets[6] = {
-    0u, 0x0F6951u, 0x0F9062u, 0x0FB773u, 0x0FDE84u, 0x100595u
-};
 
 static const char *g_via   = "-";     /* donde quedo colgada la UI        */
 static BOOL  g_panel_open  = NO;
@@ -368,16 +355,7 @@ static void mm_probe_run(void);
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 
-/* v0.2.9: fase D (skins + guest reset) */
-static void mm_skin_apply(void);
-static void mm_skin_refresh_status(void);
-static void mm_skin_sync_ui(void);
-static NSString *mm_skin_resumen(void);
-static NSString *mm_skin_dump_write(void);
-static int mm_skin_count(void);
-static uint32_t mm_skin_parse_field(UITextField *tf);
-static void mm_skin_set_weapon(uint32_t v);
-static void mm_skin_set_char(uint32_t v);
+/* v0.2.9: fase D (guest reset) */
 static void mm_guest_reset_prompt(void);
 static void mm_show_alert(NSString *titulo, NSString *msg);
 
@@ -464,6 +442,54 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
  * Lienzo del ESP (v0.2.2): pinta las cajas ENCIMA del juego pero DEBAJO del
  * boton y del panel (va el primero dentro de la capa). No recibe toques.
  *--------------------------------------------------------------------------*/
+/* v0.4.0: FPS del lienzo (lo actualiza mm_esp_frame a partir del timestamp). */
+static double g_fps = 0.0;
+
+/* v0.4.0 (#1 crosshair): mira central con sombra, color de acento del tema. */
+static void mm_draw_crosshair(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
+{
+    CGFloat cx = bs.size.width / 2.0, cy = bs.size.height / 2.0;
+    CGFloat gap = 4.0, len = 9.0;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) { CGContextSetLineWidth(ctx, 2.6); CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.5); }
+        else           { CGContextSetLineWidth(ctx, 1.2); CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95); }
+        CGContextMoveToPoint(ctx, cx - gap - len, cy); CGContextAddLineToPoint(ctx, cx - gap, cy);
+        CGContextMoveToPoint(ctx, cx + gap, cy);       CGContextAddLineToPoint(ctx, cx + gap + len, cy);
+        CGContextMoveToPoint(ctx, cx, cy - gap - len);  CGContextAddLineToPoint(ctx, cx, cy - gap);
+        CGContextMoveToPoint(ctx, cx, cy + gap);        CGContextAddLineToPoint(ctx, cx, cy + gap + len);
+        CGContextStrokePath(ctx);
+    }
+    CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.95);
+    CGContextFillRect(ctx, CGRectMake(cx - 1.0, cy - 1.0, 2.0, 2.0));
+}
+
+/* v0.4.0 (#6 aim ring): anillo proporcional que marca la zona de aim-assist
+   (el aim es parche estatico; esto es SOLO un indicador visual, no apunta). */
+static void mm_draw_aimring(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
+{
+    CGFloat cx = bs.size.width / 2.0, cy = bs.size.height / 2.0;
+    CGFloat radio = bs.size.width * 0.14;
+    CGContextSetLineWidth(ctx, 1.4);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.55);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - radio, cy - radio, radio * 2.0, radio * 2.0));
+}
+
+/* v0.4.0 (#2 FPS): medidor del overlay, arriba-izquierda (respeta notch). */
+static void mm_draw_fps(CGRect bs)
+{
+    (void)bs;
+    NSString *s = [NSString stringWithFormat:@"%d FPS", (int)(g_fps + 0.5)];
+    UIFont *f = [UIFont monospacedDigitSystemFontOfSize:10.0 weight:UIFontWeightSemibold];
+    if (f == nil) f = [UIFont boldSystemFontOfSize:10.0];
+    NSShadow *sh = [[NSShadow alloc] init];
+    sh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.8];
+    sh.shadowBlurRadius = 2.0; sh.shadowOffset = CGSizeMake(0.0, 1.0);
+    NSDictionary *a = @{ NSFontAttributeName: f,
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.92 alpha:1.0],
+        NSShadowAttributeName: sh };
+    [s drawAtPoint:CGPointMake(10.0, 44.0) withAttributes:a];
+}
+
 @interface MMCanvasView : UIView @end
 
 @implementation MMCanvasView
@@ -491,10 +517,26 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
     if (estiloCaja != 1) estiloCaja = 0;
     if (tema < 0 || tema > 2) tema = 0;
 
-    if (g_box_count <= 0) return;
+    /* v0.4.0: features de overlay. Las independientes de las cajas (crosshair,
+       anillo de aim, FPS) se dibujan aunque no haya pawns; las por-pawn
+       (head dot, color por distancia, vida baja) se leen aca y se usan abajo. */
+    BOOL conCross   = mm_def_bool(@"mm_x_cross", NO);
+    BOOL conAimRing = mm_def_bool(@"mm_x_aimring", NO);
+    BOOL conFps     = mm_def_bool(@"mm_x_fps", NO);
+    BOOL conHead    = mm_def_bool(@"mm_x_head", NO);
+    BOOL conDistCol = mm_def_bool(@"mm_x_distcol", NO);
+    BOOL conLowHp   = mm_def_bool(@"mm_x_lowhp", NO);
+    CGFloat ar = 0.2, ag = 1.0, ab = 0.58, aalpha = 1.0;
+    [mm_neon_green() getRed:&ar green:&ag blue:&ab alpha:&aalpha];
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
+
+    if (conAimRing) mm_draw_aimring(ctx, bs, ar, ag, ab);
+    if (conCross)   mm_draw_crosshair(ctx, bs, ar, ag, ab);
+    if (conFps)     mm_draw_fps(bs);
+
+    if (g_box_count <= 0) return;
 
     /* v0.3.4: colores y atributos de texto se preparan UNA vez por frame.
        Antes se creaba un NSShadow + dos NSDictionary por cada caja a 30 fps;
@@ -535,6 +577,20 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
         CGFloat cg = b->robot ? cgBot : cgJug;
         CGFloat cb = b->robot ? cbBot : cbJug;
 
+        /* v0.4.0 (#4 color por distancia): atenua y vira a frio al alejarse. */
+        if (conDistCol && b->dist > 0.5f) {
+            float rng = mm_def_float(@"mm_esp_range", 300.0f);
+            if (rng < 40.0f) rng = 40.0f;
+            float f = b->dist / rng; if (f < 0.0f) f = 0.0f; if (f > 1.0f) f = 1.0f;
+            cr = cr * (1.0f - 0.65f * f);
+            cg = cg * (1.0f - 0.35f * f);
+            cb = cb + (0.85f - cb) * 0.6f * f;
+        }
+        /* v0.4.0 (#5 vida baja): resalta en ambar a los de poca vida (<30%). */
+        if (conLowHp && b->hp >= 0.0f && b->hpMax > 1.0f && (b->hp / b->hpMax) < 0.30f) {
+            cr = 1.0f; cg = 0.78f; cb = 0.12f;
+        }
+
         if (conLineas) {
             /* v0.2.5: origen elegible. OFF = borde inferior -> pies de la caja;
                ON = borde superior -> cabeza de la caja. */
@@ -573,6 +629,15 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.84);
             mm_esp_box_path(ctx, r, estiloCaja);
             CGContextStrokePath(ctx);
+        }
+
+        /* v0.4.0 (#3 head dot): punto en la cabeza (borde superior central). */
+        if (conHead) {
+            CGFloat hx = CGRectGetMidX(r), hy = r.origin.y;
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.5);
+            CGContextFillEllipseInRect(ctx, CGRectMake(hx - 3.0, hy - 3.0, 6.0, 6.0));
+            CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.98);
+            CGContextFillEllipseInRect(ctx, CGRectMake(hx - 2.2, hy - 2.2, 4.4, 4.4));
         }
 
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
@@ -647,14 +712,8 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 - (void)onFrame:(CADisplayLink *)link;
 - (void)onPanelPan:(UIPanGestureRecognizer *)g;
 - (void)onTelegram;
-- (void)onSkinApply;
-- (void)onSkinDump;
-- (void)onSkinWeaponSet;
-- (void)onSkinCharSet;
-- (void)onSkinPreset:(UISegmentedControl *)s;
 - (void)onBoxStyle:(UISegmentedControl *)s;
 - (void)onTheme:(UISegmentedControl *)s;
-- (void)onTextDone:(id)sender;
 - (void)onGuestReset;
 @end
 
@@ -706,8 +765,6 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 
 - (void)onClose
 {
-    if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
-    if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
     mm_set_panel(NO);
 }
 
@@ -742,12 +799,10 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
 - (void)onSeg:(UISegmentedControl *)s
 {
     NSInteger i = s.selectedSegmentIndex;
-    if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
-    if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
     if (g_p_esp   != nil) g_p_esp.hidden   = (i != 0);
     if (g_p_vis   != nil) g_p_vis.hidden   = (i != 1);
     if (g_p_misc  != nil) g_p_misc.hidden  = (i != 2);
-    if (g_p_skins != nil) g_p_skins.hidden = (i != 3);
+    if (g_p_more  != nil) g_p_more.hidden  = (i != 3);
     if (g_p_info  != nil) g_p_info.hidden  = (i != 4);
 }
 
@@ -765,7 +820,6 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
            cerrar solo (v0.3.0). */
         if (s.on) mm_set_panel(NO);
     }
-    if ([k hasPrefix:@"mm_skin_"])            mm_skin_apply();
     mm_write_status(@"ajuste");
 }
 
@@ -792,80 +846,6 @@ static void mm_esp_box_path(CGContextRef ctx, CGRect r, int estilo)
     if (v < 0 || v > 2) v = 0;
     [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"mm_esp_theme"];
     mm_write_status(@"tema esp");
-}
-
-/* v0.2.9: fase D. Aplicar los dos IDs, activar el maestro si hay alguno y
-   (re)instalar los hooks. */
-- (void)onSkinApply
-{
-    uint32_t w = mm_skin_parse_field(g_skin_weapon_tf);
-    uint32_t c = mm_skin_parse_field(g_skin_char_tf);
-    mm_skin_set_weapon(w);
-    mm_skin_set_char(c);
-    if (w != 0 || c != 0) {
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
-        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
-    }
-    mm_skin_apply();
-    mm_show_alert(@"Skins", [NSString stringWithFormat:@"Arma: %u\nTraje: %u\n%@",
-                             w, c, mm_skin_resumen()]);
-}
-
-- (void)onSkinWeaponSet
-{
-    uint32_t v = mm_skin_parse_field(g_skin_weapon_tf);
-    mm_skin_set_weapon(v);
-    if (v != 0) {
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
-        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
-    }
-    mm_skin_apply();
-}
-
-- (void)onSkinCharSet
-{
-    uint32_t v = mm_skin_parse_field(g_skin_char_tf);
-    mm_skin_set_char(v);
-    if (v != 0) {
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
-        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
-    }
-    mm_skin_apply();
-}
-
-- (void)onSkinPreset:(UISegmentedControl *)s
-{
-    NSInteger i = s.selectedSegmentIndex;
-    if (i < 0 || i >= 6) return;
-    uint32_t v = g_skin_presets[i];
-    mm_skin_set_weapon(v);
-    if (v != 0) {
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_skin_master"];
-        if (g_skin_master_sw != nil) g_skin_master_sw.on = YES;
-    }
-    mm_skin_apply();
-}
-
-- (void)onSkinDump
-{
-    NSString *p = mm_skin_dump_write();
-    if (p != nil) {
-        int n = mm_skin_count();
-        mm_show_alert(@"IDs de skins",
-                      n > 0
-                      ? [NSString stringWithFormat:
-                         @"Se guardaron %d IDs en CODM_SkinDump.txt", n]
-                      : @"No se capturaron IDs.");
-    } else {
-        mm_show_alert(@"IDs de skins",
-                      @"No se pudo guardar el archivo de IDs.");
-    }
-}
-
-- (void)onTextDone:(id)sender
-{
-    if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
-    if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
 }
 
 - (void)onGuestReset
@@ -1004,8 +984,8 @@ static void mm_reset_options(void)
                            @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
                            @"mm_esp_fill", @"mm_esp_range", @"mm_stream",
                            @"mm_esp_count", @"mm_esp_box_style", @"mm_esp_theme",
-                           @"mm_skin_master", @"mm_skin_capture",
-                           @"mm_skin_weapon", @"mm_skin_char" ];
+                           @"mm_x_cross", @"mm_x_aimring", @"mm_x_fps",
+                           @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
     } @catch (NSException *e) {
@@ -1033,6 +1013,14 @@ static void mm_esp_frame(double t)
             return;
         }
         if (g_esp.hidden) g_esp.hidden = NO;
+
+        /* v0.4.0 (#2 FPS): media exponencial del ritmo real del lienzo. */
+        static double s_lastT = 0.0;
+        if (s_lastT > 0.0 && t > s_lastT) {
+            double inst = 1.0 / (t - s_lastT);
+            g_fps = (g_fps > 0.0) ? (g_fps * 0.9 + inst * 0.1) : inst;
+        }
+        s_lastT = t;
 
         static int s_tick = 0;              /* datos ~15 Hz, pintado a 30 fps */
         if ((s_tick++ & 1) == 0) {
@@ -1423,27 +1411,17 @@ static void mm_nojb_start(void)
 
 #define MM_GAME_DELTA(va)   ((uintptr_t)((va) - 0x100000000ULL))
 
-#define VA_GAMEPLAY         0x1023DD388ULL  /* GetGameplayInstance()            */
-#define VA_LOCALPAWN        0x1023DE550ULL  /* getLocalPawn()                   */
-#define VA_MAINCAM          0x108BDBE98ULL  /* Camera.get_main() (thunk)        */
-#define VA_W2C_INJ          0x108BDABC0ULL  /* worldToCameraMatrix_Injected     */
-#define VA_PROJ_INJ         0x108BDACF8ULL  /* projectionMatrix_Injected        */
-#define VA_TRANSPOS         0x108C63B10ULL  /* Transform.get_position_Injected  */
-#define VA_HEALTH           0x1018B5524ULL  /* GetHealth() (x0=pawn -> w0 int)  */
-
-#define OFF_GP_LIST         0x178   /* gameplay -> List<Pawn>               */
-#define OFF_LIST_ITEMS      0x10    /* List -> array IL2CPP                 */
-#define OFF_LIST_SIZE       0x18    /* List -> int size                     */
-#define OFF_ARR_DATA        0x20    /* array IL2CPP -> primer elemento      */
-#define OFF_PAWN_ALIVE      0x548   /* pawn -> byte vivo                    */
-#define OFF_PAWN_TRANSFORM  0x308   /* pawn -> Transform                    */
-#define OFF_PAWN_ENTITY     0x5C0   /* pawn -> entidad                      */
-#define OFF_ENT_ROBOT       0x298   /* entidad -> byte robot                */
-#define OFF_PAWN_MODEL      0x78    /* pawn -> objeto de salud              */
-#define OFF_MODEL_MAXHP     0x38    /* objeto de salud -> float vida maxima */
-#define OFF_ENT_NAME        0x160   /* entidad -> string C# del nombre      */
-#define OFF_STR_LEN         0x10    /* string -> int longitud               */
-#define OFF_STR_CHARS       0x14    /* string -> chars UTF-16               */
+/* ---------------------------------------------------------------------------
+ *  VAs y offsets del juego: CONTRATO DATA-DRIVEN (v0.4.0).
+ *  Antes vivian como #define sueltos aqui (v<=0.3.7). Ahora se generan con
+ *      fusion offsets <ver> --emit
+ *  desde corpus/<ver>/offsets.json y el CI compila la dylib con este header.
+ *  En un update: `fusion resolve --write` re-localiza las VAs -> `fusion offsets
+ *  --emit --from-resolved` regenera el header -> CI recompila. Las direcciones
+ *  (datos, versionadas) se separan de la logica (codigo, estable).
+ *  Los offsets de struct van pinned por version y se validan en runtime.
+ * ------------------------------------------------------------------------- */
+#include "fusion_offsets.generated.h"
 
 typedef void *(*MMGetPtrFn)(void);
 typedef void  (*MMMatFn)(void *self, void *out64);
@@ -1856,583 +1834,6 @@ static void mm_esp_collect_real(void)
 }
 
 /*---------------------------------------------------------------------------
- * FASE D v0.2.9 - SKINS (armas + traje) Y DUMP.
- *
- * Los tres sitios son las funciones que usa el mod de referencia (GL) para
- * cambiar la skin en cliente. Verificados contra cod 1.0.57:
- *   0x2A90084  GetWeaponSkinID        (4 args, devuelve skin en w0/x0)
- *   0x587CFD4  GetWeaponSkinId_Inv    (inventario/loadout)
- *   0x1049844  GetSuitId              (2 args; el 0x1049835 de GL esta 15
- *                                      bytes antes, a media instruccion, y su
- *                                      escritura de 16 bytes rompia la funcion
- *                                      anterior: aqui se usa la entrada real)
- *
- * El trampolin es una funcion naked que ejecuta los primeros 16 bytes
- * originales y salta a entry+16. Asi el hook puede llamar al original sin
- * recursion (el ApplyARM64Hook de GL dejaba orig = entrada parcheada).
- *--------------------------------------------------------------------------*/
-
-#define MM_SKIN_RVA_W     0x2A90084ULL
-#define MM_SKIN_RVA_INV   0x587CFD4ULL
-#define MM_SKIN_RVA_SUIT  0x1049844ULL
-#define MM_SKIN_LOG_MAX   256
-
-static const uint8_t mm_skin_pro_w[16] = {
-    0xF6, 0x57, 0xBD, 0xA9, 0xF4, 0x4F, 0x01, 0xA9,
-    0xFD, 0x7B, 0x02, 0xA9, 0xFD, 0x83, 0x00, 0x91
-};
-static const uint8_t mm_skin_pro_inv[16] = {
-    0xFC, 0x6F, 0xBA, 0xA9, 0xFA, 0x67, 0x01, 0xA9,
-    0xF8, 0x5F, 0x02, 0xA9, 0xF6, 0x57, 0x03, 0xA9
-};
-static const uint8_t mm_skin_pro_suit[16] = {
-    0xF6, 0x57, 0xBD, 0xA9, 0xF4, 0x4F, 0x01, 0xA9,
-    0xFD, 0x7B, 0x02, 0xA9, 0xFD, 0x83, 0x00, 0x91
-};
-
-/*--------------------------------------------------------------------------
- * F-02: trampolin con RELOCACION en runtime (en vez de prologo baked en ASM).
- *
- * ARM64 es de instrucciones fijas de 4 bytes, asi que el detour de 16 B = 4
- * instrucciones SIEMPRE alineadas: aqui NUNCA se corta a media instruccion (ese
- * es un problema de x86, no de arm64). El riesgo real es copiar una instruccion
- * PC-RELATIVA (ADR, ADRP, B/BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, LDR-literal) a otra
- * direccion sin recalcular su destino: los bytes crudos apuntarian al sitio
- * equivocado. El relocador copia las instrucciones del prologo; las
- * PC-independientes tal cual, las PC-relativas con el inmediato recalculado para
- * la nueva direccion, y si encuentra una que no cabe en el rango del inmediato
- * ABORTA (no instala el hook; nunca escribe un salto roto -> feature off, sin
- * crash). Antes esto iba baked en ASM con los 16 bytes exactos: cualquier
- * cambio de prologo lo rompia. Para la 1.0.57 (prologos stp/add, todos
- * PC-independientes) la relocacion produce una copia identica, asi que el
- * comportamiento actual no cambia; la ganancia es robustez ante versiones nuevas.
- *--------------------------------------------------------------------------*/
-
-/* punteros al "original": apuntan al trampolin relocado (RX) de cada sitio. */
-typedef uint32_t (*mm_skin_fn4_t)(void *, uintptr_t, uintptr_t, uintptr_t);
-typedef uint64_t (*mm_skin_fn2_t)(void *, void *);
-static mm_skin_fn4_t g_mm_skin_orig_w    = 0;
-static mm_skin_fn4_t g_mm_skin_orig_inv  = 0;
-static mm_skin_fn2_t g_mm_skin_orig_suit = 0;
-
-static int64_t mm_sx(uint64_t v, int bits)   /* sign-extend de 'bits' */
-{
-    uint64_t m = 1ULL << (bits - 1);
-    return (int64_t)((v ^ m) - m);
-}
-static int mm_fits(int64_t v, int bits)      /* cabe en signed de 'bits'? */
-{
-    int64_t lo = -(1LL << (bits - 1)), hi = (1LL << (bits - 1)) - 1;
-    return v >= lo && v <= hi;
-}
-
-/* Copia/reloca UNA instruccion de 'ins' (en ins_va) para ejecutarse en new_va.
-   Escribe el resultado en *out. Devuelve 0 ok, -1 no relocable. */
-static int mm_reloc_one(uint32_t ins, uintptr_t ins_va, uintptr_t new_va, uint32_t *out)
-{
-    /* ADR  : 0ii10000 ... */
-    if ((ins & 0x9F000000u) == 0x10000000u) {
-        uint64_t imm = ((ins >> 5) & 0x7FFFFu) << 2 | ((ins >> 29) & 3u);
-        int64_t  tgt = (int64_t)ins_va + mm_sx(imm, 21);
-        int64_t  no  = tgt - (int64_t)new_va;
-        if (!mm_fits(no, 21)) return -1;
-        uint32_t u = (uint32_t)(no & 0x1FFFFF);
-        *out = (ins & 0x9F00001Fu) | ((u & 3u) << 29) | (((u >> 2) & 0x7FFFFu) << 5);
-        return 0;
-    }
-    /* ADRP : 1ii10000 ... (base de pagina) */
-    if ((ins & 0x9F000000u) == 0x90000000u) {
-        uint64_t imm = (((ins >> 5) & 0x7FFFFu) << 2 | ((ins >> 29) & 3u));
-        int64_t  tgt = (int64_t)(ins_va & ~0xFFFULL) + (mm_sx(imm, 21) << 12);
-        int64_t  no  = (tgt - (int64_t)(new_va & ~0xFFFULL)) >> 12;
-        if (!mm_fits(no, 21)) return -1;
-        uint32_t u = (uint32_t)(no & 0x1FFFFF);
-        *out = (ins & 0x9F00001Fu) | ((u & 3u) << 29) | (((u >> 2) & 0x7FFFFu) << 5);
-        return 0;
-    }
-    /* B / BL : 000101/100101 imm26 */
-    if ((ins & 0xFC000000u) == 0x14000000u || (ins & 0xFC000000u) == 0x94000000u) {
-        int64_t off = mm_sx(ins & 0x03FFFFFFu, 26) << 2;
-        int64_t tgt = (int64_t)ins_va + off;
-        int64_t no  = tgt - (int64_t)new_va;
-        if (!mm_fits(no, 28)) return -1;
-        *out = (ins & 0xFC000000u) | ((uint32_t)((no >> 2) & 0x03FFFFFFu));
-        return 0;
-    }
-    /* B.cond : 01010100 imm19 0 cond */
-    if ((ins & 0xFF000010u) == 0x54000000u) {
-        int64_t off = mm_sx((ins >> 5) & 0x7FFFFu, 19) << 2;
-        int64_t tgt = (int64_t)ins_va + off;
-        int64_t no  = tgt - (int64_t)new_va;
-        if (!mm_fits(no, 21)) return -1;
-        *out = (ins & 0xFF00001Fu) | (((uint32_t)((no >> 2) & 0x7FFFFu)) << 5);
-        return 0;
-    }
-    /* CBZ/CBNZ : sf 0110100 imm19 Rt */
-    if ((ins & 0x7E000000u) == 0x34000000u) {
-        int64_t off = mm_sx((ins >> 5) & 0x7FFFFu, 19) << 2;
-        int64_t tgt = (int64_t)ins_va + off;
-        int64_t no  = tgt - (int64_t)new_va;
-        if (!mm_fits(no, 21)) return -1;
-        *out = (ins & 0xFF00001Fu) | (((uint32_t)((no >> 2) & 0x7FFFFu)) << 5);
-        return 0;
-    }
-    /* TBZ/TBNZ : b5 0110110 imm14 Rt */
-    if ((ins & 0x7E000000u) == 0x36000000u) {
-        int64_t off = mm_sx((ins >> 5) & 0x3FFFu, 14) << 2;
-        int64_t tgt = (int64_t)ins_va + off;
-        int64_t no  = tgt - (int64_t)new_va;
-        if (!mm_fits(no, 16)) return -1;
-        *out = (ins & 0xFFF8001Fu) | (((uint32_t)((no >> 2) & 0x3FFFu)) << 5);
-        return 0;
-    }
-    /* LDR/LDRSW/PRFM literal : xx011000 imm19 Rt */
-    if ((ins & 0x3B000000u) == 0x18000000u) {
-        int64_t off = mm_sx((ins >> 5) & 0x7FFFFu, 19) << 2;
-        int64_t tgt = (int64_t)ins_va + off;
-        int64_t no  = tgt - (int64_t)new_va;
-        if (!mm_fits(no, 21)) return -1;
-        *out = (ins & 0xFF00001Fu) | (((uint32_t)((no >> 2) & 0x7FFFFu)) << 5);
-        return 0;
-    }
-    /* PC-independiente: copia verbatim */
-    *out = ins;
-    return 0;
-}
-
-/* Construye un trampolin RX que ejecuta el prologo relocado de 'src' (en src_va)
-   y salta a src_va+need (= entry+detour). Devuelve el puntero ejecutable o NULL. */
-static void *mm_build_tramp(const uint8_t *src, uintptr_t src_va, size_t need)
-{
-    size_t ps = (size_t)getpagesize();
-    vm_address_t addr = 0;
-    if (vm_allocate(mach_task_self(), &addr, ps, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) return NULL;
-    uint32_t *out = (uint32_t *)addr;
-    size_t oi = 0, consumed = 0;
-    while (consumed < need) {
-        uint32_t ins;
-        memcpy(&ins, src + consumed, 4);
-        if (mm_reloc_one(ins, src_va + consumed, (uintptr_t)addr + oi * 4, &out[oi]) != 0) {
-            vm_deallocate(mach_task_self(), addr, ps);
-            return NULL;                      /* instruccion no relocable -> aborta */
-        }
-        oi++; consumed += 4;
-    }
-    /* salto absoluto al cuerpo original: ldr x16,#8 ; br x16 ; .quad cont */
-    uintptr_t cont = src_va + consumed;
-    out[oi++] = 0x58000050u;                  /* ldr x16, #8  */
-    out[oi++] = 0xD61F0200u;                  /* br  x16      */
-    memcpy(&out[oi], &cont, 8); oi += 2;
-    sys_icache_invalidate((void *)addr, oi * 4);
-    if (vm_protect(mach_task_self(), addr, ps, FALSE, VM_PROT_READ | VM_PROT_EXECUTE) != KERN_SUCCESS) {
-        vm_deallocate(mach_task_self(), addr, ps);
-        return NULL;
-    }
-    return (void *)addr;
-}
-
-static volatile int      g_mm_skin_on = 0;
-static volatile int      g_mm_skin_capture = 0;
-static volatile uint32_t g_mm_skin_weapon_id = 0;
-static volatile uint32_t g_mm_skin_char_id = 0;
-static volatile int      g_mm_skin_installed = 0;
-static int               g_mm_skin_hooks_ok = 0;
-static uintptr_t         g_mm_skin_base = 0;
-static NSString         *g_mm_skin_diag = nil;
-static NSString         *g_mm_skin_last_dump = nil;
-
-typedef struct {
-    uint32_t kind;      /* 1 arma / 2 inventario / 3 traje */
-    uint32_t a;
-    uint32_t b;
-} MMSkinLog;
-
-/* (MMSkinSite se define mas abajo; lleva un campo tramp para el trampolin RX.) */
-
-static MMSkinLog g_mm_skin_log[MM_SKIN_LOG_MAX];
-static int g_mm_skin_log_n = 0;
-static int g_mm_skin_log_drop = 0;
-static pthread_mutex_t g_mm_skin_log_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-static const char *mm_skin_kind_name(uint32_t k)
-{
-    switch (k) {
-        case 1: return "WeaponSkin";
-        case 2: return "LoadoutSkin";
-        case 3: return "CharacterSuit";
-        default: return "?";
-    }
-}
-
-static void mm_skin_log_add(uint32_t kind, uint32_t a, uint32_t b)
-{
-    if (!g_mm_skin_capture || b == 0) return;
-    pthread_mutex_lock(&g_mm_skin_log_mtx);
-    for (int i = 0; i < g_mm_skin_log_n; i++) {
-        if (g_mm_skin_log[i].kind == kind &&
-            g_mm_skin_log[i].a == a &&
-            g_mm_skin_log[i].b == b) {
-            pthread_mutex_unlock(&g_mm_skin_log_mtx);
-            return;
-        }
-    }
-    if (g_mm_skin_log_n < MM_SKIN_LOG_MAX) {
-        g_mm_skin_log[g_mm_skin_log_n].kind = kind;
-        g_mm_skin_log[g_mm_skin_log_n].a = a;
-        g_mm_skin_log[g_mm_skin_log_n].b = b;
-        g_mm_skin_log_n++;
-    } else {
-        g_mm_skin_log_drop++;
-    }
-    pthread_mutex_unlock(&g_mm_skin_log_mtx);
-}
-
-__attribute__((noinline, used))
-static uint32_t mm_hook_skin_w(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
-{
-    /* GL no llama al original cuando ya va a devolver el ID custom; la funcion
-       de arma tiene efectos laterales (1088 B) y asi se evita duplicarlos. */
-    uint32_t real = 0;
-    if (!(g_mm_skin_on && g_mm_skin_weapon_id != 0)) {
-        real = g_mm_skin_orig_w ? g_mm_skin_orig_w(a, b, c, d) : 0;
-    }
-    mm_skin_log_add(1, (uint32_t)(uintptr_t)a, (uint32_t)(b ? b : real));
-    if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
-    return real;
-}
-
-__attribute__((noinline, used))
-static uint32_t mm_hook_skin_inv(void *a, uintptr_t b, uintptr_t c, uintptr_t d)
-{
-    uint32_t real = g_mm_skin_orig_inv ? g_mm_skin_orig_inv(a, b, c, d) : 0;
-    mm_skin_log_add(2, (uint32_t)b, real);
-    if (g_mm_skin_on && g_mm_skin_weapon_id != 0) return g_mm_skin_weapon_id;
-    return real;
-}
-
-__attribute__((noinline, used))
-static uint64_t mm_hook_skin_suit(void *a, void *b)
-{
-    uint64_t real = g_mm_skin_orig_suit ? g_mm_skin_orig_suit(a, b) : 0;
-    mm_skin_log_add(3, 0, (uint32_t)real);
-    if (g_mm_skin_on && g_mm_skin_char_id != 0) return (uint64_t)g_mm_skin_char_id;
-    return real;
-}
-
-typedef struct {
-    uint64_t rva;
-    const uint8_t *expect;
-    void *hook;
-    const char *name;
-    int installed;
-    uint8_t saved[16];
-    void *tramp;        /* F-02: trampolin RX relocado (se construye una vez) */
-} MMSkinSite;
-
-static MMSkinSite g_mm_skin_sites[3];
-
-static void mm_skin_sites_init(void)
-{
-    static int done = 0;
-    if (done) return;
-    done = 1;
-    memset(g_mm_skin_sites, 0, sizeof(g_mm_skin_sites));
-
-    g_mm_skin_sites[0].rva = MM_SKIN_RVA_W;
-    g_mm_skin_sites[0].expect = mm_skin_pro_w;
-    g_mm_skin_sites[0].hook = (void *)mm_hook_skin_w;
-    g_mm_skin_sites[0].name = "arma";
-
-    g_mm_skin_sites[1].rva = MM_SKIN_RVA_INV;
-    g_mm_skin_sites[1].expect = mm_skin_pro_inv;
-    g_mm_skin_sites[1].hook = (void *)mm_hook_skin_inv;
-    g_mm_skin_sites[1].name = "inventario";
-
-    g_mm_skin_sites[2].rva = MM_SKIN_RVA_SUIT;
-    g_mm_skin_sites[2].expect = mm_skin_pro_suit;
-    g_mm_skin_sites[2].hook = (void *)mm_hook_skin_suit;
-    g_mm_skin_sites[2].name = "traje";
-}
-
-/* Escritura de 16 bytes con proteccion de pagina completa. */
-static int mm_skin_write16(uintptr_t addr, const void *src)
-{
-    if (addr == 0 || src == NULL) return -1;
-    size_t ps = (size_t)getpagesize();
-    uintptr_t page = addr & ~(uintptr_t)(ps - 1);
-    uintptr_t end = addr + 16;
-    size_t span = (size_t)(((end + ps - 1) & ~(uintptr_t)(ps - 1)) - page);
-    vm_prot_t prot = mm_orig_prot(addr);
-
-    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page,
-                                  (vm_size_t)span, FALSE, prot | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) return -2;
-    memcpy((void *)addr, src, 16);
-    sys_icache_invalidate((void *)addr, 16);
-    kr = vm_protect(mach_task_self(), (vm_address_t)page,
-                    (vm_size_t)span, FALSE, prot);
-    if (kr != KERN_SUCCESS) return -3;
-    return (memcmp((void *)addr, src, 16) == 0) ? 0 : -4;
-}
-
-/* La base es la imagen principal (cod). Si existiera UserAssembly o
-   UnityFramework, se prueba tambien; nunca se acepta una base sin verificar
-   los dos prologos de las funciones de arma. */
-static uintptr_t mm_skin_find_base(void)
-{
-    uintptr_t h0 = (uintptr_t)_dyld_get_image_header(0);
-    uint32_t n = _dyld_image_count();
-    uintptr_t cand[32];
-    int nc = 0;
-
-    if (h0 != 0) cand[nc++] = h0;
-    for (uint32_t i = 0; i < n && nc < 32; i++) {
-        const char *nm = _dyld_get_image_name(i);
-        if (nm == NULL) continue;
-        if (strstr(nm, "UserAssembly") == NULL &&
-            strstr(nm, "UnityFramework") == NULL &&
-            strstr(nm, "/cod") == NULL) continue;
-        uintptr_t h = (uintptr_t)_dyld_get_image_header(i);
-        if (h == 0 || h == h0) continue;
-        cand[nc++] = h;
-    }
-
-    for (int i = 0; i < nc; i++) {
-        uint8_t b[16];
-        if (!mm_vm_read(cand[i] + MM_SKIN_RVA_W, b, 16)) continue;
-        if (memcmp(b, mm_skin_pro_w, 16) != 0) continue;
-        if (!mm_vm_read(cand[i] + MM_SKIN_RVA_INV, b, 16)) continue;
-        if (memcmp(b, mm_skin_pro_inv, 16) != 0) continue;
-        return cand[i];
-    }
-    return 0;
-}
-
-static int mm_skin_install_all(void)
-{
-    mm_skin_sites_init();
-    if (g_mm_skin_base == 0) g_mm_skin_base = mm_skin_find_base();
-    if (g_mm_skin_base == 0) {
-        g_mm_skin_diag = @"base no encontrada";
-        NSLog(@"%s skins: base no encontrada", MM_TAG);
-        return 0;
-    }
-
-    int ok = 0;
-    for (int i = 0; i < 3; i++) {
-        MMSkinSite *site = &g_mm_skin_sites[i];
-        uintptr_t target = g_mm_skin_base + (uintptr_t)site->rva;
-        uint8_t cur[16];
-        if (!mm_vm_read(target, cur, 16)) {
-            g_mm_skin_diag = [NSString stringWithFormat:@"%s ilegible", site->name];
-            NSLog(@"%s skins: %s ilegible en 0x%lX", MM_TAG, site->name,
-                  (unsigned long)target);
-            continue;
-        }
-        if (memcmp(cur, site->expect, 16) != 0) {
-            g_mm_skin_diag = [NSString stringWithFormat:@"%s prologo distinto", site->name];
-            NSLog(@"%s skins: %s prologo distinto en 0x%lX", MM_TAG, site->name,
-                  (unsigned long)target);
-            continue;
-        }
-        memcpy(site->saved, cur, 16);
-
-        /* F-02: trampolin relocado desde los bytes REALES del prologo (una vez
-           por sitio; se reutiliza al togglear, sin fugas). Si alguna de las 4
-           instrucciones es PC-relativa y no se puede relocar, no se instala el
-           hook de este sitio: feature off, nunca un salto roto. */
-        if (site->tramp == NULL) {
-            site->tramp = mm_build_tramp(cur, target, 16);
-            if (site->tramp == NULL) {
-                g_mm_skin_diag = [NSString stringWithFormat:@"%s prologo no relocable", site->name];
-                NSLog(@"%s skins: %s prologo no relocable en 0x%lX", MM_TAG, site->name,
-                      (unsigned long)target);
-                continue;
-            }
-        }
-        if (i == 0)      g_mm_skin_orig_w    = (mm_skin_fn4_t)site->tramp;
-        else if (i == 1) g_mm_skin_orig_inv  = (mm_skin_fn4_t)site->tramp;
-        else             g_mm_skin_orig_suit = (mm_skin_fn2_t)site->tramp;
-
-        uint8_t patch[16];
-        uint64_t stub = 0xD61F020058000050ULL;  /* ldr x16,#8 ; br x16 */
-        memcpy(patch, &stub, 8);
-        uintptr_t hp = (uintptr_t)site->hook;
-        memcpy(patch + 8, &hp, 8);
-        if (mm_skin_write16(target, patch) != 0) {
-            g_mm_skin_diag = [NSString stringWithFormat:@"%s no se pudo escribir", site->name];
-            NSLog(@"%s skins: %s no se pudo escribir en 0x%lX", MM_TAG, site->name,
-                  (unsigned long)target);
-            continue;
-        }
-        site->installed = 1;
-        ok++;
-    }
-
-    g_mm_skin_hooks_ok = ok;
-    g_mm_skin_installed = (ok > 0) ? 1 : 0;
-    if (ok > 0) g_mm_skin_diag = [NSString stringWithFormat:@"hooks %d/3", ok];
-    NSLog(@"%s skins: hooks %d/3 base=0x%lX", MM_TAG, ok,
-          (unsigned long)g_mm_skin_base);
-    return ok;
-}
-
-static void mm_skin_uninstall_all(void)
-{
-    for (int i = 0; i < 3; i++) {
-        MMSkinSite *site = &g_mm_skin_sites[i];
-        if (!site->installed) continue;
-        uintptr_t target = g_mm_skin_base + (uintptr_t)site->rva;
-        if (mm_skin_write16(target, site->saved) != 0)
-            NSLog(@"%s skins: no se pudo restaurar %s", MM_TAG, site->name);
-        site->installed = 0;
-    }
-    g_mm_skin_installed = 0;
-    g_mm_skin_hooks_ok = 0;
-    g_mm_skin_diag = @"off";
-    NSLog(@"%s skins: hooks restaurados (off)", MM_TAG);
-}
-
-static void mm_skin_read_state(void)
-{
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    g_mm_skin_on = [ud boolForKey:@"mm_skin_master"] ? 1 : 0;
-    g_mm_skin_capture = [ud boolForKey:@"mm_skin_capture"] ? 1 : 0;
-    g_mm_skin_weapon_id = (uint32_t)[ud integerForKey:@"mm_skin_weapon"];
-    g_mm_skin_char_id = (uint32_t)[ud integerForKey:@"mm_skin_char"];
-}
-
-static int mm_skin_count(void)
-{
-    return g_mm_skin_log_n;
-}
-
-static NSString *mm_skin_resumen(void)
-{
-    if (g_mm_skin_on) return @"Skins activos";
-    if (g_mm_skin_capture) return @"Capturando IDs";
-    return @"Skins inactivos";
-}
-
-static void mm_skin_set_weapon(uint32_t v)
-{
-    g_mm_skin_weapon_id = v;
-    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)v
-                                               forKey:@"mm_skin_weapon"];
-    if (g_skin_weapon_tf != nil)
-        g_skin_weapon_tf.text = (v != 0) ? [NSString stringWithFormat:@"%u", v] : @"";
-}
-
-static void mm_skin_set_char(uint32_t v)
-{
-    g_mm_skin_char_id = v;
-    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)v
-                                               forKey:@"mm_skin_char"];
-    if (g_skin_char_tf != nil)
-        g_skin_char_tf.text = (v != 0) ? [NSString stringWithFormat:@"%u", v] : @"";
-}
-
-static uint32_t mm_skin_parse_field(UITextField *tf)
-{
-    if (tf == nil || tf.text.length == 0) return 0;
-    NSString *s = [tf.text stringByTrimmingCharactersInSet:
-                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (s.length == 0) return 0;
-    const char *c = s.UTF8String;
-    if (c == NULL || c[0] == '-') return 0;
-    char *end = NULL;
-    unsigned long long v = strtoull(c, &end, 0);
-    if (end == c || v > 0xFFFFFFFFULL) return 0;
-    return (uint32_t)v;
-}
-
-static void mm_skin_sync_ui(void)
-{
-    if (g_skin_master_sw != nil) g_skin_master_sw.on = g_mm_skin_on ? YES : NO;
-    if (g_skin_capture_sw != nil) g_skin_capture_sw.on = g_mm_skin_capture ? YES : NO;
-    if (g_skin_weapon_tf != nil && !g_skin_weapon_tf.isFirstResponder)
-        g_skin_weapon_tf.text = (g_mm_skin_weapon_id != 0)
-            ? [NSString stringWithFormat:@"%u", g_mm_skin_weapon_id] : @"";
-    if (g_skin_char_tf != nil && !g_skin_char_tf.isFirstResponder)
-        g_skin_char_tf.text = (g_mm_skin_char_id != 0)
-            ? [NSString stringWithFormat:@"%u", g_mm_skin_char_id] : @"";
-    if (g_skin_preset_seg != nil) {
-        int sel = 0;
-        for (int i = 1; i < 6; i++)
-            if (g_skin_presets[i] == g_mm_skin_weapon_id) sel = i;
-        g_skin_preset_seg.selectedSegmentIndex = sel;
-    }
-}
-
-static void mm_skin_refresh_status(void)
-{
-    if (g_skin_status == nil) return;
-    @try {
-        NSString *estado = @"inactivo";
-        if (g_mm_skin_on) estado = @"activo";
-        else if (g_mm_skin_capture) estado = @"capturando";
-        NSString *arma = (g_mm_skin_weapon_id != 0)
-            ? [NSString stringWithFormat:@"%u", (unsigned)g_mm_skin_weapon_id]
-            : @"-";
-        NSString *traje = (g_mm_skin_char_id != 0)
-            ? [NSString stringWithFormat:@"%u", (unsigned)g_mm_skin_char_id]
-            : @"-";
-        g_skin_status.text = [NSString stringWithFormat:
-            @"Estado: %@\nArma: %@\nTraje: %@", estado, arma, traje];
-    } @catch (NSException *e) {}
-}
-
-static NSString *mm_skin_dump_write(void)
-{
-    @try {
-        NSString *docs = mm_docs_dir();
-        if (docs.length == 0) {
-            g_mm_skin_diag = @"sin Documents";
-            return nil;
-        }
-
-        NSMutableString *s = [NSMutableString string];
-        [s appendFormat:@"CODM ModMenu %s - Skin ID dump\n", MODMENU_VERSION];
-        [s appendFormat:@"fecha\t%@\n", [NSDate date]];
-        [s appendFormat:@"arma_sel\t%u\n", (unsigned)g_mm_skin_weapon_id];
-        [s appendFormat:@"traje_sel\t%u\n", (unsigned)g_mm_skin_char_id];
-        [s appendFormat:@"hooks\t%d/3\tbase\t0x%lX\n\n", g_mm_skin_hooks_ok,
-         (unsigned long)g_mm_skin_base];
-        [s appendString:@"# tipo\tid1\tid2\n"];
-
-        pthread_mutex_lock(&g_mm_skin_log_mtx);
-        int n = g_mm_skin_log_n;
-        for (int i = 0; i < n; i++) {
-            [s appendFormat:@"%s\t%u\t%u\n",
-             mm_skin_kind_name(g_mm_skin_log[i].kind),
-             (unsigned)g_mm_skin_log[i].a,
-             (unsigned)g_mm_skin_log[i].b];
-        }
-        int drop = g_mm_skin_log_drop;
-        pthread_mutex_unlock(&g_mm_skin_log_mtx);
-
-        [s appendFormat:@"\n# total\t%d\tperdidos\t%d\n", n, drop];
-        NSString *path = [docs stringByAppendingPathComponent:@"CODM_SkinDump.txt"];
-        NSError *err = nil;
-        if (![s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err]) {
-            g_mm_skin_diag = [NSString stringWithFormat:@"error dump: %@",
-                              err.localizedDescription ?: @"?"];
-            NSLog(@"%s skins: dump fallo: %@", MM_TAG, err.localizedDescription);
-            return nil;
-        }
-        g_mm_skin_last_dump = path;
-        g_mm_skin_diag = [NSString stringWithFormat:@"dump %d IDs", n];
-        NSLog(@"%s skins: dump %d IDs en %@", MM_TAG, n, path);
-        mm_skin_refresh_status();
-        mm_write_status(@"dump skins");
-        return path;
-    } @catch (NSException *e) {
-        NSLog(@"%s skins: excepcion en dump: %@", MM_TAG, e.reason);
-        return nil;
-    }
-}
-
-/*---------------------------------------------------------------------------
  * FASE D v0.2.9 - GUEST RESET.
  * Replica el mecanismo de GL: borra los datos locales y la keychain de
  * contrasenas genericas, avisa y cierra con _exit(0). El operador debe
@@ -2565,20 +1966,6 @@ static void mm_guest_reset_prompt(void)
     }
 }
 
-static void mm_skin_apply(void)
-{
-    mm_skin_read_state();
-    BOOL want = (g_mm_skin_on || g_mm_skin_capture);
-    if (want) {
-        if (!g_mm_skin_installed) mm_skin_install_all();
-    } else if (g_mm_skin_installed) {
-        mm_skin_uninstall_all();
-    }
-    mm_skin_sync_ui();
-    mm_skin_refresh_status();
-    mm_write_status(@"skins");
-}
-
 /* Reescritura atomica del archivo de estado que se puede leer sin syslog. */
 static void mm_write_status(NSString *nota)
 {
@@ -2604,8 +1991,6 @@ static void mm_write_status(NSString *nota)
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
             @"esp_real=%@ lista=%d dibujados=%d jug=%d bot=%d\n"
-            @"skins=%d cap=%d hooks=%d/3 arma=%u traje=%u ids=%d\n"
-            @"skindump=%@\n"
             @"nojb=%@\n"
             @"nota=%@\n",
             MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), (int)getpid(),
@@ -2631,10 +2016,6 @@ static void mm_write_status(NSString *nota)
             g_probe != nil ? g_probe.UTF8String : "pendiente",
             (g_esp_diag != nil) ? g_esp_diag : @"-",
             g_esp_players, g_box_count, g_count_players, g_count_bots,
-            (int)g_mm_skin_on, (int)g_mm_skin_capture, g_mm_skin_hooks_ok,
-            (unsigned)g_mm_skin_weapon_id, (unsigned)g_mm_skin_char_id,
-            g_mm_skin_log_n,
-            (g_mm_skin_last_dump != nil) ? g_mm_skin_last_dump : @"-",
             mm_nojb_resumen(),
             nota];
 
@@ -2662,14 +2043,36 @@ static UIColor *mm_verde(void)
  *   - verde/morado con CAGradientLayer animado y borde que cambia de color;
  *   - blur publico de UIKit, sin private APIs y sin frameworks nuevos.
  *--------------------------------------------------------------------------*/
+/* v0.4.0: paleta de acento CONFIGURABLE (selector de tema en MISC). El tema 0 es
+   la identidad FUSION (verde/morado); los demas re-skinan TODO el menu (panel,
+   borde, gradiente, header, segmento, filas) porque todo lee estas dos funciones. */
+typedef struct { float ar, ag, ab, br, bg, bb; } MMTheme;
+static const MMTheme g_mm_themes[] = {
+    { 0.20f, 1.00f, 0.58f,  0.63f, 0.30f, 1.00f },  /* 0 FUSION  verde / morado  */
+    { 0.00f, 0.95f, 1.00f,  0.35f, 0.45f, 1.00f },  /* 1 Hielo    cian  / azul    */
+    { 1.00f, 0.30f, 0.62f,  0.65f, 0.25f, 1.00f },  /* 2 Magenta  rosa  / morado  */
+    { 1.00f, 0.62f, 0.12f,  1.00f, 0.22f, 0.40f },  /* 3 Fuego    ambar / rojo    */
+    { 0.26f, 1.00f, 0.72f,  0.06f, 0.82f, 0.95f },  /* 4 Aqua     verde / cian    */
+};
+#define MM_THEME_COUNT ((int)(sizeof(g_mm_themes) / sizeof(g_mm_themes[0])))
+
+static int mm_theme_idx(void)
+{
+    int i = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"];
+    if (i < 0 || i >= MM_THEME_COUNT) i = 0;
+    return i;
+}
+
 static UIColor *mm_neon_green(void)
 {
-    return [UIColor colorWithRed:0.20 green:1.00 blue:0.58 alpha:1.0];
+    MMTheme t = g_mm_themes[mm_theme_idx()];
+    return [UIColor colorWithRed:t.ar green:t.ag blue:t.ab alpha:1.0];
 }
 
 static UIColor *mm_neon_purple(void)
 {
-    return [UIColor colorWithRed:0.63 green:0.30 blue:1.00 alpha:1.0];
+    MMTheme t = g_mm_themes[mm_theme_idx()];
+    return [UIColor colorWithRed:t.br green:t.bg blue:t.bb alpha:1.0];
 }
 
 static void mm_start_neon_gradient(CAGradientLayer *g)
@@ -2707,6 +2110,21 @@ static void mm_start_neon_gradient(CAGradientLayer *g)
         a.timingFunction = [CAMediaTimingFunction
                             functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         [g addAnimation:a forKey:@"mmNeonEnd"];
+    }
+    /* v0.4.0: deriva de las bandas (locations) -> fusion tipo AURORA: flujo
+       continuo de las franjas de color, no un simple ida/vuelta. */
+    if (g.locations.count >= 4 && [g animationForKey:@"mmNeonLoc"] == nil) {
+        CAKeyframeAnimation *k = [CAKeyframeAnimation animationWithKeyPath:@"locations"];
+        k.values = @[ @[@0.0, @0.35, @0.68, @1.0],
+                      @[@0.0, @0.20, @0.52, @1.0],
+                      @[@0.0, @0.46, @0.80, @1.0],
+                      @[@0.0, @0.35, @0.68, @1.0] ];
+        k.keyTimes = @[@0.0, @0.34, @0.68, @1.0];
+        k.duration = 12.0;
+        k.repeatCount = HUGE_VALF;
+        k.timingFunction = [CAMediaTimingFunction
+                            functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [g addAnimation:k forKey:@"mmNeonLoc"];
     }
 }
 
@@ -2938,11 +2356,16 @@ static void mm_refresh_count_glass(void)
 static UIView *mm_row(NSString *titulo, UIView *ctrl)
 {
     UIView *r = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 284.0, 34.0)];
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 0, 200.0, 34.0)];
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8.0, 0, 196.0, 34.0)];
     l.text = titulo;
-    l.textColor = [UIColor whiteColor];
-    l.font = [UIFont systemFontOfSize:13.0];
+    l.textColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+    l.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
     [r addSubview:l];
+    /* v0.4.0: hairline inferior tenue con el acento del tema (fila "premium"). */
+    UIView *hair = [[UIView alloc] initWithFrame:CGRectMake(6.0, 33.0, 272.0, 0.5)];
+    hair.backgroundColor = [mm_neon_purple() colorWithAlphaComponent:0.14];
+    hair.userInteractionEnabled = NO;
+    [r addSubview:hair];
     CGRect cf = ctrl.frame;
     ctrl.frame = CGRectMake(284.0 - cf.size.width - 6.0, (34.0 - cf.size.height) / 2.0,
                             cf.size.width, cf.size.height);
@@ -2962,21 +2385,6 @@ static UIView *mm_switch_row(NSString *titulo, NSString *key, BOOL def)
 }
 
 /* v0.2.9: barra "Listo" para cerrar el teclado numerico de los campos de ID. */
-static UIToolbar *mm_skin_done_bar(void)
-{
-    UIToolbar *tb = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
-    tb.barStyle = UIBarStyleBlack;
-    tb.items = @[
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
-                                                      target:nil action:nil],
-        [[UIBarButtonItem alloc] initWithTitle:@"Listo"
-                                         style:UIBarButtonItemStyleDone
-                                        target:[MMTargets shared]
-                                        action:@selector(onTextDone:)]
-    ];
-    return tb;
-}
-
 /* Crea boton flotante + panel (una sola vez). */
 static void mm_build_ui(void)
 {
@@ -3180,7 +2588,7 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:x];
 
-    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"VIS", @"MISC", @"SKINS", @"INFO"]];
+    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"VIS", @"MISC", @"EXTRA", @"INFO"]];
     g_seg.frame = CGRectMake(10.0, 36.0, MM_PANEL_W - 20.0, 30.0);
     g_seg.selectedSegmentIndex = 0;
     g_seg.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.50];
@@ -3209,16 +2617,16 @@ static void mm_build_ui(void)
     g_p_esp  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_vis  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_misc = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
-    g_p_skins = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    g_p_more = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_info = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_vis.hidden = YES;
     g_p_misc.hidden = YES;
-    g_p_skins.hidden = YES;
+    g_p_more.hidden = YES;
     g_p_info.hidden = YES;
     [g_panel addSubview:g_p_esp];
     [g_panel addSubview:g_p_vis];
     [g_panel addSubview:g_p_misc];
-    [g_panel addSubview:g_p_skins];
+    [g_panel addSubview:g_p_more];
     [g_panel addSubview:g_p_info];
 
     /* --- pagina ESP --- */
@@ -3280,14 +2688,6 @@ static void mm_build_ui(void)
     UIView *vr = mm_switch_row(@"Stream Mode (ocultar UI)", @"mm_stream", NO);
     vr.frame = CGRectMake(0, 2.0, 284.0, 34.0);
     [g_p_vis addSubview:vr];
-
-    UILabel *vd = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 40.0, 272.0, 44.0)];
-    vd.text = @"Cierra el panel y oculta la marca de agua. El boton MENU "
-              @"queda al 10% y sigue tocable para volver.";
-    vd.numberOfLines = 0;
-    vd.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
-    vd.font = [UIFont systemFontOfSize:10.5];
-    [g_p_vis addSubview:vd];
 
     UILabel *vh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 90.0, 272.0, 18.0)];
     vh.text = @"ESP EN PANTALLA";
@@ -3366,15 +2766,6 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_vis addSubview:ts];
 
-    UILabel *vn = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 252.0, 272.0, 76.0)];
-    vn.text = @"El contador muestra solo los jugadores y bots visibles "
-              @"según los filtros y el rango. El estilo y el tema se aplican "
-              @"al instante.";
-    vn.numberOfLines = 0;
-    vn.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
-    vn.font = [UIFont systemFontOfSize:10.5];
-    [g_p_vis addSubview:vn];
-
     /* --- pagina MISC --- */
     UILabel *d1 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 6.0, 272.0, 18.0)];
     d1.text = @"Cuenta invitado";
@@ -3396,173 +2787,22 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:gr];
 
-    UILabel *d2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 72.0, 272.0, 76.0)];
-    d2.text = @"Borra los datos locales de la cuenta de invitado. "
-              @"El juego se cierra y al reabrir entra como un invitado nuevo. "
-              @"Usar solo en un equipo desechable.";
-    d2.numberOfLines = 0;
-    d2.textColor = [UIColor colorWithWhite:0.72 alpha:1.0];
-    d2.font = [UIFont systemFontOfSize:10.5];
-    [g_p_misc addSubview:d2];
+    /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
+    UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
+    xh.text = @"OVERLAY";
+    xh.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
+    xh.font = [UIFont boldSystemFontOfSize:11.0];
+    [g_p_more addSubview:xh];
 
-    UILabel *d3 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 156.0, 272.0, 44.0)];
-    d3.text = @"Skins: pestaña SKINS. Stream Mode y ajustes visuales: "
-              @"pestaña VIS.";
-    d3.numberOfLines = 0;
-    d3.textColor = [UIColor colorWithWhite:0.60 alpha:1.0];
-    d3.font = [UIFont systemFontOfSize:11.0];
-    [g_p_misc addSubview:d3];
-
-    /* --- pagina SKINS (v0.2.9) --- */
-    mm_skin_read_state();
-
-    UISwitch *skm = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-    skm.on = g_mm_skin_on ? YES : NO;
-    skm.onTintColor = mm_verde();
-    skm.accessibilityIdentifier = @"mm_skin_master";
-    skm.transform = CGAffineTransformMakeScale(0.9, 0.9);
-    [skm addTarget:[MMTargets shared] action:@selector(onSwitch:)
-        forControlEvents:UIControlEventValueChanged];
-    g_skin_master_sw = skm;
-    UIView *skmr = mm_row(@"Skin changer (armas)", skm);
-    skmr.frame = CGRectMake(0, 0, 284.0, 31.0);
-    [g_p_skins addSubview:skmr];
-
-    UISwitch *skc = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-    skc.on = g_mm_skin_capture ? YES : NO;
-    skc.onTintColor = [UIColor colorWithRed:0.30 green:0.65 blue:1.0 alpha:1.0];
-    skc.accessibilityIdentifier = @"mm_skin_capture";
-    skc.transform = CGAffineTransformMakeScale(0.9, 0.9);
-    [skc addTarget:[MMTargets shared] action:@selector(onSwitch:)
-        forControlEvents:UIControlEventValueChanged];
-    g_skin_capture_sw = skc;
-    UIView *skcr = mm_row(@"Capturar IDs reales", skc);
-    skcr.frame = CGRectMake(0, 31.0, 284.0, 31.0);
-    [g_p_skins addSubview:skcr];
-
-    UILabel *wl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 66.0, 272.0, 15.0)];
-    wl.text = @"ID de skin (arma)";
-    wl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
-    wl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_skins addSubview:wl];
-
-    g_skin_weapon_tf = [[UITextField alloc] initWithFrame:CGRectMake(6.0, 82.0, 186.0, 30.0)];
-    g_skin_weapon_tf.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1.0];
-    g_skin_weapon_tf.layer.cornerRadius = 6.0;
-    g_skin_weapon_tf.layer.borderWidth = 1.0;
-    g_skin_weapon_tf.layer.borderColor =
-        [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.55].CGColor;
-    g_skin_weapon_tf.textColor = [UIColor whiteColor];
-    g_skin_weapon_tf.font = [UIFont fontWithName:@"Menlo" size:12.0] ?:
-                            [UIFont systemFontOfSize:12.0];
-    g_skin_weapon_tf.keyboardType = UIKeyboardTypeNumberPad;
-    g_skin_weapon_tf.autocorrectionType = UITextAutocorrectionTypeNo;
-    g_skin_weapon_tf.spellCheckingType = UITextSpellCheckingTypeNo;
-    g_skin_weapon_tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    g_skin_weapon_tf.placeholder = @"ej. 100595";
-    g_skin_weapon_tf.text = (g_mm_skin_weapon_id != 0)
-        ? [NSString stringWithFormat:@"%u", g_mm_skin_weapon_id] : @"";
-    g_skin_weapon_tf.inputAccessoryView = mm_skin_done_bar();
-    [g_p_skins addSubview:g_skin_weapon_tf];
-
-    UIButton *wb = [UIButton buttonWithType:UIButtonTypeCustom];
-    wb.frame = CGRectMake(196.0, 82.0, 82.0, 30.0);
-    wb.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
-    wb.layer.cornerRadius = 6.0;
-    [wb setTitle:@"Aplicar" forState:UIControlStateNormal];
-    [wb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    wb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [wb addTarget:[MMTargets shared] action:@selector(onSkinWeaponSet)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_skins addSubview:wb];
-
-    UILabel *cl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 116.0, 272.0, 15.0)];
-    cl.text = @"ID de traje (personaje)";
-    cl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
-    cl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_skins addSubview:cl];
-
-    g_skin_char_tf = [[UITextField alloc] initWithFrame:CGRectMake(6.0, 132.0, 186.0, 30.0)];
-    g_skin_char_tf.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1.0];
-    g_skin_char_tf.layer.cornerRadius = 6.0;
-    g_skin_char_tf.layer.borderWidth = 1.0;
-    g_skin_char_tf.layer.borderColor =
-        [UIColor colorWithRed:0.16 green:0.88 blue:0.38 alpha:0.55].CGColor;
-    g_skin_char_tf.textColor = [UIColor whiteColor];
-    g_skin_char_tf.font = [UIFont fontWithName:@"Menlo" size:12.0] ?:
-                          [UIFont systemFontOfSize:12.0];
-    g_skin_char_tf.keyboardType = UIKeyboardTypeNumberPad;
-    g_skin_char_tf.autocorrectionType = UITextAutocorrectionTypeNo;
-    g_skin_char_tf.spellCheckingType = UITextSpellCheckingTypeNo;
-    g_skin_char_tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    g_skin_char_tf.placeholder = @"ej. 0";
-    g_skin_char_tf.text = (g_mm_skin_char_id != 0)
-        ? [NSString stringWithFormat:@"%u", g_mm_skin_char_id] : @"";
-    g_skin_char_tf.inputAccessoryView = mm_skin_done_bar();
-    [g_p_skins addSubview:g_skin_char_tf];
-
-    UIButton *cb = [UIButton buttonWithType:UIButtonTypeCustom];
-    cb.frame = CGRectMake(196.0, 132.0, 82.0, 30.0);
-    cb.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
-    cb.layer.cornerRadius = 6.0;
-    [cb setTitle:@"Aplicar" forState:UIControlStateNormal];
-    [cb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    cb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [cb addTarget:[MMTargets shared] action:@selector(onSkinCharSet)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_skins addSubview:cb];
-
-    UILabel *pl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 168.0, 272.0, 15.0)];
-    pl.text = @"Presets de arma";
-    pl.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
-    pl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_skins addSubview:pl];
-
-    g_skin_preset_seg = [[UISegmentedControl alloc]
-        initWithItems:@[@"Off", @"P1", @"P2", @"P3", @"P4", @"P5"]];
-    g_skin_preset_seg.frame = CGRectMake(6.0, 184.0, 272.0, 30.0);
-    g_skin_preset_seg.selectedSegmentIndex = 0;
-    if ([g_skin_preset_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        g_skin_preset_seg.selectedSegmentTintColor =
-            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
-    else
-        g_skin_preset_seg.tintColor = mm_verde();
-    [g_skin_preset_seg addTarget:[MMTargets shared] action:@selector(onSkinPreset:)
-                 forControlEvents:UIControlEventValueChanged];
-    [g_p_skins addSubview:g_skin_preset_seg];
-
-    UIButton *ab = [UIButton buttonWithType:UIButtonTypeCustom];
-    ab.frame = CGRectMake(6.0, 220.0, 132.0, 32.0);
-    ab.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
-    ab.layer.cornerRadius = 7.0;
-    [ab setTitle:@"Aplicar ambos" forState:UIControlStateNormal];
-    [ab setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    ab.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [ab addTarget:[MMTargets shared] action:@selector(onSkinApply)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_skins addSubview:ab];
-
-    UIButton *db = [UIButton buttonWithType:UIButtonTypeCustom];
-    db.frame = CGRectMake(146.0, 220.0, 132.0, 32.0);
-    db.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
-    db.layer.cornerRadius = 7.0;
-    [db setTitle:@"Guardar IDs" forState:UIControlStateNormal];
-    [db setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    db.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [db addTarget:[MMTargets shared] action:@selector(onSkinDump)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_skins addSubview:db];
-
-    g_skin_status = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 258.0, 272.0, 86.0)];
-    g_skin_status.numberOfLines = 0;
-    g_skin_status.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    g_skin_status.font = [UIFont fontWithName:@"Menlo" size:9.5] ?:
-                         [UIFont systemFontOfSize:9.5];
-    g_skin_status.text = @"Estado: inactivo\nArma: -\nTraje: -";
-    [g_p_skins addSubview:g_skin_status];
-
-    mm_skin_sync_ui();
-    mm_skin_refresh_status();
+    NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
+                        @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps" ];
+    NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
+                        @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS" ];
+    for (NSUInteger i = 0; i < xkeys.count; i++) {
+        UIView *xrow = mm_switch_row(xtit[i], xkeys[i], NO);
+        xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
+        [g_p_more addSubview:xrow];
+    }
 
     /* --- pagina INFO --- */
     g_info = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 4.0, 272.0, 280.0)];
@@ -3706,12 +2946,16 @@ static void mm_set_panel(BOOL open)
             mm_start_neon_border(g_panel.layer, mm_neon_green(), mm_neon_purple(), 8.0);
             g_panel.hidden = NO;
             g_panel.alpha = 0.0;
-            [UIView animateWithDuration:0.15 animations:^{
+            g_panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
+            /* v0.4.0: apertura con resorte (spring) + leve escala, no aparicion seca. */
+            [UIView animateWithDuration:0.32 delay:0.0
+                 usingSpringWithDamping:0.78 initialSpringVelocity:0.6
+                                options:UIViewAnimationOptionCurveEaseOut
+                             animations:^{
                 g_panel.alpha = 1.0;
-            }];
+                g_panel.transform = CGAffineTransformIdentity;
+            } completion:nil];
         } else {
-            if (g_skin_weapon_tf != nil) [g_skin_weapon_tf resignFirstResponder];
-            if (g_skin_char_tf != nil) [g_skin_char_tf resignFirstResponder];
             [UIView animateWithDuration:0.12 animations:^{
                 g_panel.alpha = 0.0;
             } completion:^(BOOL done) {
@@ -3729,7 +2973,6 @@ static void mm_set_panel(BOOL open)
 static void mm_refresh_info(void)
 {
     if (g_info == nil) return;
-    mm_skin_refresh_status();
     if (g_info.attributedText.length > 0) return;
     @try {
         UIFont *titleFont = [UIFont fontWithName:@"Menlo-Bold" size:17.0] ?:
@@ -3758,7 +3001,7 @@ static void mm_refresh_info(void)
                                   [UIColor colorWithWhite:0.62 alpha:1.0],
                               NSParagraphStyleAttributeName: ps }]];
         [t appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"ESP\nContador JUG / BOT\nSkins\nStream Mode\n"
+            initWithString:@"ESP\nContador JUG / BOT\nStream Mode\n"
                 attributes:@{ NSFontAttributeName: itemFont,
                               NSForegroundColorAttributeName:
                                   [UIColor colorWithWhite:0.95 alpha:1.0],
