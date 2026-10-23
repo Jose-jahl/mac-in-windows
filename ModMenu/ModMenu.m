@@ -263,7 +263,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.4.0"
+#define MODMENU_VERSION     "0.4.1"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -282,7 +282,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.4.0";
+const char *modmenu_build_id = "modmenu-glass-0.4.1";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -2543,20 +2543,20 @@ static void mm_build_ui(void)
         g_btn.bounds = CGRectMake(0, 0, 54.0, 54.0);
         g_btn.backgroundColor = [UIColor colorWithRed:0.02 green:0.08 blue:0.05 alpha:0.92];
         g_btn.layer.cornerRadius = 27.0;
-        g_btn.layer.borderWidth = 1.5;
+        g_btn.layer.borderWidth = 1.0;
         g_btn.layer.borderColor =
-            [mm_neon_green() colorWithAlphaComponent:1.0].CGColor;
+            [mm_neon_green() colorWithAlphaComponent:0.5].CGColor;
         g_btn.layer.shadowColor =
-            [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
-        g_btn.layer.shadowOpacity = 0.68;
-        g_btn.layer.shadowRadius = 14.0;
+            [mm_neon_green() colorWithAlphaComponent:0.9].CGColor;
+        g_btn.layer.shadowOpacity = 0.40;
+        g_btn.layer.shadowRadius = 12.0;
         g_btn.layer.shadowOffset = CGSizeZero;
         g_btn.clipsToBounds = NO;
-        [g_btn setTitle:@"MENU" forState:UIControlStateNormal];
-        [g_btn setTitleColor:[UIColor colorWithWhite:0.97 alpha:1.0]
+        [g_btn setTitle:@"F" forState:UIControlStateNormal];
+        [g_btn setTitleColor:[UIColor colorWithWhite:0.98 alpha:1.0]
                     forState:UIControlStateNormal];
-        UIFont *bf = [UIFont fontWithName:@"Menlo-Bold" size:10.0];
-        if (bf == nil) bf = [UIFont boldSystemFontOfSize:10.0];
+        UIFont *bf = [UIFont fontWithName:@"AvenirNext-Bold" size:23.0];
+        if (bf == nil) bf = [UIFont systemFontOfSize:23.0 weight:UIFontWeightBold];
         g_btn.titleLabel.font = bf;
         /* v0.3.2: un poco mas de contraste/glow en el texto del boton. */
         g_btn.titleLabel.layer.shadowColor =
@@ -2603,19 +2603,9 @@ static void mm_build_ui(void)
 
         g_btn.layer.shadowPath =
             [UIBezierPath bezierPathWithOvalInRect:g_btn.bounds].CGPath;
-        mm_start_neon_gradient(g_btn_neon);
-        mm_start_neon_border(g_btn.layer, mm_neon_green(), mm_neon_purple(), 6.0);
-
-        CABasicAnimation *pulse =
-            [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
-        pulse.fromValue = @0.48;
-        pulse.toValue = @0.86;
-        pulse.duration = 3.2;
-        pulse.autoreverses = YES;
-        pulse.repeatCount = HUGE_VALF;
-        pulse.timingFunction = [CAMediaTimingFunction
-                                functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        [g_btn.layer addAnimation:pulse forKey:@"mmNeonPulse"];
+        /* v0.4.1: boton mas sobrio y profesional — SIN anillo de color animado
+           ni pulso (contrastaban con la identidad). Vidrio estatico + borde fino
+           verde + glow suave fijo + monograma "F". */
     }
 
     /* --- contador JUG/BOT (v0.3.2: glass flotante arriba) --- */
@@ -2632,7 +2622,15 @@ static void mm_build_ui(void)
     if (g_link == nil) {
         g_link = [CADisplayLink displayLinkWithTarget:[MMTargets shared]
                                              selector:@selector(onFrame:)];
-        g_link.preferredFramesPerSecond = 30;
+        /* v0.4.1: ESP mas fluido + FPS REAL. Antes estaba capado a 30, por eso el
+           medidor mostraba 30 fijo. En ProMotion (iPhone 13 Pro+/14 Pro Max) el
+           display corre hasta 120 Hz y la refresca segun el contenido; dejamos que
+           el CADisplayLink llegue a 120 para que mm_esp_frame mida la cadencia REAL
+           del display (hasta 120). Fallback a 60 en equipos sin la API. */
+        if (@available(iOS 15.0, *))
+            g_link.preferredFrameRateRange = CAFrameRateRangeMake(30.0, 120.0, 120.0);
+        else
+            g_link.preferredFramesPerSecond = 60;
         [g_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 
@@ -2709,7 +2707,7 @@ static void mm_build_ui(void)
     UIFont *vf = [UIFont fontWithName:@"Menlo-Bold" size:9.5];
     if (vf == nil) vf = [UIFont boldSystemFontOfSize:9.5];
     NSMutableAttributedString *ht = [[NSMutableAttributedString alloc]
-        initWithString:@"MODMENU"
+        initWithString:@"FUSION"
             attributes:@{ NSFontAttributeName: hf,
                           NSForegroundColorAttributeName: mm_neon_green(),
                           NSKernAttributeName: @1.2 }];
@@ -3178,30 +3176,34 @@ static void mm_apply_stream(void)
 static void mm_position_panel(void)
 {
     if (g_panel == nil || g_panel.superview == nil || g_btn == nil) return;
+    /* v0.4.1 FIX del bug de tamano: NUNCA setear .frame con un transform de escala
+       activo (UIKit deja el frame indefinido y el panel salta/se deforma). Reset a
+       identidad, posicionar en tamano base, y re-aplicar la escala del usuario. */
+    g_panel.transform = CGAffineTransformIdentity;
+
     CGRect rb = g_panel.superview.bounds;
     CGFloat w = MM_PANEL_W, h = MM_PANEL_H;
+    CGFloat px, py;
 
-    /* v0.2.4: si el operador movio el panel, se respeta su posicion */
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"mm_panel_pos"]) {
         CGFloat cx = mm_def_float(@"mm_panel_x", w / 2.0 + 8.0);
         CGFloat cy = mm_def_float(@"mm_panel_y", h / 2.0 + 34.0);
-        CGFloat px = cx - w / 2.0;
-        CGFloat py = cy - h / 2.0;
-        px = MAX(4.0, MIN(rb.size.width  - w - 4.0, px));
-        py = MAX(4.0, MIN(rb.size.height - h - 4.0, py));
-        g_panel.frame = CGRectMake(px, py, w, h);
-        mm_layout_panel_glass();
-        return;
+        px = cx - w / 2.0;
+        py = cy - h / 2.0;
+    } else {
+        CGPoint c = g_btn.center;
+        px = c.x - w / 2.0;
+        py = c.y + 34.0;
+        if (py + h > rb.size.height - 12.0) py = c.y - h - 34.0;  /* si no cabe abajo, arriba */
     }
-
-    CGPoint c = g_btn.center;
-    CGFloat x = c.x - w / 2.0;
-    CGFloat y = c.y + 34.0;
-    x = MAX(8.0, MIN(rb.size.width - w - 8.0, x));
-    if (y + h > rb.size.height - 12.0) y = c.y - h - 34.0;   /* si no cabe abajo, arriba */
-    y = MAX(34.0, MIN(rb.size.height - h - 12.0, y));
-    g_panel.frame = CGRectMake(x, y, w, h);
+    px = MAX(4.0, MIN(rb.size.width  - w - 4.0, px));
+    py = MAX(34.0, MIN(rb.size.height - h - 12.0, py));
+    g_panel.frame = CGRectMake(px, py, w, h);
     mm_layout_panel_glass();
+
+    CGFloat mmSc = mm_def_float(@"mm_menu_scale", 1.0f);
+    if (mmSc < 0.8f) mmSc = 0.8f; if (mmSc > 1.2f) mmSc = 1.2f;
+    if (mmSc != 1.0f) g_panel.transform = CGAffineTransformMakeScale(mmSc, mmSc);
 }
 
 static void mm_set_panel(BOOL open)
@@ -3259,32 +3261,32 @@ static void mm_refresh_info(void)
         ps.lineSpacing = 3.0;
 
         NSMutableAttributedString *t = [[NSMutableAttributedString alloc]
-            initWithString:@"MOD MENU\n"
+            initWithString:@"FUSION\n"
                 attributes:@{ NSFontAttributeName: titleFont,
                               NSForegroundColorAttributeName: mm_neon_green(),
-                              NSKernAttributeName: @1.4 }];
+                              NSKernAttributeName: @2.0 }];
         [t appendAttributedString:[[NSAttributedString alloc]
             initWithString:[NSString stringWithFormat:@"v%s\n\n", MODMENU_VERSION]
                 attributes:@{ NSFontAttributeName: verFont,
                               NSForegroundColorAttributeName:
                                   [mm_neon_purple() colorWithAlphaComponent:0.95] }]];
         [t appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"Personalización visual para CODM\n\n"
-                attributes:@{ NSFontAttributeName: bodyFont,
-                              NSForegroundColorAttributeName:
-                                  [UIColor colorWithWhite:0.62 alpha:1.0],
-                              NSParagraphStyleAttributeName: ps }]];
-        [t appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"ESP\nContador JUG / BOT\nStream Mode\n"
+            initWithString:@"Aimbot no toggleable para mayor seguridad.\n\n"
                 attributes:@{ NSFontAttributeName: itemFont,
                               NSForegroundColorAttributeName:
                                   [UIColor colorWithWhite:0.95 alpha:1.0],
                               NSParagraphStyleAttributeName: ps }]];
         [t appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"\nTodo desde un solo panel."
+            initWithString:@"Proyecto desarrollado por\nJose Lopez — Ing. de Sistemas\n\n"
                 attributes:@{ NSFontAttributeName: bodyFont,
                               NSForegroundColorAttributeName:
-                                  [UIColor colorWithWhite:0.52 alpha:1.0] }]];
+                                  [UIColor colorWithWhite:0.70 alpha:1.0],
+                              NSParagraphStyleAttributeName: ps }]];
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"Contacto:"
+                attributes:@{ NSFontAttributeName: bodyFont,
+                              NSForegroundColorAttributeName:
+                                  [UIColor colorWithWhite:0.55 alpha:1.0] }]];
         g_info.attributedText = t;
     } @catch (NSException *e) {}
 }
