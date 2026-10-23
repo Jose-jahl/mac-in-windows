@@ -312,6 +312,8 @@ static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
 
 static const char *g_via   = "-";     /* donde quedo colgada la UI        */
 static BOOL  g_panel_open  = NO;
+static BOOL  g_panic       = NO;  /* v0.4.0 #8: kill-switch (long-press boton)  */
+static int   g_profile_slot = 0;  /* v0.4.0 #7: slot de perfil seleccionado     */
 static CGPoint g_panel_drag0;         /* v0.2.4: inicio de arrastre panel */
 static int   g_tries       = 0;
 static NSTimeInterval g_t0 = 0;
@@ -350,6 +352,8 @@ static void mm_write_status(NSString *nota);
 static BOOL mm_def_bool(NSString *k, BOOL d);
 static float mm_def_float(NSString *k, float d);
 static void mm_esp_frame(double t);
+static void mm_profile_save(int slot);   /* v0.4.0 #7: perfiles de config */
+static BOOL mm_profile_load(int slot);
 static void mm_esp_collect_real(void);
 static void mm_probe_run(void);
 static void mm_layout_count_glass(void);
@@ -718,6 +722,13 @@ static void mm_draw_fps(CGRect bs)
 - (void)onTelegram;
 - (void)onBoxStyle:(UISegmentedControl *)s;
 - (void)onTheme:(UISegmentedControl *)s;
+- (void)onThemeAccent:(UISegmentedControl *)s;
+- (void)onMenuOpacity:(UISlider *)s;
+- (void)onMenuScale:(UISlider *)s;
+- (void)onPanic:(UILongPressGestureRecognizer *)g;
+- (void)onProfileSlot:(UISegmentedControl *)s;
+- (void)onProfileSave;
+- (void)onProfileLoad;
 - (void)onGuestReset;
 @end
 
@@ -850,6 +861,72 @@ static void mm_draw_fps(CGRect bs)
     if (v < 0 || v > 2) v = 0;
     [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"mm_esp_theme"];
     mm_write_status(@"tema esp");
+}
+
+/* v0.4.0 #10: acento del menu. Re-skina en vivo lo barato (borde/sombra); el
+   gradiente y el resto se re-skinan al reabrir, y el overlay se repinta solo. */
+- (void)onThemeAccent:(UISegmentedControl *)s
+{
+    [[NSUserDefaults standardUserDefaults] setInteger:s.selectedSegmentIndex
+                                               forKey:@"mm_theme_accent"];
+    if (g_panel != nil) {
+        g_panel.layer.borderColor = [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
+        g_panel.layer.shadowColor = [mm_neon_purple() colorWithAlphaComponent:0.90].CGColor;
+    }
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+    mm_write_status(@"tema menu");
+}
+
+/* v0.4.0 #11: opacidad y escala del menu, aplicadas en vivo. */
+- (void)onMenuOpacity:(UISlider *)s
+{
+    [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_menu_opacity"];
+    if (g_panel != nil && !g_panel.hidden) g_panel.alpha = s.value;
+}
+
+- (void)onMenuScale:(UISlider *)s
+{
+    [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_menu_scale"];
+    if (g_panel != nil && !g_panel.hidden)
+        g_panel.transform = CGAffineTransformMakeScale(s.value, s.value);
+}
+
+/* v0.4.0 #8: kill-switch. Long-press en el boton -> oculta TODO al instante;
+   otro long-press restaura. El modo panico se respeta en mm_esp_frame. */
+- (void)onPanic:(UILongPressGestureRecognizer *)g
+{
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    g_panic = !g_panic;
+    if (g_panic) {
+        mm_set_panel(NO);
+        if (g_esp != nil) g_esp.hidden = YES;
+        if (g_count_glass != nil) g_count_glass.hidden = YES;
+        if (g_marca != nil) g_marca.hidden = YES;
+    } else {
+        if (g_marca != nil) g_marca.hidden = NO;
+        mm_refresh_count_glass();
+    }
+    mm_write_status(g_panic ? @"panic ON" : @"panic OFF");
+}
+
+/* v0.4.0 #7: perfiles de config (3 slots). */
+- (void)onProfileSlot:(UISegmentedControl *)s { g_profile_slot = (int)s.selectedSegmentIndex; }
+- (void)onProfileSave
+{
+    mm_profile_save(g_profile_slot);
+    mm_show_alert(@"Perfiles",
+                  [NSString stringWithFormat:@"Configuracion guardada en P%d.", g_profile_slot + 1]);
+}
+- (void)onProfileLoad
+{
+    if (mm_profile_load(g_profile_slot)) {
+        mm_write_status(@"perfil cargado");
+        mm_show_alert(@"Perfiles",
+                      [NSString stringWithFormat:@"P%d cargado y aplicado.", g_profile_slot + 1]);
+    } else {
+        mm_show_alert(@"Perfiles",
+                      [NSString stringWithFormat:@"P%d esta vacio. Guardalo primero.", g_profile_slot + 1]);
+    }
 }
 
 - (void)onGuestReset
@@ -997,6 +1074,70 @@ static void mm_reset_options(void)
     }
 }
 
+/* v0.4.0 #7: perfiles de config. Snapshot/restore de las claves de opciones a
+   un slot en NSUserDefaults. Al cargar, sincroniza las palancas visibles y
+   repinta el overlay (que de todos modos lee las claves en vivo). */
+static NSArray *mm_profile_keys(void)
+{
+    return @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players", @"mm_esp_bots",
+              @"mm_esp_name", @"mm_esp_dist", @"mm_esp_health", @"mm_esp_lines",
+              @"mm_esp_lines_top", @"mm_esp_fill", @"mm_esp_range", @"mm_stream",
+              @"mm_esp_count", @"mm_esp_box_style", @"mm_esp_theme",
+              @"mm_x_cross", @"mm_x_aimring", @"mm_x_head", @"mm_x_distcol",
+              @"mm_x_lowhp", @"mm_x_fps", @"mm_theme_accent",
+              @"mm_menu_opacity", @"mm_menu_scale" ];
+}
+
+static void mm_profile_save(int slot)
+{
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        for (NSString *k in mm_profile_keys()) {
+            id v = [ud objectForKey:k];
+            if (v != nil) d[k] = v;
+        }
+        [ud setObject:d forKey:[NSString stringWithFormat:@"mm_profile_%d", slot]];
+        [ud synchronize];
+    } @catch (NSException *e) {
+        NSLog(@"%s perfil guardar: %@", MM_TAG, e.reason);
+    }
+}
+
+static void mm_sync_switches(UIView *root)
+{
+    if (root == nil) return;
+    for (UIView *v in root.subviews) {
+        if ([v isKindOfClass:[UISwitch class]]) {
+            UISwitch *sw = (UISwitch *)v;
+            NSString *k = sw.accessibilityIdentifier;
+            if (sw.enabled && k.length && [k hasPrefix:@"mm_"]) sw.on = mm_def_bool(k, sw.on);
+        } else {
+            mm_sync_switches(v);
+        }
+    }
+}
+
+static BOOL mm_profile_load(int slot)
+{
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSDictionary *d = [ud dictionaryForKey:[NSString stringWithFormat:@"mm_profile_%d", slot]];
+        if (d == nil) return NO;
+        for (NSString *k in mm_profile_keys()) {
+            id v = d[k];
+            if (v != nil) [ud setObject:v forKey:k];
+        }
+        [ud synchronize];
+        if (g_panel != nil) mm_sync_switches(g_panel);
+        if (g_esp != nil) [g_esp setNeedsDisplay];
+        return YES;
+    } @catch (NSException *e) {
+        NSLog(@"%s perfil cargar: %@", MM_TAG, e.reason);
+        return NO;
+    }
+}
+
 /*---------------------------------------------------------------------------
  * ESP v0.2.3 - motor de dibujo.
  *  El CADisplayLink llama a mm_esp_frame() ~30 veces por segundo: los datos
@@ -1007,6 +1148,10 @@ static void mm_esp_frame(double t)
 {
     @try {
         if (g_esp == nil) return;
+        if (g_panic) {                 /* v0.4.0 #8: todo oculto en modo panico */
+            if (!g_esp.hidden) g_esp.hidden = YES;
+            return;
+        }
         if (!mm_def_bool(@"mm_esp_master", NO)) {
             if (g_box_count != 0) {
                 g_box_count = 0;
@@ -2424,6 +2569,12 @@ static void mm_build_ui(void)
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:[MMTargets shared] action:@selector(onPan:)];
         [g_btn addGestureRecognizer:pan];
+        /* v0.4.0 #8: kill-switch por gesto — mantener presionado el boton oculta
+           TODO al instante (anti-spectator); otro long-press restaura. */
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+            initWithTarget:[MMTargets shared] action:@selector(onPanic:)];
+        lp.minimumPressDuration = 0.6;
+        [g_btn addGestureRecognizer:lp];
 
         g_btn_neon = [CAGradientLayer layer];
         g_btn_neon.frame = g_btn.bounds;
@@ -2621,7 +2772,9 @@ static void mm_build_ui(void)
     g_p_esp  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_vis  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_misc = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
-    g_p_more = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    g_p_more = [[UIScrollView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    ((UIScrollView *)g_p_more).showsVerticalScrollIndicator = YES;
+    ((UIScrollView *)g_p_more).indicatorStyle = UIScrollViewIndicatorStyleWhite;
     g_p_info = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
     g_p_vis.hidden = YES;
     g_p_misc.hidden = YES;
@@ -2791,6 +2944,47 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:gr];
 
+    /* v0.4.0 #7: perfiles de configuracion (3 slots) */
+    UILabel *pfl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 78.0, 272.0, 16.0)];
+    pfl.text = @"Perfiles de configuracion";
+    pfl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
+    pfl.font = [UIFont boldSystemFontOfSize:12.0];
+    [g_p_misc addSubview:pfl];
+
+    UISegmentedControl *pfseg = [[UISegmentedControl alloc]
+        initWithItems:@[@"P1", @"P2", @"P3"]];
+    pfseg.frame = CGRectMake(6.0, 100.0, 272.0, 28.0);
+    pfseg.selectedSegmentIndex = 0;
+    if ([pfseg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        pfseg.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
+    [pfseg setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor colorWithWhite:0.88 alpha:1.0],
+        NSFontAttributeName:[UIFont boldSystemFontOfSize:11.0] } forState:UIControlStateNormal];
+    [pfseg addTarget:[MMTargets shared] action:@selector(onProfileSlot:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_misc addSubview:pfseg];
+
+    UIButton *pfsave = [UIButton buttonWithType:UIButtonTypeCustom];
+    pfsave.frame = CGRectMake(6.0, 134.0, 132.0, 32.0);
+    pfsave.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
+    pfsave.layer.cornerRadius = 7.0;
+    [pfsave setTitle:@"Guardar" forState:UIControlStateNormal];
+    [pfsave setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    pfsave.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
+    [pfsave addTarget:[MMTargets shared] action:@selector(onProfileSave)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:pfsave];
+
+    UIButton *pfload = [UIButton buttonWithType:UIButtonTypeCustom];
+    pfload.frame = CGRectMake(146.0, 134.0, 132.0, 32.0);
+    pfload.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
+    pfload.layer.cornerRadius = 7.0;
+    [pfload setTitle:@"Cargar" forState:UIControlStateNormal];
+    [pfload setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    pfload.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
+    [pfload addTarget:[MMTargets shared] action:@selector(onProfileLoad)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:pfload];
+
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
     xh.text = @"OVERLAY";
@@ -2807,6 +3001,78 @@ static void mm_build_ui(void)
         xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
         [g_p_more addSubview:xrow];
     }
+
+    CGFloat ry = 24.0 + (CGFloat)xkeys.count * 31.0 + 10.0;   /* bajo los toggles */
+
+    /* #10 selector de tema del menu (re-skina todo el acento) */
+    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    tl.text = @"Tema del menu";
+    tl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    tl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:tl]; ry += 20.0;
+    UISegmentedControl *tac = [[UISegmentedControl alloc]
+        initWithItems:@[@"FUSION", @"Hielo", @"Magenta", @"Fuego", @"Aqua"]];
+    tac.frame = CGRectMake(6.0, ry, 272.0, 28.0);
+    { int ti = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"];
+      if (ti < 0 || ti > 4) ti = 0; tac.selectedSegmentIndex = ti; }
+    if ([tac respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        tac.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
+    [tac setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor colorWithWhite:0.86 alpha:1.0],
+        NSFontAttributeName:[UIFont boldSystemFontOfSize:9.5] } forState:UIControlStateNormal];
+    [tac setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor whiteColor],
+        NSFontAttributeName:[UIFont boldSystemFontOfSize:9.5] } forState:UIControlStateSelected];
+    [tac addTarget:[MMTargets shared] action:@selector(onThemeAccent:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:tac]; ry += 38.0;
+
+    /* #11 opacidad del menu */
+    UILabel *ol = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    ol.text = @"Opacidad del menu";
+    ol.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    ol.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:ol]; ry += 18.0;
+    UISlider *osl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 28.0)];
+    osl.minimumValue = 0.4f; osl.maximumValue = 1.0f;
+    osl.value = mm_def_float(@"mm_menu_opacity", 1.0f);
+    osl.tintColor = mm_neon_green();
+    [osl addTarget:[MMTargets shared] action:@selector(onMenuOpacity:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:osl]; ry += 34.0;
+
+    /* #11 escala del menu */
+    UILabel *scl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    scl.text = @"Escala del menu";
+    scl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    scl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:scl]; ry += 18.0;
+    UISlider *ssl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 28.0)];
+    ssl.minimumValue = 0.8f; ssl.maximumValue = 1.2f;
+    ssl.value = mm_def_float(@"mm_menu_scale", 1.0f);
+    ssl.tintColor = mm_neon_green();
+    [ssl addTarget:[MMTargets shared] action:@selector(onMenuScale:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:ssl]; ry += 36.0;
+
+    /* Tier-2 (gated): presentes pero NO activables hasta dumpear offsets. Honesto:
+       no invento offsets. Aparecen atenuadas con nota. */
+    UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    t2.text = @"TIER 2 — requiere offsets (proxima)";
+    t2.textColor = [UIColor colorWithWhite:0.55 alpha:1.0];
+    t2.font = [UIFont boldSystemFontOfSize:10.0];
+    [g_p_more addSubview:t2]; ry += 20.0;
+    NSArray *t2tit = @[ @"ESP de esqueleto", @"Visible / tapado",
+                        @"ESP de granadas", @"ESP de loot / vehiculos" ];
+    for (NSUInteger i = 0; i < t2tit.count; i++) {
+        UISwitch *t2sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
+        t2sw.on = NO; t2sw.enabled = NO;    /* gated */
+        t2sw.transform = CGAffineTransformMakeScale(0.9, 0.9);
+        UIView *t2row = mm_row(t2tit[i], t2sw);
+        t2row.frame = CGRectMake(0, ry, 284.0, 31.0);
+        t2row.alpha = 0.5;
+        [g_p_more addSubview:t2row]; ry += 31.0;
+    }
+
+    ((UIScrollView *)g_p_more).contentSize = CGSizeMake(284.0, ry + 8.0);
 
     /* --- pagina INFO --- */
     g_info = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 4.0, 272.0, 280.0)];
@@ -2950,14 +3216,18 @@ static void mm_set_panel(BOOL open)
             mm_start_neon_border(g_panel.layer, mm_neon_green(), mm_neon_purple(), 8.0);
             g_panel.hidden = NO;
             g_panel.alpha = 0.0;
-            g_panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
-            /* v0.4.0: apertura con resorte (spring) + leve escala, no aparicion seca. */
+            CGFloat mmOp = mm_def_float(@"mm_menu_opacity", 1.0f);
+            CGFloat mmSc = mm_def_float(@"mm_menu_scale", 1.0f);
+            if (mmOp < 0.4f) mmOp = 0.4f; if (mmOp > 1.0f) mmOp = 1.0f;
+            if (mmSc < 0.8f) mmSc = 0.8f; if (mmSc > 1.2f) mmSc = 1.2f;
+            g_panel.transform = CGAffineTransformMakeScale(mmSc * 0.97f, mmSc * 0.97f);
+            /* v0.4.0: apertura con resorte (spring) + opacidad/escala del usuario (#11). */
             [UIView animateWithDuration:0.32 delay:0.0
                  usingSpringWithDamping:0.78 initialSpringVelocity:0.6
                                 options:UIViewAnimationOptionCurveEaseOut
                              animations:^{
-                g_panel.alpha = 1.0;
-                g_panel.transform = CGAffineTransformIdentity;
+                g_panel.alpha = mmOp;
+                g_panel.transform = CGAffineTransformMakeScale(mmSc, mmSc);
             } completion:nil];
         } else {
             [UIView animateWithDuration:0.12 animations:^{
