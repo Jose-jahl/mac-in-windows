@@ -270,6 +270,7 @@
 #import <dlfcn.h>
 #include <unistd.h>
 #include <mach/mach.h>
+#include <mach/task_info.h>   /* Fase 1.7: memoria residente (task_info) */
 #include <mach/vm_map.h>
 #include <mach/vm_region.h>
 #include <mach-o/dyld.h>
@@ -279,11 +280,14 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.5.0"
+#define MODMENU_VERSION     "0.6.0"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
 #include "fusion_offsets.generated.h"
+/* 0.13: matematicas puras (w2s/distancia/box/closest-N). Se incluye TEMPRANO
+   porque drawRect (mucho antes del bloque ESP) ya usa closest-N. */
+#include "mm_math.h"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -302,7 +306,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.5.0";
+const char *modmenu_build_id = "modmenu-glass-0.6.0";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -343,6 +347,10 @@ static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 32
+/* 0.7: ventana contigua del pawn que cubre alive/transform/entity. Se lee de
+   una sola pasada (con fallback a lecturas individuales si el rango falla). */
+#define MM_PAWN_BLOCK_BASE (OFF_PAWN_TRANSFORM & ~0xFFULL)
+#define MM_PAWN_BLOCK_SIZE (OFF_PAWN_ENTITY + 8 - MM_PAWN_BLOCK_BASE)
 typedef struct {
     uint64_t pawn;              /* v0.2.4: dueno de la caja (estabilidad) */
     CGFloat x, y, w, h;
@@ -374,18 +382,44 @@ typedef struct {
 } MMTrack;
 static MMTrack      g_tracks[MM_MAX_TRACKS];
 static int          g_track_count = 0;
+
+/* Fase 1.5: estelas "last seen" en espacio de MUNDO. Cada pawn conserva
+   hasta 14 muestras (~2 s a 0.15 s); se proyectan al dibujar para que no se
+   deformen cuando gira la camara. No hay lecturas nuevas: se alimentan de
+   las cajas ya calculadas por el colector. */
+#define MM_MAX_TRAILS  32
+#define MM_TRAIL_PTS   14
+#define MM_TRAIL_SAMPLE 0.15
+#define MM_TRAIL_LIFE   2.0
+typedef struct { float x, y, z; double t; } MMTrailPt;
+typedef struct {
+    uint64_t  pawn;
+    int       robot;
+    int       n;
+    MMTrailPt p[MM_TRAIL_PTS];
+} MMTrail;
+static MMTrail      g_trails[MM_MAX_TRAILS];
+
 /* v0.4.4: datos para radar 2D / altura / telemetria (se llenan en el colector) */
 static float        g_local_pos[3] = { 0.0f, 0.0f, 0.0f };
 static int          g_have_local = 0;
 static float        g_view_mtx[16];
 static int          g_have_view = 0;
+static float        g_proj_mtx[16];      /* Fase 1.5: proyeccion de estelas/FOV   */
+static int          g_have_proj = 0;
+static float        g_fov_deg = 60.0f;
 static double       g_collect_ms = 0.0;
 static int          g_count_players = 0; /* v0.3.0: dibujados por tipo     */
 static int          g_count_bots = 0;
+/* Fase 1.7: lecturas vm y memoria residente para el HUD de telemetria. */
+static uint64_t     g_vm_reads = 0;      /* total acumulado (mm_vm_read + sonda) */
+static double       g_reads_per_s = 0.0; /* ventana de 1 s                        */
+static double       g_mem_mb = 0.0;      /* residente del proceso                 */
 static UIView      *g_esp   = nil;    /* lienzo MMCanvasView              */
 static CADisplayLink *g_link = nil;   /* latido de dibujo ~30 fps         */
 static NSString    *g_probe = nil;    /* texto de la sonda (fase B)       */
 static int          g_probe_ok = -1;  /* -1 pendiente / 0 revisar / 1 ok  */
+static NSString    *g_br_probe = nil; /* BR probe (prologo decodificado)  */
 
 /* prototipos */
 static void mm_tick(void);
@@ -401,13 +435,82 @@ static void mm_esp_frame(double t);
 static void mm_profile_save(int slot);   /* v0.4.0 #7: perfiles de config */
 static BOOL mm_profile_load(int slot);
 static void mm_esp_collect_real(void);
+static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
+                   BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
+                   int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
+static void mm_br_probe_run(void);     /* 0.6.0: dump de los setters de RadiationZone */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 
 /* v0.2.9: fase D (guest reset) */
 static void mm_guest_reset_prompt(void);
 static void mm_show_alert(NSString *titulo, NSString *msg);
+
+/* 0.8: el syslog tambien es evidencia forense. Solo se emite con el modo
+   debug ON (misma clave mm_debug que habilita modmenu_status.txt). Default
+   OFF; el operador lo prende en MISC para diagnosticar. */
+#define MM_LOG(...) do { if (mm_def_bool(@"mm_debug", NO)) NSLog(__VA_ARGS__); } while (0)
+
+/* 0.7: snapshot de las opciones que drawRect/colector leen por frame. Evita
+   decenas de lookups a NSUserDefaults a 30-60 fps. Se invalida desde cada
+   control que cambia una opcion y al cargar/resetear un perfil. */
+typedef struct {
+    BOOL box, name, dist, lines, linesTop, health, fill;
+    BOOL cross, aimring, fps, head, distcol, lowhp;
+    BOOL priority, warn, arrow, radar, height, telem;
+    BOOL bearings, trails, declutter;   /* Fase 1: brujula / estelas / anti-solape */
+    BOOL radarCam;                      /* Fase 1.1: radar camara-arriba */
+    BOOL players, bots;
+    int  boxStyle, theme, crossStyle, maxN;
+    float range;
+} MMDrawOpts;
+static MMDrawOpts g_draw_opts;
+static BOOL g_draw_opts_ok = NO;
+static void mm_opts_invalidate(void) { g_draw_opts_ok = NO; }
+static const MMDrawOpts *mm_draw_opts(void)
+{
+    if (g_draw_opts_ok) return &g_draw_opts;
+    MMDrawOpts *o = &g_draw_opts;
+    memset(o, 0, sizeof(*o));
+    o->box       = mm_def_bool(@"mm_esp_box", NO);
+    o->name      = mm_def_bool(@"mm_esp_name", NO);
+    o->dist      = mm_def_bool(@"mm_esp_dist", NO);
+    o->lines     = mm_def_bool(@"mm_esp_lines", NO);
+    o->linesTop  = mm_def_bool(@"mm_esp_lines_top", NO);
+    o->health    = mm_def_bool(@"mm_esp_health", NO);
+    o->fill      = mm_def_bool(@"mm_esp_fill", NO);
+    o->cross     = mm_def_bool(@"mm_x_cross", NO);
+    o->aimring   = mm_def_bool(@"mm_x_aimring", NO);
+    o->fps       = mm_def_bool(@"mm_x_fps", NO);
+    o->head      = mm_def_bool(@"mm_x_head", NO);
+    o->distcol   = mm_def_bool(@"mm_x_distcol", NO);
+    o->lowhp     = mm_def_bool(@"mm_x_lowhp", NO);
+    o->priority  = mm_def_bool(@"mm_x_priority", NO);
+    o->warn      = mm_def_bool(@"mm_x_warn", NO);
+    o->arrow     = mm_def_bool(@"mm_x_arrow", NO);
+    o->radar     = mm_def_bool(@"mm_x_radar", NO);
+    o->height    = mm_def_bool(@"mm_x_height", NO);
+    o->telem     = mm_def_bool(@"mm_x_telem", NO);
+    o->bearings  = mm_def_bool(@"mm_x_bearings", NO);
+    o->trails    = mm_def_bool(@"mm_x_trails", NO);
+    o->declutter = mm_def_bool(@"mm_x_declutter", NO);
+    o->radarCam  = mm_def_bool(@"mm_x_radar_cam", YES);
+    o->players   = mm_def_bool(@"mm_esp_players", NO);
+    o->bots      = mm_def_bool(@"mm_esp_bots", NO);
+    o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
+    o->theme     = (int)mm_def_float(@"mm_esp_theme", 0.0f);
+    o->crossStyle= (int)mm_def_float(@"mm_x_cross_style", 0.0f);
+    o->maxN      = (int)mm_def_float(@"mm_x_maxn", 0.0f);
+    o->range     = mm_def_float(@"mm_esp_range", 300.0f);
+    if (o->boxStyle != 1) o->boxStyle = 0;
+    if (o->theme < 0 || o->theme > 2) o->theme = 0;
+    if (o->crossStyle < 0 || o->crossStyle > 3) o->crossStyle = 0;
+    if (o->maxN < 0) o->maxN = 0;
+    if (o->maxN > MM_MAX_BOXES) o->maxN = MM_MAX_BOXES;
+    g_draw_opts_ok = YES;
+    return o;
+}
 
 /*---------------------------------------------------------------------------
  * Vista raiz que DEJA PASAR los toques: si nadie (boton/panel) los consume,
@@ -582,48 +685,322 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
     CGContextStrokeRect(ctx, CGRectMake(3.0, 3.0, bs.size.width - 6.0, bs.size.height - 6.0));
 }
 
-/* v0.4.4 (Fase 1.1): radar 2D norte-arriba.
+/* v0.4.4 (Fase 1.1): radar 2D.
    v0.5.0: dibuja desde el TRACK mundial, no desde las cajas: los enemigos
-   detras de la camara (o fuera del cuadro) siguen apareciendo en el radar. */
+   detras de la camara (o fuera del cuadro) siguen apareciendo en el radar.
+   Fase 1.1: anillos de 50/100/200 m, modo camara-arriba (yaw desde view),
+   rumbo de la camara en modo norte-arriba y caret de altura por contacto.
+   v0.6.0 (iteracion de intuicion): radar mas grande, cono de vision legible,
+   chevron "FRENTE" en el borde (reemplaza a la "N" rotatoria en camara-arriba),
+   triangulo del jugador grande con outline negro, etiquetas de distancia en los
+   anillos 50/100/200, y los contactos a la ESPALDA se dibujan como aro hueco
+   (los del cono se quedan como punto macizo). "Arriba = donde mira el jugador"
+   queda explicito a primer golpe de vista. */
 static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
 {
     if (!g_have_local) return;
-    CGFloat R = 54.0, cx = bs.size.width - R - 14.0, cy = R + 48.0;
-    float rng = mm_def_float(@"mm_esp_range", 300.0f); if (rng < 40.0f) rng = 40.0f;
-    CGContextSetRGBFillColor(ctx, 0.02, 0.05, 0.04, 0.55);
+    CGFloat R = 76.0, cx = bs.size.width - R - 16.0, cy = R + 54.0;
+    const MMDrawOpts *o = mm_draw_opts();
+    float rng = o->range; if (rng < 40.0f) rng = 40.0f;
+    /* El radar es tactico: 200 m de techo. Los contactos mas lejanos quedan
+       pegados al borde y atenuados (el ESP sigue mostrando su caja real). */
+    float radarRng = (rng > 200.0f) ? 200.0f : rng;
+    BOOL camUp = o->radarCam && g_have_view;
+
+    /* fondo: disco oscuro + aro interior tenue del color del tema para marcar
+       que es parte del mod y no del HUD del juego. */
+    CGContextSetRGBFillColor(ctx, 0.02, 0.05, 0.04, 0.72);
     CGContextFillEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
+    CGContextSetLineWidth(ctx, 0.8);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.14);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - (R - 1.5), cy - (R - 1.5),
+                                                  (R - 1.5) * 2.0, (R - 1.5) * 2.0));
+
+    /* direccion "arriba" del radar en espacio de pantalla.
+       - camara-arriba: fijo arriba (frente al jugador = arriba de la pantalla).
+       - norte-arriba:  gira con la camara para marcar la vista actual. */
+    CGFloat fwdAng = -(CGFloat)M_PI / 2.0;
+    if (!camUp && g_have_view) {
+        float fx = -g_view_mtx[2], fz = -g_view_mtx[10];
+        if (fabsf(fx) > 0.0001f || fabsf(fz) > 0.0001f)
+            fwdAng = atan2f(fz, fx);
+    }
+
+    /* cono de vision: slice al color del tema (bien visible). Marcas de 30
+       grados fuera del cono, para no competir con el cono. */
+    CGFloat halfCone = 0.52;   /* ~30 grados por lado => cono de ~60 grados */
+    {
+        CGContextSaveGState(ctx);
+        CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.15);
+        CGContextMoveToPoint(ctx, cx, cy);
+        CGContextAddArc(ctx, cx, cy, R - 2.0, fwdAng - halfCone, fwdAng + halfCone, 0);
+        CGContextClosePath(ctx);
+        CGContextFillPath(ctx);
+        /* bordes del cono: finos y del color del tema, para dejar lineal la mira. */
+        CGContextSetLineWidth(ctx, 0.9);
+        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.48);
+        {
+            CGFloat eux = cosf((float)(fwdAng - halfCone)), euy = sinf((float)(fwdAng - halfCone));
+            CGFloat vux = cosf((float)(fwdAng + halfCone)), vuy = sinf((float)(fwdAng + halfCone));
+            CGContextMoveToPoint(ctx, cx, cy);
+            CGContextAddLineToPoint(ctx, cx + eux * (R - 2.0), cy + euy * (R - 2.0));
+            CGContextMoveToPoint(ctx, cx, cy);
+            CGContextAddLineToPoint(ctx, cx + vux * (R - 2.0), cy + vuy * (R - 2.0));
+            CGContextStrokePath(ctx);
+        }
+        CGContextRestoreGState(ctx);
+    }
+
+    /* marcas de 30 grados por fuera del cono, blancas tenues. */
+    for (int a = 0; a < 360; a += 30) {
+        CGFloat rad = (CGFloat)a * (CGFloat)M_PI / 180.0f;
+        CGFloat ux = sinf((float)rad), uy = -cosf((float)rad);
+        CGFloat r0 = (a % 90 == 0) ? R - 7.0 : R - 4.0;
+        CGContextSetLineWidth(ctx, (a % 90 == 0) ? 1.0 : 0.7);
+        CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0,
+                                   (a % 90 == 0) ? 0.22 : 0.11);
+        CGContextMoveToPoint(ctx, cx + ux * r0, cy + uy * r0);
+        CGContextAddLineToPoint(ctx, cx + ux * (R - 1.0), cy + uy * (R - 1.0));
+        CGContextStrokePath(ctx);
+    }
+
+    /* anillos 50/100/200 m sobre la escala tactica, con etiqueta "50m", "100m",
+       "200m" en el borde derecho del anillo (encima de un rectangulito oscuro). */
+    static const float ringM[3] = { 50.0f, 100.0f, 200.0f };
+    UIFont *lblF = [UIFont monospacedDigitSystemFontOfSize:7.5 weight:UIFontWeightMedium];
+    if (lblF == nil) lblF = [UIFont systemFontOfSize:7.5];
+    for (int k = 0; k < 3; k++) {
+        if (ringM[k] > radarRng) continue;
+        CGFloat rr = R * (CGFloat)(ringM[k] / radarRng);
+        CGContextSetLineWidth(ctx, (ringM[k] > 100.0f) ? 0.7 : 0.9);
+        CGContextSetRGBStrokeColor(ctx, cr, cg, cb,
+                                   (ringM[k] > 100.0f) ? 0.15 : 0.25);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - rr, cy - rr, rr * 2.0, rr * 2.0));
+
+        /* etiqueta del anillo: "50m"/"100m"/"200m" a la derecha, con pastilla. */
+        NSString *lbl = [NSString stringWithFormat:@"%.0fm", ringM[k]];
+        NSDictionary *la = @{ NSFontAttributeName: lblF,
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.86 alpha:0.95] };
+        CGSize lsz = [lbl sizeWithAttributes:la];
+        CGFloat lx = cx + rr - lsz.width - 1.0;
+        CGFloat ly = cy - lsz.height / 2.0 - 0.5;
+        CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.55);
+        CGContextFillRect(ctx, CGRectMake(lx - 1.5, ly, lsz.width + 3.0, lsz.height));
+        [lbl drawAtPoint:CGPointMake(lx, ly) withAttributes:la];
+    }
+
+    /* borde exterior del disco */
     CGContextSetLineWidth(ctx, 1.2);
-    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.6);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.70);
     CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
-    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.22);
-    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - R * 0.5, cy - R * 0.5, R, R));
-    CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.1);
-    CGContextMoveToPoint(ctx, cx - R, cy); CGContextAddLineToPoint(ctx, cx + R, cy);
-    CGContextMoveToPoint(ctx, cx, cy - R); CGContextAddLineToPoint(ctx, cx, cy + R);
-    CGContextStrokePath(ctx);
-    CGContextSetRGBFillColor(ctx, 0.9, 0.95, 1.0, 0.95);
-    CGContextFillEllipseInRect(ctx, CGRectMake(cx - 2.5, cy - 2.5, 5.0, 5.0));
+
+    /* chevron "FRENTE" por fuera del aro, en direccion de la vista. Siempre
+       lo ves aunque el radar este en norte-arriba (ahi te marca hacia donde
+       estas mirando). Reemplaza a la "N" rotatoria que confundia. */
+    {
+        CGFloat chCx = cx + cosf((float)fwdAng) * (R + 4.5);
+        CGFloat chCy = cy + sinf((float)fwdAng) * (R + 4.5);
+        CGFloat chUx = cosf((float)fwdAng), chUy = sinf((float)fwdAng);
+        CGFloat chPx = -chUy, chPy = chUx;
+        /* sombra */
+        CGContextSaveGState(ctx);
+        CGContextSetShadowWithColor(ctx, CGSizeMake(0.0, 1.0), 2.5,
+            [UIColor colorWithWhite:0.0 alpha:0.9].CGColor);
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, chCx + chUx * 4.2, chCy + chUy * 4.2);     /* punta */
+        CGContextAddLineToPoint(ctx, chCx - chUx * 1.2 + chPx * 3.6,
+                                     chCy - chUy * 1.2 + chPy * 3.6);
+        CGContextAddLineToPoint(ctx, chCx - chUx * 1.2 - chPx * 3.6,
+                                     chCy - chUy * 1.2 - chPy * 3.6);
+        CGContextClosePath(ctx);
+        CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.96);
+        CGContextFillPath(ctx);
+        CGContextRestoreGState(ctx);
+    }
+
+    /* "N" (norte) solo en modo norte-arriba — ahi queda siempre arriba y
+       cumple su rol de brujula. En camara-arriba la referencia es "FRENTE". */
+    if (!camUp) {
+        CGFloat nr = R - 12.0;
+        NSString *ns = @"N";
+        UIFont *nf = [UIFont boldSystemFontOfSize:9.0];
+        NSShadow *nsh = [[NSShadow alloc] init];
+        nsh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.9];
+        nsh.shadowBlurRadius = 2.0; nsh.shadowOffset = CGSizeZero;
+        NSDictionary *na = @{ NSFontAttributeName: nf,
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.92 alpha:0.95],
+            NSShadowAttributeName: nsh };
+        CGSize nsz = [ns sizeWithAttributes:na];
+        [ns drawAtPoint:CGPointMake(cx - nsz.width / 2.0,
+                                    cy - nr - nsz.height / 2.0)
+         withAttributes:na];
+    }
+
+    /* marcador del jugador: triangulo grande, outline negro + relleno cian
+       claro. Que no se pierda sobre fondos claros ni oscuros. */
+    {
+        CGFloat ux = cosf((float)fwdAng), uy = sinf((float)fwdAng);
+        CGFloat px = -uy, py = ux;   /* perpendicular */
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, cx + ux * 12.0, cy + uy * 12.0);
+        CGContextAddLineToPoint(ctx, cx - ux * 5.5 + px * 6.5, cy - uy * 5.5 + py * 6.5);
+        CGContextAddLineToPoint(ctx, cx - ux * 2.0, cy - uy * 2.0);   /* muesca atras */
+        CGContextAddLineToPoint(ctx, cx - ux * 5.5 - px * 6.5, cy - uy * 5.5 - py * 6.5);
+        CGContextClosePath(ctx);
+        /* outline oscuro para que lea sobre cualquier mapa */
+        CGContextSetLineWidth(ctx, 1.6);
+        CGContextSetLineJoin(ctx, kCGLineJoinRound);
+        CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.80);
+        CGContextStrokePath(ctx);
+        /* relleno */
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, cx + ux * 12.0, cy + uy * 12.0);
+        CGContextAddLineToPoint(ctx, cx - ux * 5.5 + px * 6.5, cy - uy * 5.5 + py * 6.5);
+        CGContextAddLineToPoint(ctx, cx - ux * 2.0, cy - uy * 2.0);
+        CGContextAddLineToPoint(ctx, cx - ux * 5.5 - px * 6.5, cy - uy * 5.5 - py * 6.5);
+        CGContextClosePath(ctx);
+        CGContextSetRGBFillColor(ctx, 0.92, 0.98, 1.0, 1.0);
+        CGContextFillPath(ctx);
+    }
+
+    /* contactos. Si estan DENTRO del cono de vision -> punto macizo.
+       Si estan a la espalda (fuera del cono) -> aro hueco: al vuelo sabes
+       cual es tiro directo y cual tenes que girar para mirar.
+       Fuera del rango tactico -> pegado al borde y atenuado. */
     for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
         MMTrack *tk = &g_tracks[i];
         if (!tk->alive) continue;
-        float px = cx + ((tk->wx - g_local_pos[0]) / rng) * R;
-        float py = cy + ((tk->wz - g_local_pos[2]) / rng) * R;
-        float ox = px - cx, oy = py - cy, d = (float)sqrt(ox * ox + oy * oy);
-        if (d > R - 2.0) { float s = (R - 2.0f) / d; px = cx + ox * s; py = cy + oy * s; }
-        /* v0.5.0: mas tenue el que NO tiene caja en pantalla (detras/fuera). */
-        CGFloat al = tk->proj ? 0.95 : 0.55;
-        if (tk->robot) CGContextSetRGBFillColor(ctx, 0.63, 0.30, 1.0, al);
-        else           CGContextSetRGBFillColor(ctx, 1.0, 0.25, 0.30, al);
-        CGContextFillEllipseInRect(ctx, CGRectMake(px - 2.2, py - 2.2, 4.4, 4.4));
+        float dx = tk->wx - g_local_pos[0];
+        float dz = tk->wz - g_local_pos[2];
+
+        /* bearing del contacto en el plano del radar (grados en pantalla). */
+        float bearingAng;
+        float px, py;
+        if (camUp) {
+            float vx = g_view_mtx[0] * dx + g_view_mtx[8]  * dz;
+            float vz = g_view_mtx[2] * dx + g_view_mtx[10] * dz;
+            px = (float)cx + (vx / radarRng) * (float)R;
+            py = (float)cy + (vz / radarRng) * (float)R;
+            /* en camara-arriba, "arriba" = -y en pantalla; el angulo relativo
+               al frente lo sacamos del vector de pantalla desde el centro. */
+            float sxv = px - (float)cx, syv = py - (float)cy;
+            bearingAng = atan2f(syv, sxv);
+        } else {
+            px = (float)cx + (dx / radarRng) * (float)R;
+            py = (float)cy + (dz / radarRng) * (float)R;
+            float sxv = px - (float)cx, syv = py - (float)cy;
+            bearingAng = atan2f(syv, sxv);
+        }
+        /* diferencia angular contra fwdAng (centro del cono). */
+        float dAng = bearingAng - (float)fwdAng;
+        while (dAng >  (float)M_PI) dAng -= 2.0f * (float)M_PI;
+        while (dAng < -(float)M_PI) dAng += 2.0f * (float)M_PI;
+        BOOL enConoVista = (fabsf(dAng) <= (float)halfCone);
+
+        float ox = px - (float)cx, oy = py - (float)cy;
+        float d = sqrtf(ox * ox + oy * oy);
+        BOOL fuera = NO;
+        if (d > (float)R - 3.0f) {
+            float s = ((float)R - 3.0f) / d;
+            px = (float)cx + ox * s; py = (float)cy + oy * s;
+            fuera = (tk->dist > radarRng);
+        }
+        CGFloat al = tk->proj ? 0.97 : 0.62;
+        if (fuera) al *= 0.62;
+
+        /* halo oscuro: legible sobre cualquier fondo */
+        CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.60);
+        CGContextFillEllipseInRect(ctx, CGRectMake(px - 3.6, py - 3.6, 7.2, 7.2));
+
+        CGFloat colR, colG, colB;
+        if (tk->robot) { colR = 0.63; colG = 0.30; colB = 1.0; }
+        else           { colR = 1.0;  colG = 0.25; colB = 0.30; }
+
+        if (enConoVista) {
+            /* punto macizo: contacto en la direccion que estas mirando */
+            CGContextSetRGBFillColor(ctx, colR, colG, colB, al);
+            CGContextFillEllipseInRect(ctx, CGRectMake(px - 2.6, py - 2.6, 5.2, 5.2));
+        } else {
+            /* aro hueco: contacto fuera de tu cono (laterales + espalda) */
+            CGContextSetLineWidth(ctx, 1.5);
+            CGContextSetRGBStrokeColor(ctx, colR, colG, colB, al);
+            CGContextStrokeEllipseInRect(ctx, CGRectMake(px - 2.8, py - 2.8, 5.6, 5.6));
+            /* centro oscuro adicional para que el aro no se confunda con un punto. */
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.35);
+            CGContextFillEllipseInRect(ctx, CGRectMake(px - 1.2, py - 1.2, 2.4, 2.4));
+        }
+
+        /* caret de altura: triangulito arriba (enemigo mas alto) / abajo (mas
+           bajo). Mismo signo que el indicador junto a la caja. */
+        float dh = tk->wy - g_local_pos[1];
+        if (fabsf(dh) >= 2.0f) {
+            CGFloat ty = (dh > 0.0f) ? (CGFloat)py - 7.0 : (CGFloat)py + 7.0;
+            CGFloat dir = (dh > 0.0f) ? -1.0 : 1.0;
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, px, ty);
+            CGContextAddLineToPoint(ctx, px - 2.8, ty - dir * 3.2);
+            CGContextAddLineToPoint(ctx, px + 2.8, ty - dir * 3.2);
+            CGContextClosePath(ctx);
+            CGContextSetRGBFillColor(ctx, colR, colG, colB, al);
+            CGContextFillPath(ctx);
+        }
+    }
+
+    /* pie: "mi vista ▲ · 200m" / "norte ▲ · 200m". El triangulo refuerza el
+       mensaje de "lo de arriba es lo que estas mirando". */
+    {
+        NSString *cap = [NSString stringWithFormat:@"%@ ▲ · %.0f m",
+                         camUp ? @"mi vista" : @"norte",
+                         radarRng];
+        UIFont *cf = [UIFont monospacedDigitSystemFontOfSize:8.5
+                                                      weight:UIFontWeightSemibold];
+        if (cf == nil) cf = [UIFont systemFontOfSize:8.5];
+        NSShadow *csh = [[NSShadow alloc] init];
+        csh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.9];
+        csh.shadowBlurRadius = 2.5; csh.shadowOffset = CGSizeZero;
+        NSDictionary *ca = @{ NSFontAttributeName: cf,
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.88 alpha:0.97],
+            NSShadowAttributeName: csh };
+        CGSize csz = [cap sizeWithAttributes:ca];
+        [cap drawAtPoint:CGPointMake(cx - csz.width / 2.0, cy + R + 4.0)
+          withAttributes:ca];
     }
 }
 
-/* v0.4.4 (Fase 1.7): telemetria (tiempo de colecta, cajas, jug/bot). */
+/* v0.4.4 (Fase 1.7): telemetria (colecta, cajas, jug/bot).
+   Fase 1.7: suma lecturas vm/s y memoria residente del proceso. */
+static void mm_telem_update(void)
+{
+    static double last_t = 0.0, last_mem_t = 0.0;
+    static uint64_t last_reads = 0;
+    double now = CACurrentMediaTime();
+    if (last_t <= 0.0) { last_t = now; last_reads = g_vm_reads; }
+    double dt = now - last_t;
+    if (dt > 3.0) {
+        /* el HUD estuvo apagado: no promediar el hueco */
+        g_reads_per_s = 0.0;
+        last_t = now;
+        last_reads = g_vm_reads;
+    } else if (dt >= 1.0) {
+        g_reads_per_s = (double)(g_vm_reads - last_reads) / dt;
+        last_t = now;
+        last_reads = g_vm_reads;
+    }
+    if (last_mem_t <= 0.0) last_mem_t = now - 1.0;   /* primera medida inmediata */
+    if (now - last_mem_t >= 1.0) {
+        last_mem_t = now;
+        mach_task_basic_info_data_t bi;
+        mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+        if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                      (task_info_t)&bi, &cnt) == KERN_SUCCESS)
+            g_mem_mb = (double)bi.resident_size / (1024.0 * 1024.0);
+    }
+}
+
 static void mm_draw_telem(CGRect bs)
 {
     (void)bs;
-    NSString *s = [NSString stringWithFormat:@"col %.1fms  cajas %d  jug %d bot %d",
-                   g_collect_ms, g_box_count, g_count_players, g_count_bots];
+    mm_telem_update();
     UIFont *f = [UIFont monospacedDigitSystemFontOfSize:9.0 weight:UIFontWeightMedium];
     if (f == nil) f = [UIFont systemFontOfSize:9.0];
     NSShadow *sh = [[NSShadow alloc] init];
@@ -632,7 +1009,176 @@ static void mm_draw_telem(CGRect bs)
     NSDictionary *a = @{ NSFontAttributeName: f,
         NSForegroundColorAttributeName: [UIColor colorWithWhite:0.78 alpha:1.0],
         NSShadowAttributeName: sh };
-    [s drawAtPoint:CGPointMake(10.0, 60.0) withAttributes:a];
+    NSString *s1 = [NSString stringWithFormat:@"col %.1fms  cajas %d  jug %d bot %d",
+                    g_collect_ms, g_box_count, g_count_players, g_count_bots];
+    NSString *s2 = [NSString stringWithFormat:@"%.0f lect/s  %.0f MB  fov %.0f",
+                    g_reads_per_s, g_mem_mb, g_fov_deg];
+    [s1 drawAtPoint:CGPointMake(10.0, 60.0) withAttributes:a];
+    [s2 drawAtPoint:CGPointMake(10.0, 71.0) withAttributes:a];
+}
+
+/* Fase 1.3: brujula de bearings. Marca en un anillo, en la direccion de cada
+   contacto relativa a la camara (view matrix), sin mirar el radar. */
+static void mm_draw_bearings(CGContextRef ctx, CGRect bs)
+{
+    if (!g_have_local || !g_have_view || g_track_count <= 0) return;
+    float rng = mm_draw_opts()->range; if (rng < 40.0f) rng = 40.0f;
+    CGFloat cx = bs.size.width / 2.0, cy = bs.size.height / 2.0;
+    CGFloat R = MIN(bs.size.width, bs.size.height) * 0.30;
+    if (R < 90.0) R = 90.0;
+    if (R > 150.0) R = 150.0;
+    int tema = mm_draw_opts()->theme;
+
+    CGContextSetLineWidth(ctx, 0.7);
+    CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.07);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
+
+    for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
+        MMTrack *tk = &g_tracks[i];
+        if (!tk->alive) continue;
+        float dx = tk->wx - g_local_pos[0];
+        float dz = tk->wz - g_local_pos[2];
+        if (fabsf(dx) < 0.05f && fabsf(dz) < 0.05f) continue;
+        /* plano horizontal en espacio de camara: +x derecha, -z adelante. */
+        float vx = g_view_mtx[0] * dx + g_view_mtx[8]  * dz;
+        float vz = g_view_mtx[2] * dx + g_view_mtx[10] * dz;
+        CGFloat beta = atan2f(vx, -vz);
+        CGFloat sx = sinf(beta), sy = -cosf(beta);
+        CGFloat al = 0.90f - 0.55f * (tk->dist / rng);
+        if (al < 0.25f) al = 0.25f;
+        if (al > 0.92f) al = 0.92f;
+        CGFloat cr, cg, cb;
+        mm_esp_color(tk->robot, tema, &cr, &cg, &cb);
+        CGContextSetLineWidth(ctx, 1.6);
+        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, al);
+        CGContextMoveToPoint(ctx, cx + sx * (R - 6.0), cy + sy * (R - 6.0));
+        CGContextAddLineToPoint(ctx, cx + sx * (R + 3.0), cy + sy * (R + 3.0));
+        CGContextStrokePath(ctx);
+        CGContextSetRGBFillColor(ctx, cr, cg, cb, al);
+        CGContextFillEllipseInRect(ctx, CGRectMake(cx + sx * (R + 4.0) - 1.8,
+                                                   cy + sy * (R + 4.0) - 1.8,
+                                                   3.6, 3.6));
+    }
+}
+
+/* Fase 1.5: estelas. Se actualizan en el colector (~15 Hz, muestreo 0.15 s)
+   con posiciones de MUNDO (no de pantalla: la camara se mueve) y se proyectan
+   al dibujar. Desvanecido durante 2 s. */
+static void mm_trails_clear(void)
+{
+    memset(g_trails, 0, sizeof(g_trails));
+}
+
+static void mm_trails_update(const MMEspBox *boxes, int n)
+{
+    if (boxes == NULL || n <= 0) return;   /* deja las viejas para el fade */
+    double now = CACurrentMediaTime();
+    for (int i = 0; i < n && i < MM_MAX_BOXES; i++) {
+        const MMEspBox *b = &boxes[i];
+        if (!b->alive) continue;
+        int slot = -1, freeSlot = -1;
+        for (int t = 0; t < MM_MAX_TRAILS; t++) {
+            if (g_trails[t].n > 0 && g_trails[t].pawn == b->pawn) { slot = t; break; }
+            if (g_trails[t].n == 0 && freeSlot < 0) freeSlot = t;
+        }
+        if (slot < 0) {
+            if (freeSlot >= 0) slot = freeSlot;
+            else {
+                /* tabla llena: recicla la estela con la muestra mas vieja */
+                double best = 1.0e18; int bi = 0;
+                for (int t = 0; t < MM_MAX_TRAILS; t++) {
+                    double lt = (g_trails[t].n > 0)
+                              ? g_trails[t].p[g_trails[t].n - 1].t : 0.0;
+                    if (lt < best) { best = lt; bi = t; }
+                }
+                slot = bi;
+            }
+            memset(&g_trails[slot], 0, sizeof(g_trails[slot]));
+            g_trails[slot].pawn = b->pawn;
+            g_trails[slot].robot = b->robot;
+        }
+        MMTrail *tr = &g_trails[slot];
+        double lastT = (tr->n > 0) ? tr->p[tr->n - 1].t : 0.0;
+        if (tr->n > 0 && (now - lastT) < MM_TRAIL_SAMPLE) continue;
+        MMTrailPt p;
+        p.x = b->wx;
+        p.y = b->wy - 0.55f;   /* centro del cuerpo, no el cuello */
+        p.z = b->wz;
+        p.t = now;
+        if (tr->n < MM_TRAIL_PTS) tr->p[tr->n++] = p;
+        else {
+            memmove(tr->p, tr->p + 1, sizeof(MMTrailPt) * (MM_TRAIL_PTS - 1));
+            tr->p[MM_TRAIL_PTS - 1] = p;
+        }
+    }
+    /* poda de muestras vencidas */
+    for (int t = 0; t < MM_MAX_TRAILS; t++) {
+        MMTrail *tr = &g_trails[t];
+        if (tr->n <= 0) continue;
+        int keep = 0;
+        while (keep < tr->n && (now - tr->p[keep].t) > MM_TRAIL_LIFE) keep++;
+        if (keep >= tr->n) { tr->n = 0; tr->pawn = 0; continue; }
+        if (keep > 0) {
+            memmove(tr->p, tr->p + keep, sizeof(MMTrailPt) * (size_t)(tr->n - keep));
+            tr->n -= keep;
+        }
+    }
+}
+
+static void mm_trails_draw(CGContextRef ctx, CGRect bs)
+{
+    if (!g_have_view || !g_have_proj) return;
+    double now = CACurrentMediaTime();
+    int tema = mm_draw_opts()->theme;
+    CGFloat W = bs.size.width, H = bs.size.height;
+    for (int t = 0; t < MM_MAX_TRAILS; t++) {
+        MMTrail *tr = &g_trails[t];
+        if (tr->n < 2) continue;
+        CGFloat cr, cg, cb;
+        mm_esp_color(tr->robot, tema, &cr, &cg, &cb);
+        for (int j = 1; j < tr->n; j++) {
+            double age = now - tr->p[j].t;
+            if (age < 0.0) age = 0.0;
+            if (age > MM_TRAIL_LIFE) continue;
+            CGFloat al = 0.55f * (CGFloat)(1.0 - age / MM_TRAIL_LIFE);
+            if (al < 0.04f) continue;
+            float pa[3] = { tr->p[j - 1].x, tr->p[j - 1].y, tr->p[j - 1].z };
+            float pb[3] = { tr->p[j].x,     tr->p[j].y,     tr->p[j].z };
+            CGPoint a, b;
+            if (!mm_w2s(g_view_mtx, g_proj_mtx, pa, NO, W, H, &a, NULL, NULL, NULL)) continue;
+            if (!mm_w2s(g_view_mtx, g_proj_mtx, pb, NO, W, H, &b, NULL, NULL, NULL)) continue;
+            CGContextSetLineWidth(ctx, 1.4);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, al);
+            CGContextMoveToPoint(ctx, a.x, a.y);
+            CGContextAddLineToPoint(ctx, b.x, b.y);
+            CGContextStrokePath(ctx);
+        }
+    }
+}
+
+/* Fase 1.6: anti-solape de etiquetas. El presupuesto baja con FOV angosto:
+   menos texto cuando la camara esta muy zoomada. */
+static BOOL mm_label_rect_free(const CGRect *used, int n, CGRect r)
+{
+    for (int i = 0; i < n; i++)
+        if (CGRectIntersectsRect(used[i], r)) return NO;
+    return YES;
+}
+
+static BOOL mm_label_claim(CGRect *used, int *n, int cap, CGRect r)
+{
+    if (!mm_label_rect_free(used, *n, r)) return NO;
+    if (*n < cap) used[(*n)++] = r;
+    return YES;
+}
+
+static int mm_declutter_budget(void)
+{
+    float f = g_fov_deg;
+    if (!isfinite(f) || f < 5.0f) f = 60.0f;
+    if (f < 50.0f) return 8;
+    if (f < 80.0f) return 12;
+    return 16;
 }
 
 @interface MMCanvasView : UIView @end
@@ -650,44 +1196,45 @@ static void mm_draw_telem(CGRect bs)
                                                    weight:UIFontWeightMedium];
     if (fDist == nil) fDist = [UIFont systemFontOfSize:9.5];
 
-    BOOL conCajas  = mm_def_bool(@"mm_esp_box", NO);          /* v0.2.5 */
-    BOOL conNombre = mm_def_bool(@"mm_esp_name", NO);
-    BOOL conDist   = mm_def_bool(@"mm_esp_dist", NO);
-    BOOL conLineas = mm_def_bool(@"mm_esp_lines", NO);
-    BOOL lineasTop = mm_def_bool(@"mm_esp_lines_top", NO);    /* v0.2.5 */
-    BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);
-    BOOL conRelleno = mm_def_bool(@"mm_esp_fill", NO);
-    int  estiloCaja = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
-    int  tema       = (int)mm_def_float(@"mm_esp_theme", 0.0f);
-    if (estiloCaja != 1) estiloCaja = 0;
-    if (tema < 0 || tema > 2) tema = 0;
+    const MMDrawOpts *o = mm_draw_opts();
+    BOOL conCajas  = o->box;          /* v0.2.5 */
+    BOOL conNombre = o->name;
+    BOOL conDist   = o->dist;
+    BOOL conLineas = o->lines;
+    BOOL lineasTop = o->linesTop;     /* v0.2.5 */
+    BOOL conSalud  = o->health;
+    BOOL conRelleno = o->fill;
+    int  estiloCaja = o->boxStyle;
+    int  tema       = o->theme;
 
     /* v0.4.0: features de overlay. Las independientes de las cajas (crosshair,
        anillo de aim, FPS) se dibujan aunque no haya pawns; las por-pawn
        (head dot, color por distancia, vida baja) se leen aca y se usan abajo. */
-    BOOL conCross   = mm_def_bool(@"mm_x_cross", NO);
-    BOOL conAimRing = mm_def_bool(@"mm_x_aimring", NO);
-    BOOL conFps     = mm_def_bool(@"mm_x_fps", NO);
-    BOOL conHead    = mm_def_bool(@"mm_x_head", NO);
-    BOOL conDistCol = mm_def_bool(@"mm_x_distcol", NO);
-    BOOL conLowHp   = mm_def_bool(@"mm_x_lowhp", NO);
+    BOOL conCross   = o->cross;
+    BOOL conAimRing = o->aimring;
+    BOOL conFps     = o->fps;
+    BOOL conHead    = o->head;
+    BOOL conDistCol = o->distcol;
+    BOOL conLowHp   = o->lowhp;
     CGFloat ar = 0.2, ag = 1.0, ab = 0.58, aalpha = 1.0;
     [mm_neon_green() getRed:&ar green:&ag blue:&ab alpha:&aalpha];
 
     /* v0.4.2: features nuevas de solo-lectura (reusan g_boxes). */
-    BOOL conPriority = mm_def_bool(@"mm_x_priority", NO);
-    BOOL conWarn     = mm_def_bool(@"mm_x_warn", NO);
-    BOOL conArrow    = mm_def_bool(@"mm_x_arrow", NO);
-    int  crossStyle  = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
-    if (crossStyle < 0 || crossStyle > 3) crossStyle = 0;
-    int  maxN        = (int)mm_def_float(@"mm_x_maxn", 0.0f);
-    if (maxN < 0) maxN = 0; if (maxN > MM_MAX_BOXES) maxN = MM_MAX_BOXES;
+    BOOL conPriority = o->priority;
+    BOOL conWarn     = o->warn;
+    BOOL conArrow    = o->arrow;
+    int  crossStyle  = o->crossStyle;
+    int  maxN        = o->maxN;
 
     /* v0.4.4 (Fase 1): overlay de informacion — radar 2D, altura, telemetria.
        Solo lectura; reusan el world-pos que el colector ya calculo. */
-    BOOL conRadar   = mm_def_bool(@"mm_x_radar", NO);
-    BOOL conHeight  = mm_def_bool(@"mm_x_height", NO);
-    BOOL conTelem   = mm_def_bool(@"mm_x_telem", NO);
+    BOOL conRadar   = o->radar;
+    BOOL conHeight  = o->height;
+    BOOL conTelem   = o->telem;
+    /* Fase 1: brujula, estelas y anti-solape (cero lecturas nuevas). */
+    BOOL conBearings = o->bearings;
+    BOOL conTrails   = o->trails;
+    BOOL conDeclutter = o->declutter;
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
@@ -697,6 +1244,8 @@ static void mm_draw_telem(CGRect bs)
     if (conFps)     mm_draw_fps(bs);
     if (conRadar)   mm_draw_radar(ctx, bs, ar, ag, ab);
     if (conTelem)   mm_draw_telem(bs);
+    if (conTrails)  mm_trails_draw(ctx, bs);
+    if (conBearings) mm_draw_bearings(ctx, bs);
 
     /* v0.5.0: aunque no haya cajas (todos los enemigos detras de la camara),
        el lienzo sigue: la flecha "fuera de pantalla" tiene que poder salir. */
@@ -712,10 +1261,31 @@ static void mm_draw_telem(CGRect bs)
         float ds[MM_MAX_BOXES]; int n = 0;
         for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++)
             if (g_boxes[i].alive && g_boxes[i].dist > 0.0f) ds[n++] = g_boxes[i].dist;
-        for (int a2 = 1; a2 < n; a2++) { float k = ds[a2]; int b2 = a2 - 1;
-            while (b2 >= 0 && ds[b2] > k) { ds[b2 + 1] = ds[b2]; b2--; } ds[b2 + 1] = k; }
-        if (maxN - 1 >= 0 && maxN - 1 < n) distThresh = ds[maxN - 1];
+        distThresh = mm_math_closest_threshold(ds, n, maxN);
     }
+
+    /* Fase 1.6: con declutter, las cajas se recorren de mas cerca a mas lejos;
+       las etiquetas cercanas reclaman el espacio y las lejanas se omiten. */
+    int order[MM_MAX_BOXES];
+    int orderN = 0;
+    if (conDeclutter) {
+        for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+            if (!g_boxes[i].alive) continue;
+            if (maxN > 0 && g_boxes[i].dist > distThresh + 0.01f) continue;
+            order[orderN++] = i;
+        }
+        for (int a = 1; a < orderN; a++) {
+            int k = order[a]; float kd = g_boxes[k].dist;
+            int j = a - 1;
+            while (j >= 0 && g_boxes[order[j]].dist > kd) {
+                order[j + 1] = order[j]; j--;
+            }
+            order[j + 1] = k;
+        }
+    }
+    int labelBudget = conDeclutter ? mm_declutter_budget() : 999;
+    CGRect usedLabels[MM_MAX_BOXES * 3];
+    int usedN = 0;
 
     /* v0.3.4: colores y atributos de texto se preparan UNA vez por frame.
        Antes se creaba un NSShadow + dos NSDictionary por cada caja a 30 fps;
@@ -747,7 +1317,9 @@ static void mm_draw_telem(CGRect bs)
             [UIColor colorWithRed:crBot green:cgBot blue:cbBot alpha:0.90],
         NSShadowAttributeName: txtShadow };
 
-    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+    int passes = conDeclutter ? orderN : MIN(g_box_count, MM_MAX_BOXES);
+    for (int oi = 0; oi < passes; oi++) {
+        int i = conDeclutter ? order[oi] : oi;
         MMEspBox *b = &g_boxes[i];
         if (!b->alive) continue;
         if (maxN > 0 && b->dist > distThresh + 0.01f) continue;   /* v0.4.2: closest-N */
@@ -833,15 +1405,27 @@ static void mm_draw_telem(CGRect bs)
             if (mx < 0.0 || mx > bs.size.width || my < 0.0 || my > bs.size.height)
                 mm_draw_edge_arrow(ctx, bs, mx, my, cr, cg, cb);
         }
-        /* v0.4.4 (altura): diferencia de altura vs. el jugador local (+ arriba / - abajo). */
-        if (conHeight && g_have_local) {
+        /* v0.4.4 (altura): diferencia de altura vs. el jugador local (+ arriba / - abajo).
+           Fase 1.6: con declutter, la etiqueta solo se dibuja si no pisa otra. */
+        BOOL allowLabels = (!conDeclutter || labelBudget > 0);
+        BOOL drewLabel = NO;
+        if (conHeight && g_have_local && allowLabels) {
             float dh = b->wy - g_local_pos[1];
             NSString *hhs = [NSString stringWithFormat:@"%@%dm",
                              dh >= 0.0f ? @"▲" : @"▼", (int)(fabsf(dh) + 0.5f)];
             NSDictionary *hha = @{ NSFontAttributeName: fDist,
                 NSForegroundColorAttributeName: [UIColor colorWithRed:cr green:cg blue:cb alpha:0.92],
                 NSShadowAttributeName: txtShadow };
-            [hhs drawAtPoint:CGPointMake(CGRectGetMaxX(r) + 2.0, CGRectGetMidY(r) - 5.0) withAttributes:hha];
+            CGFloat hx = CGRectGetMaxX(r) + 2.0, hy = CGRectGetMidY(r) - 5.0;
+            CGSize hsz = [hhs sizeWithAttributes:hha];
+            CGRect lr = CGRectMake(hx - 1.0, hy - 1.0, hsz.width + 2.0, hsz.height + 2.0);
+            BOOL drawH = !conDeclutter ||
+                mm_label_claim(usedLabels, &usedN,
+                               (int)(sizeof(usedLabels) / sizeof(usedLabels[0])), lr);
+            if (drawH) {
+                [hhs drawAtPoint:CGPointMake(hx, hy) withAttributes:hha];
+                drewLabel = YES;
+            }
         }
 
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
@@ -879,7 +1463,7 @@ static void mm_draw_telem(CGRect bs)
         }
 
         NSDictionary *attr = b->robot ? nameBot : nameJug;
-        if (conNombre) {
+        if (conNombre && allowLabels) {
             NSString *nm = nil;
             if (b->hasName) nm = [NSString stringWithUTF8String:b->name];
             if (nm == nil || nm.length == 0)
@@ -889,9 +1473,16 @@ static void mm_draw_telem(CGRect bs)
             nx = MAX(2.0, MIN(bs.size.width - ns.width - 2.0, nx));
             CGFloat ny = r.origin.y - ns.height - 1.0;
             if (ny < 0.0) ny = 0.0;
-            [nm drawAtPoint:CGPointMake(nx, ny) withAttributes:attr];
+            CGRect lr = CGRectMake(nx - 1.0, ny - 1.0, ns.width + 2.0, ns.height + 2.0);
+            BOOL drawN = !conDeclutter ||
+                mm_label_claim(usedLabels, &usedN,
+                               (int)(sizeof(usedLabels) / sizeof(usedLabels[0])), lr);
+            if (drawN) {
+                [nm drawAtPoint:CGPointMake(nx, ny) withAttributes:attr];
+                drewLabel = YES;
+            }
         }
-        if (conDist && b->dist > 0.5f) {
+        if (conDist && b->dist > 0.5f && allowLabels) {
             NSDictionary *dattr = b->robot ? distBot : distJug;
             NSString *ds = [NSString stringWithFormat:@"%d m",
                             (int)(b->dist + 0.5f)];
@@ -901,8 +1492,16 @@ static void mm_draw_telem(CGRect bs)
             CGFloat dy = CGRectGetMaxY(r) + 2.0;
             if (dy + dsz.height > bs.size.height - 2.0)
                 dy = MAX(0.0, r.origin.y - dsz.height - 1.0);
-            [ds drawAtPoint:CGPointMake(dx, dy) withAttributes:dattr];
+            CGRect lr = CGRectMake(dx - 1.0, dy - 1.0, dsz.width + 2.0, dsz.height + 2.0);
+            BOOL drawD = !conDeclutter ||
+                mm_label_claim(usedLabels, &usedN,
+                               (int)(sizeof(usedLabels) / sizeof(usedLabels[0])), lr);
+            if (drawD) {
+                [ds drawAtPoint:CGPointMake(dx, dy) withAttributes:dattr];
+                drewLabel = YES;
+            }
         }
+        if (conDeclutter && drewLabel) labelBudget--;
     }
 
     /* v0.5.0: flecha a enemigos SIN caja en pantalla — detras de la camara o
@@ -975,7 +1574,7 @@ static void mm_draw_telem(CGRect bs)
         if (u == nil) return;
         [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
     } @catch (NSException *e) {
-        NSLog(@"%s telegram: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s telegram: %@", MM_TAG, e.reason);
     }
 }
 
@@ -999,7 +1598,7 @@ static void mm_draw_telem(CGRect bs)
             if (g_panel_open) mm_position_panel();
         }
     } @catch (NSException *e) {
-        NSLog(@"%s onPan: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s onPan: %@", MM_TAG, e.reason);
     }
 }
 
@@ -1032,7 +1631,7 @@ static void mm_draw_telem(CGRect bs)
             mm_write_status(@"panel movido");
         }
     } @catch (NSException *e) {
-        NSLog(@"%s onPanelPan: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s onPanelPan: %@", MM_TAG, e.reason);
     }
 }
 
@@ -1051,6 +1650,7 @@ static void mm_draw_telem(CGRect bs)
     NSString *k = s.accessibilityIdentifier;
     if (k.length == 0) return;
     [[NSUserDefaults standardUserDefaults] setBool:s.on forKey:k];
+    mm_opts_invalidate();
     if ([k isEqualToString:@"mm_esp_master"]) mm_apply_esp_lock();
     if ([k isEqualToString:@"mm_esp_count"]) mm_refresh_count_glass();
     if ([k isEqualToString:@"mm_stream"]) {
@@ -1066,6 +1666,7 @@ static void mm_draw_telem(CGRect bs)
 - (void)onSlider:(UISlider *)s
 {
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:s.accessibilityIdentifier];
+    mm_opts_invalidate();
     if (g_range_val != nil)
         g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(s.value + 0.5f)];
     mm_write_status(@"ajuste");
@@ -1077,6 +1678,7 @@ static void mm_draw_telem(CGRect bs)
 {
     NSInteger v = (s.selectedSegmentIndex == 1) ? 1 : 0;
     [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"mm_esp_box_style"];
+    mm_opts_invalidate();
     mm_write_status(@"estilo caja");
 }
 
@@ -1085,6 +1687,7 @@ static void mm_draw_telem(CGRect bs)
     NSInteger v = s.selectedSegmentIndex;
     if (v < 0 || v > 2) v = 0;
     [[NSUserDefaults standardUserDefaults] setInteger:v forKey:@"mm_esp_theme"];
+    mm_opts_invalidate();
     mm_write_status(@"tema esp");
 }
 
@@ -1121,12 +1724,14 @@ static void mm_draw_telem(CGRect bs)
 {
     [[NSUserDefaults standardUserDefaults] setFloat:(float)s.selectedSegmentIndex
                                              forKey:@"mm_x_cross_style"];
+    mm_opts_invalidate();
     mm_write_status(@"crosshair style");
 }
 - (void)onMaxN:(UISlider *)s
 {
     [[NSUserDefaults standardUserDefaults] setFloat:(float)(int)(s.value + 0.5f)
                                              forKey:@"mm_x_maxn"];
+    mm_opts_invalidate();
 }
 
 /* v0.4.0 #8: kill-switch. Long-press en el boton -> oculta TODO al instante;
@@ -1307,11 +1912,14 @@ static void mm_reset_options(void)
                            @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp",
                            @"mm_x_priority", @"mm_x_warn",
                            @"mm_x_arrow", @"mm_x_cross_style", @"mm_x_maxn",
-                           @"mm_x_radar", @"mm_x_height", @"mm_x_telem" ];
+                           @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
+                           @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
+                           @"mm_x_radar_cam" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
+        mm_opts_invalidate();
     } @catch (NSException *e) {
-        NSLog(@"[MODMENU] reset de opciones: %@", e.reason);
+        MM_LOG(@"[MODMENU] reset de opciones: %@", e.reason);
     }
 }
 
@@ -1329,7 +1937,9 @@ static NSArray *mm_profile_keys(void)
               @"mm_menu_opacity", @"mm_menu_scale",
               @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
               @"mm_x_cross_style", @"mm_x_maxn",
-              @"mm_x_radar", @"mm_x_height", @"mm_x_telem" ];   /* 0.4.4: Fase 1 (0.5.0: sin hpnum/vis) */
+              @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
+              @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
+              @"mm_x_radar_cam" ];   /* 0.4.4: Fase 1 (0.5.0: sin hpnum/vis) */
 }
 
 static void mm_profile_save(int slot)
@@ -1344,7 +1954,7 @@ static void mm_profile_save(int slot)
         [ud setObject:d forKey:[NSString stringWithFormat:@"mm_profile_%d", slot]];
         [ud synchronize];
     } @catch (NSException *e) {
-        NSLog(@"%s perfil guardar: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s perfil guardar: %@", MM_TAG, e.reason);
     }
 }
 
@@ -1373,11 +1983,12 @@ static BOOL mm_profile_load(int slot)
             if (v != nil) [ud setObject:v forKey:k];
         }
         [ud synchronize];
+        mm_opts_invalidate();
         if (g_panel != nil) mm_sync_switches(g_panel);
         if (g_esp != nil) [g_esp setNeedsDisplay];
         return YES;
     } @catch (NSException *e) {
-        NSLog(@"%s perfil cargar: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s perfil cargar: %@", MM_TAG, e.reason);
         return NO;
     }
 }
@@ -1397,7 +2008,7 @@ static void mm_esp_frame(double t)
         if (g_ver_ok < 0) {
             NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
             g_ver_ok = (gv != nil && [gv isEqualToString:@FUSION_OFFSETS_VERSION]) ? 1 : 0;
-            if (!g_ver_ok) NSLog(@"%s version gate: juego %@ != offsets %s -> ESP OFF",
+            if (!g_ver_ok) MM_LOG(@"%s version gate: juego %@ != offsets %s -> ESP OFF",
                                  MM_TAG, gv, FUSION_OFFSETS_VERSION);
         }
         if (!g_ver_ok) { if (!g_esp.hidden) g_esp.hidden = YES; return; }
@@ -1439,12 +2050,14 @@ static void mm_esp_frame(double t)
  *  que sus punteros caen en su binario. NO llama a nada del juego: solo lee.
  *  La lectura va con vm_read_overwrite: si la direccion no es valida devuelve
  *  error en vez de tumbar la app (sin eso la sonda seria un riesgo).
- *  Direccion de la tabla (en archivo): VA 0x10C33BFA8, base imagen 0x100000000.
+ *  Direccion de la tabla (en archivo): VA_PROBE_TABLE, definida en
+ *  corpus/1.0.57/offsets.json y emitida al header generado.
  *--------------------------------------------------------------------------*/
 static uint64_t mm_safe_read64(uintptr_t addr, BOOL *ok)
 {
     uint64_t v = 0;
     vm_size_t outsz = 0;
+    g_vm_reads++;   /* Fase 1.7: lectura/s en el HUD de telemetria */
     kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr,
                                          (vm_size_t)sizeof(v),
                                          (vm_address_t)&v, &outsz);
@@ -1459,26 +2072,20 @@ static void mm_probe_run(void)
         if (hdr == NULL) { g_probe = @"sin imagen principal"; g_probe_ok = 0; return; }
 
         uintptr_t base = (uintptr_t)hdr;
-        uintptr_t tbl  = base + (uintptr_t)(0x10C33BFA8ULL - 0x100000000ULL);
+        /* 0.5: la tabla y los slots salen de fusion_offsets.generated.h,
+           generado desde corpus/1.0.57/offsets.json. No se hardcodea aca. */
+        uintptr_t tbl  = base + (uintptr_t)(VA_PROBE_TABLE - FUSION_IMAGE_BASE);
         NSMutableString *s = [NSMutableString stringWithFormat:
             @"base=0x%lX tabla=0x%lX",
             (unsigned long)base, (unsigned long)tbl];
 
-        static const struct { int pos; const char *que; } slots[] = {
-            {      0, "slot0"          },
-            {  11130, "fieldOfView"    },
-            {  11250, "WorldToScreen"  },
-            {  47790, "get_LocalPawn"  },
-            {  54477, "get_Health"     },
-            { 142662, "WorldToScreen2" },
-            { 236771, "aim(parche)"    },
-            {     -1, NULL             },
-        };
+        static const struct { int pos; const char *que; } slots[] = MM_PROBE_SLOTS;
 
         int enCod = 0, malos = 0;
-        for (int i = 0; slots[i].pos >= 0; i++) {
+        const int nslots = (int)(sizeof(slots) / sizeof(slots[0]));
+        for (int i = 0; i < nslots; i++) {
             BOOL ok = NO;
-            uint64_t v = mm_safe_read64(tbl + (uintptr_t)slots[i].pos * 8, &ok);
+            uint64_t v = mm_safe_read64(tbl + (uintptr_t)slots[i].pos * MM_PROBE_SLOT_SIZE, &ok);
             if (!ok) { [s appendFormat:@" | %s=ilegible", slots[i].que]; malos++; continue; }
             uint64_t vv = v & 0x0000FFFFFFFFFFFFULL;   /* quita PAC si lo hay */
             const char *img = "?";
@@ -1494,10 +2101,166 @@ static void mm_probe_run(void)
         }
         g_probe = s;
         g_probe_ok = (malos == 0 && enCod > 0) ? 1 : 0;
-        NSLog(@"%s sonda: %@", MM_TAG, s);
+        MM_LOG(@"%s sonda: %@", MM_TAG, s);
     } @catch (NSException *e) {
         g_probe = [NSString stringWithFormat:@"excepcion: %@", e.reason];
         g_probe_ok = 0;
+    }
+}
+
+/* ---------------- BR probe (v0.6.0): decodifica el prologo ARM64 ----------------
+   Lee los primeros 16 instrucciones de cada set_RadiationZone* desde la imagen del
+   juego y extrae el offset del campo dentro del BRRadiationZoneMgr (y la direccion
+   estatica para set_RadiationZoneMgr). Cero llamadas al juego: solo lee bytes del
+   segmento __text, mismo tipo de operacion que la sonda de 0.5.
+
+   Patrones ARM64 reconocidos:
+     STR Wt, [X0, #imm*4]   -> 0xB9000000 base   (int32)
+     STR Xt, [X0, #imm*8]   -> 0xF9000000 base   (int64 / ptr)
+     STR St, [X0, #imm*4]   -> 0xBD000000 base   (float32)
+     STR Dt, [X0, #imm*8]   -> 0xFD000000 base   (float64)
+     ADRP Xd + STR Xt, [Xd, #lo12]              (store a direccion estatica)
+   Si no encuentra ninguno en 16 instrucciones, reporta "?". Si el setter copia un
+   struct, registra hasta 6 stores consecutivos (set_RadiationZoneShape).
+
+   El resultado va a g_br_probe y de ahi a modmenu_status.txt (solo con mm_debug ON).
+--------------------------------------------------------------------------------*/
+
+typedef struct {
+    uint32_t off;                  /* offset dentro de [x0] */
+    uint32_t size;                 /* 1,2,4,8 */
+    char     kind;                 /* 'w','x','s','d' */
+    char     src;                  /* 'i' = instance ([x0]), 's' = static */
+    uint64_t static_addr_rt;       /* direccion runtime del static (si src=='s') */
+    uint32_t extra_off[6];
+    uint8_t  extra_sz[6];
+    char     extra_kind[6];
+    int      extra_n;
+    int      found;
+} mm_br_decode_t;
+
+static int mm_br_match_str_x0(uint32_t ins, mm_br_decode_t *d, int is_extra)
+{
+    uint32_t Rn = (ins >> 5) & 0x1F;
+    uint32_t Rt = ins & 0x1F;
+    uint32_t imm12 = (ins >> 10) & 0xFFF;
+    if (Rn != 0) return 0;
+    if (!is_extra && Rt != 1) return 0;    /* el primer store es siempre w1/x1/s1/d1 (arg1 del setter) */
+    uint32_t base = ins & 0xFFC00000;
+    uint32_t off, sz; char kind;
+    if      (base == 0xB9000000) { off = imm12 * 4; sz = 4; kind = 'w'; }
+    else if (base == 0xF9000000) { off = imm12 * 8; sz = 8; kind = 'x'; }
+    else if (base == 0xBD000000) { off = imm12 * 4; sz = 4; kind = 's'; }
+    else if (base == 0xFD000000) { off = imm12 * 8; sz = 8; kind = 'd'; }
+    else return 0;
+    if (!is_extra) {
+        d->off = off; d->size = sz; d->kind = kind; d->src = 'i';
+    } else {
+        int i = d->extra_n;
+        if (i < 6) { d->extra_off[i] = off; d->extra_sz[i] = sz; d->extra_kind[i] = kind; d->extra_n++; }
+    }
+    return 1;
+}
+
+static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
+    for (int i = 0; i < 16; i++) {
+        uint32_t w = ins[i];
+        /* RET temprano: fin del cuerpo */
+        if (w == 0xD65F03C0) break;
+
+        /* ADRP + STR a direccion estatica */
+        if ((w & 0x9F000000) == 0x90000000) {
+            uint32_t Rd = w & 0x1F;
+            int64_t immlo = (w >> 29) & 3;
+            int64_t immhi = (w >> 5) & 0x7FFFF;
+            int64_t imm = (immhi << 2) | immlo;
+            if (imm & (1LL << 20)) imm |= ~((1LL << 21) - 1);
+            imm <<= 12;
+            uint64_t pc = va_rt + (uint64_t)i * 4;
+            uint64_t target_page = (pc & ~0xFFFULL) + (uint64_t)imm;
+            for (int j = i + 1; j < i + 6 && j < 16; j++) {
+                uint32_t w2 = ins[j];
+                if ((w2 & 0xFFC00000) == 0xF9000000) {
+                    uint32_t Rn2 = (w2 >> 5) & 0x1F;
+                    uint32_t Rt2 = w2 & 0x1F;
+                    uint32_t imm12 = (w2 >> 10) & 0xFFF;
+                    if (Rn2 == Rd && Rt2 == 1) {
+                        d->size = 8; d->kind = 'x'; d->src = 's';
+                        d->static_addr_rt = target_page + (uint64_t)imm12 * 8;
+                        d->found = 1;
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        /* STR primario */
+        if (!d->found && mm_br_match_str_x0(w, d, 0)) {
+            d->found = 1;
+            /* buscar hasta 6 stores adicionales (struct arg) */
+            for (int j = i + 1; j < 16; j++) {
+                uint32_t w2 = ins[j];
+                if (w2 == 0xD65F03C0) break;
+                mm_br_match_str_x0(w2, d, 1);
+                if (d->extra_n >= 6) break;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void mm_br_probe_run(void)
+{
+    @try {
+        const struct mach_header *hdr = _dyld_get_image_header(0);
+        if (hdr == NULL) { g_br_probe = @"sin imagen principal"; return; }
+        uintptr_t base = (uintptr_t)hdr;
+
+        struct { const char *name; uint64_t va; } setters[] = {
+            { "set_Mgr",       0x107528BB8ULL },
+            { "set_BRMgr",     0x10747071CULL },
+            { "set_Shape",     0x1079D91DCULL },
+            { "set_Radius",    0x1079DB518ULL },
+            { "set_NextBegin", 0x1079DB584ULL },
+            { "set_SpreadEnd", 0x1079DB59CULL },
+            { "set_TotalSpr",  0x1079DC8B0ULL },
+            { "AddZone",       0x107A0B6ECULL },
+            /* IsInBRGame es getter (ldr, no str): no se decodifica, se llama por VA. */
+        };
+        int N = (int)(sizeof(setters) / sizeof(setters[0]));
+
+        NSMutableString *s = [NSMutableString stringWithFormat:@"base=0x%lX", (unsigned long)base];
+        for (int i = 0; i < N; i++) {
+            uint64_t rt = base + (uintptr_t)(setters[i].va - FUSION_IMAGE_BASE);
+            mm_br_decode_t d;
+            if (!mm_br_decode_setter(rt, &d) || !d.found) {
+                [s appendFormat:@" | %s=? va=0x%llX",
+                     setters[i].name, (unsigned long long)setters[i].va];
+                continue;
+            }
+            if (d.src == 's') {
+                uint64_t static_va = (uint64_t)FUSION_IMAGE_BASE + (d.static_addr_rt - (uint64_t)base);
+                [s appendFormat:@" | %s=STATIC va=0x%llX static_va=0x%llX",
+                     setters[i].name,
+                     (unsigned long long)setters[i].va,
+                     (unsigned long long)static_va];
+            } else {
+                [s appendFormat:@" | %s=off=0x%X sz=%u kind=%c",
+                     setters[i].name, d.off, d.size, d.kind];
+                for (int k = 0; k < d.extra_n; k++) {
+                    [s appendFormat:@",+0x%X(%u,%c)",
+                         d.extra_off[k], d.extra_sz[k], d.extra_kind[k]];
+                }
+            }
+        }
+        g_br_probe = s;
+        MM_LOG(@"%s br_probe: %@", MM_TAG, s);
+    } @catch (NSException *e) {
+        g_br_probe = [NSString stringWithFormat:@"excepcion: %@", e.reason];
     }
 }
 
@@ -1680,14 +2443,14 @@ static int mm_nojb_try_swizzles(void)
                                  : class_getInstanceMethod([NSObject class], sel);
         if (base == m) {
             g_nojb_state[i] = -1;
-            NSLog(@"%s nojb: %s%s %s es heredado de NSObject, se salta",
+            MM_LOG(@"%s nojb: %s%s %s es heredado de NSObject, se salta",
                   MM_TAG, h->isClass ? "+" : "-", h->cls, h->sel);
             continue;
         }
         IMP prev = method_setImplementation(m, h->rep);
         g_nojb_state[i] = 1;
         done++;
-        NSLog(@"%s nojb: swz %s%s %s (antes=%p) -> 0",
+        MM_LOG(@"%s nojb: swz %s%s %s (antes=%p) -> 0",
               MM_TAG, h->isClass ? "+" : "-", h->cls, h->sel, (void *)prev);
     }
     return done;
@@ -1713,7 +2476,7 @@ static void mm_nojb_try_anogs(void)
         }
         if (cur != s->expect) {
             g_nojb_anogs[i] = -1;              /* no es el anogs de 1.0.57 */
-            NSLog(@"%s nojb: %s NO coincide (esperado 0x%llX, leido 0x%llX); no se escribe",
+            MM_LOG(@"%s nojb: %s NO coincide (esperado 0x%llX, leido 0x%llX); no se escribe",
                   MM_TAG, s->name, (unsigned long long)s->expect,
                   (unsigned long long)cur);
             continue;
@@ -1721,10 +2484,10 @@ static void mm_nojb_try_anogs(void)
         int r = mm_mem_write(a, s->patch, len);
         if (r == 1) {
             g_nojb_anogs[i] = 1;
-            NSLog(@"%s nojb: %s armado en 0x%X (%zu B)", MM_TAG, s->name, s->off, len);
+            MM_LOG(@"%s nojb: %s armado en 0x%X (%zu B)", MM_TAG, s->name, s->off, len);
         } else if (g_nojb_anogs_log[i] == 0) {
             g_nojb_anogs_log[i] = 1;
-            NSLog(@"%s nojb: %s fallo al escribir (r=%d); se reintenta",
+            MM_LOG(@"%s nojb: %s fallo al escribir (r=%d); se reintenta",
                   MM_TAG, s->name, r);
         }
     }
@@ -1769,7 +2532,7 @@ static void mm_nojb_step(void)
         if (g_nojb_anogs_enabled)
             todo = todo && (g_nojb_anogs[0] != 0) && (g_nojb_anogs[1] != 0);
         if (todo || g_nojb_passes >= 90) {
-            NSLog(@"%s nojb fin: %@ (pasadas=%d)", MM_TAG, mm_nojb_resumen(), g_nojb_passes);
+            MM_LOG(@"%s nojb fin: %@ (pasadas=%d)", MM_TAG, mm_nojb_resumen(), g_nojb_passes);
             return;
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
@@ -1783,7 +2546,7 @@ static void mm_nojb_start(void)
 {
     if (g_nojb_started) return;
     g_nojb_started = YES;
-    NSLog(@"%s nojb: inicio (fase C v0.2.9, anogs OFF)", MM_TAG);
+    MM_LOG(@"%s nojb: inicio (fase C v0.2.9, anogs OFF)", MM_TAG);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                        mm_nojb_step();
@@ -1849,6 +2612,7 @@ static int        g_esp_players  = 0;   /* ultima cuenta de la lista      */
 static BOOL mm_vm_read(uintptr_t addr, void *dst, size_t n)
 {
     vm_size_t outsz = 0;
+    g_vm_reads++;   /* Fase 1.7: lectura/s en el HUD de telemetria */
     kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr,
                                          (vm_size_t)n, (vm_address_t)dst, &outsz);
     return (kr == KERN_SUCCESS && outsz == (vm_size_t)n);
@@ -1933,7 +2697,7 @@ static void mm_game_resolve(void)
             g_fp_health    = hpOk ? fp6 : NULL;
             g_fp_health_f  = hpOk ? (MMGetFltFn)fp6 : NULL;   /* v0.2.6 */
             g_fp_state     = 1;
-            NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
+            MM_LOG(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
                   (void *)g_fp_maincam,
                   (void *)g_fp_gameplay,
@@ -1946,7 +2710,7 @@ static void mm_game_resolve(void)
         }
 
         g_esp_diag = @"punteros fuera de la imagen del juego";
-        NSLog(@"%s ESP: no pude validar los punteros del juego (imagenes=%d)", MM_TAG, (int)nimg);
+        MM_LOG(@"%s ESP: no pude validar los punteros del juego (imagenes=%d)", MM_TAG, (int)nimg);
     } @catch (NSException *e) {
         g_fp_state = 0;
         g_esp_diag = [NSString stringWithFormat:@"resolver: %@", e.reason];
@@ -1970,30 +2734,12 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo)
 {
-    float x = p[0], y = p[1], z = p[2];
-    float vx = view[0] * x + view[4] * y + view[8]  * z + view[12];
-    float vy = view[1] * x + view[5] * y + view[9]  * z + view[13];
-    float vz = view[2] * x + view[6] * y + view[10] * z + view[14];
-    float vw = view[3] * x + view[7] * y + view[11] * z + view[15];
-
-    /* v0.5.0: direccion en espacio de camara (costo cero) para la flecha. */
-    if (vxo != NULL) *vxo = vx;
-    if (vyo != NULL) *vyo = vy;
-
-    float cx = proj[0] * vx + proj[4] * vy + proj[8]  * vz + proj[12] * vw;
-    float cy = proj[1] * vx + proj[5] * vy + proj[9]  * vz + proj[13] * vw;
-    float cz = proj[2] * vx + proj[6] * vy + proj[10] * vz + proj[14] * vw;
-    float cw = proj[3] * vx + proj[7] * vy + proj[11] * vz + proj[15] * vw;
-
-    if (!(cz >= 0.01f)) { if (detras != NULL) *detras = 1; return NO; }
-    if (cabeza) cy += 0.5f;
-
-    float nx = 0.0f, ny = 0.0f;
-    if (cw >= 0.001f || cw <= -0.001f) { nx = cx / cw; ny = cy / cw; }
-    if (!isfinite(nx) || !isfinite(ny)) return NO;
-
-    out->x = (CGFloat)(nx + (float)W / 2.0f + nx * ((float)W / 2.0f));
-    out->y = (CGFloat)(ny + (float)H / 2.0f - ny * ((float)H / 2.0f));
+    /* 0.13: la formula vive en mm_math.h y se testea en C nativo. */
+    float x = 0.0f, y = 0.0f;
+    if (!mm_math_w2s(view, proj, p, cabeza ? 1 : 0, (float)W, (float)H,
+                     &x, &y, detras, vxo, vyo))
+        return NO;
+    if (out != NULL) { out->x = (CGFloat)x; out->y = (CGFloat)y; }
     return YES;
 }
 
@@ -2032,6 +2778,14 @@ static void mm_esp_collect_real(void)
     g_fp_w2c(cam, view);
     g_fp_proj(cam, proj);
     memcpy(g_view_mtx, view, sizeof(g_view_mtx)); g_have_view = 1;   /* v0.4.4: radar */
+    memcpy(g_proj_mtx, proj, sizeof(g_proj_mtx)); g_have_proj = 1;   /* Fase 1.5: estelas */
+    {
+        float ps = fabsf(proj[5]);   /* escala vertical de la proyeccion */
+        if (isfinite(ps) && ps > 0.05f) {
+            float fv = 2.0f * atanf(1.0f / ps) * 180.0f / (float)M_PI;
+            g_fov_deg = (fv >= 20.0f && fv <= 140.0f) ? fv : 60.0f;
+        }
+    }
 
     /* gameplay + lista de jugadores */
     void *gp = g_fp_gameplay();
@@ -2069,10 +2823,11 @@ static void mm_esp_collect_real(void)
     memcpy(g_local_pos, lpos, sizeof(g_local_pos));   /* v0.4.4: radar/altura */
     g_have_local = haveLocal ? 1 : 0;
 
-    float rango = mm_def_float(@"mm_esp_range", 300.0f);
-    BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
-    BOOL conJug    = mm_def_bool(@"mm_esp_players", NO);  /* v0.2.7: a fabrica */
-    BOOL conBots   = mm_def_bool(@"mm_esp_bots", NO);     /* v0.2.7: a fabrica */
+    const MMDrawOpts *opts = mm_draw_opts();
+    float rango = opts->range;
+    BOOL conSalud  = opts->health;   /* v0.2.4 */
+    BOOL conJug    = opts->players;  /* v0.2.7: a fabrica */
+    BOOL conBots   = opts->bots;     /* v0.2.7: a fabrica */
     int drawn = 0;
     MMEspBox nuevos[MM_MAX_BOXES];
     memset(nuevos, 0, sizeof(nuevos));
@@ -2087,12 +2842,25 @@ static void mm_esp_collect_real(void)
             continue;
         if (localPawn != NULL && (void *)(uintptr_t)pawn == localPawn) continue;
 
-        uint64_t a = 0;
-        if (!mm_r64((uintptr_t)pawn + OFF_PAWN_ALIVE, &a) || (a & 0xFF) == 0) continue;
+        uint64_t a = 0, ent = 0, tr = 0;
+        /* 0.7: batch de vm_read. Los campos alive/transform/entity del pawn
+           caen en una ventana contigua (0x300..0x5C8); con el objeto vivo el
+           rango esta mapeado. Si la lectura del bloque falla, se vuelve a las
+           lecturas individuales de siempre. */
+        uint8_t pawnBlock[MM_PAWN_BLOCK_SIZE];
+        if (mm_vm_read((uintptr_t)pawn + MM_PAWN_BLOCK_BASE, pawnBlock, sizeof(pawnBlock))) {
+            memcpy(&a,   pawnBlock + (OFF_PAWN_ALIVE     - MM_PAWN_BLOCK_BASE), sizeof(a));
+            memcpy(&ent, pawnBlock + (OFF_PAWN_ENTITY    - MM_PAWN_BLOCK_BASE), sizeof(ent));
+            memcpy(&tr,  pawnBlock + (OFF_PAWN_TRANSFORM - MM_PAWN_BLOCK_BASE), sizeof(tr));
+        } else {
+            if (!mm_r64((uintptr_t)pawn + OFF_PAWN_ALIVE, &a)) continue;
+            mm_r64((uintptr_t)pawn + OFF_PAWN_ENTITY, &ent);
+            mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &tr);
+        }
+        if ((a & 0xFF) == 0) continue;
 
         int robot = 0;
-        uint64_t ent = 0;
-        if (mm_r64((uintptr_t)pawn + OFF_PAWN_ENTITY, &ent) && ent != 0) {
+        if (ent != 0) {
             uint64_t rb = 0;
             if (mm_r64((uintptr_t)ent + OFF_ENT_ROBOT, &rb)) robot = (int)(rb & 0xFF);
         }
@@ -2101,8 +2869,8 @@ static void mm_esp_collect_real(void)
         if (robot && !conBots) continue;
         if (!robot && !conJug) continue;
 
-        uint64_t tr = 0, tchk = 0;
-        if (!mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &tr) || tr == 0) continue;
+        uint64_t tchk = 0;
+        if (tr == 0) continue;
         if (!mm_r64((uintptr_t)tr, &tchk)) continue;
 
         float wp[3] = { 0.0f, 0.0f, 0.0f };
@@ -2113,8 +2881,7 @@ static void mm_esp_collect_real(void)
 
         float dist = 0.0f;
         if (haveLocal) {
-            float dx = wp[0] - lpos[0], dy = wp[1] - lpos[1], dz = wp[2] - lpos[2];
-            dist = sqrtf(dx * dx + dy * dy + dz * dz);
+            dist = mm_math_dist3(wp, lpos);
             if (dist > rango) continue;
         }
 
@@ -2158,8 +2925,12 @@ static void mm_esp_collect_real(void)
             }
             continue;
         }
-        if (cab.x  < -W || cab.x  > 2.0 * W || cab.y  < -H || cab.y  > 2.0 * H ||
-            pies.x < -W || pies.x > 2.0 * W || pies.y < -H || pies.y > 2.0 * H) {
+        /* 0.13: geometria de la caja en mm_math.h (testeada en C nativo).
+           1 = dibujable; 0 = fuera de cuadro (queda apuntable); -1 = alto invalido. */
+        float bcx = 0.0f, bh = 0.0f;
+        int bstate = mm_math_box((float)cab.x, (float)cab.y, (float)pies.x, (float)pies.y,
+                                 (float)W, (float)H, &bcx, &bh);
+        if (bstate == 0) {
             /* v0.5.0: muy fuera del cuadro: sin caja, pero la flecha puede
                apuntarlo (misma idea que el viejo "fuera de pantalla"). */
             if (tslot >= 0) {
@@ -2169,12 +2940,10 @@ static void mm_esp_collect_real(void)
             }
             continue;
         }
+        if (bstate < 0) continue;   /* v0.2.4: 4 px dejaba fuera a los lejanos */
 
-        CGFloat bh = pies.y - cab.y;
-        /* v0.2.4: antes 4 px dejaba fuera a los lejanos (cajas pequenas) */
-        if (bh < 3.0 || bh > 2.0 * H) continue;
-        CGFloat bw = bh * 0.45;
-        CGFloat cx = (cab.x + pies.x) * 0.5;
+        CGFloat bw = (CGFloat)bh * 0.45;
+        CGFloat cx = (CGFloat)bcx;
 
         /* --- v0.2.6: salud (solo con el toggle ON; misma llamada que GL,
            despues de todas las guardas: pawn mapeado y vivo). El getter del
@@ -2296,6 +3065,8 @@ static void mm_esp_collect_real(void)
 
     memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
+    if (opts->trails) mm_trails_update(g_boxes, g_box_count);
+    else              mm_trails_clear();
     g_collect_ms = (CACurrentMediaTime() - _col_t0) * 1000.0;   /* v0.4.4: telemetria */
     g_esp_diag = [NSString stringWithFormat:
                   @"cam=ok lista=%d cajas=%d trk=%d jug=%d bot=%d hp=%s%@",
@@ -2330,7 +3101,7 @@ static void mm_show_alert(NSString *titulo, NSString *msg)
     @try {
         UIViewController *vc = mm_top_vc();
         if (vc == nil) {
-            NSLog(@"%s alerta sin VC: %@ / %@", MM_TAG, titulo, msg);
+            MM_LOG(@"%s alerta sin VC: %@ / %@", MM_TAG, titulo, msg);
             return;
         }
         UIAlertController *a = [UIAlertController alertControllerWithTitle:titulo
@@ -2341,7 +3112,7 @@ static void mm_show_alert(NSString *titulo, NSString *msg)
                                             handler:nil]];
         [vc presentViewController:a animated:YES completion:nil];
     } @catch (NSException *e) {
-        NSLog(@"%s alerta: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s alerta: %@", MM_TAG, e.reason);
     }
 }
 
@@ -2359,13 +3130,13 @@ static void mm_guest_wipe(void)
     for (NSString *p in paths) {
         NSError *err = nil;
         BOOL ok = [fm removeItemAtPath:p error:&err];
-        NSLog(@"%s guest: %@ (%@)", MM_TAG, p,
+        MM_LOG(@"%s guest: %@ (%@)", MM_TAG, p,
               ok ? @"borrado" : (err.localizedDescription ?: @"no existia"));
     }
 
     NSDictionary *q = @{ (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword };
     OSStatus st = SecItemDelete((__bridge CFDictionaryRef)q);
-    NSLog(@"%s guest: keychain generic=%d", MM_TAG, (int)st);
+    MM_LOG(@"%s guest: keychain generic=%d", MM_TAG, (int)st);
 }
 
 static void mm_guest_countdown(UIAlertController *a, int sec)
@@ -2375,7 +3146,7 @@ static void mm_guest_countdown(UIAlertController *a, int sec)
                      @"El juego se cerrará en %d segundos.", sec];
     }
     if (sec <= 0) {
-        NSLog(@"%s guest: _exit(0)", MM_TAG);
+        MM_LOG(@"%s guest: _exit(0)", MM_TAG);
         _exit(0);
         return;
     }
@@ -2435,7 +3206,7 @@ static void mm_guest_reset_prompt(void)
         }]];
         [vc presentViewController:a animated:YES completion:nil];
     } @catch (NSException *e) {
-        NSLog(@"%s guest reset: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s guest reset: %@", MM_TAG, e.reason);
     }
 }
 
@@ -2464,8 +3235,10 @@ static void mm_write_status(NSString *nota)
             @"boton=%s panel=%s via=%s\n"
             @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d arriba=%d rango=%d contador=%d estilo=%d tema=%d\n"
             @"stream=%d\n"
+            @"overlay=brujula=%d estelas=%d declutter=%d radar_cam=%d lect_s=%.0f mem_mb=%.0f fov=%.0f\n"
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
+            @"br_probe=%s\n"
             @"esp_real=%@ lista=%d dibujados=%d jug=%d bot=%d\n"
             @"nojb=%@\n"
             @"nota=%@\n",
@@ -2486,10 +3259,16 @@ static void mm_write_status(NSString *nota)
             (int)mm_def_float(@"mm_esp_box_style", 0.0f),
             (int)mm_def_float(@"mm_esp_theme", 0.0f),
             (int)mm_def_bool(@"mm_stream", NO),
+            (int)mm_def_bool(@"mm_x_bearings", NO),
+            (int)mm_def_bool(@"mm_x_trails", NO),
+            (int)mm_def_bool(@"mm_x_declutter", NO),
+            (int)mm_def_bool(@"mm_x_radar_cam", YES),
+            g_reads_per_s, g_mem_mb, g_fov_deg,
             (g_esp != nil && g_esp.superview != nil && !g_esp.hidden) ? "on" : "off",
             g_box_count,
             (g_link != nil && !g_link.paused) ? "activo" : "parado",
             g_probe != nil ? g_probe.UTF8String : "pendiente",
+            g_br_probe != nil ? g_br_probe.UTF8String : "pendiente",
             (g_esp_diag != nil) ? g_esp_diag : @"-",
             g_esp_players, g_box_count, g_count_players, g_count_bots,
             mm_nojb_resumen(),
@@ -2500,7 +3279,7 @@ static void mm_write_status(NSString *nota)
                  encoding:NSUTF8StringEncoding
                     error:NULL];
     } @catch (NSException *e) {
-        NSLog(@"%s no pude escribir el archivo de estado: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s no pude escribir el archivo de estado: %@", MM_TAG, e.reason);
     }
 }
 
@@ -3416,14 +4195,19 @@ static void mm_build_ui(void)
     NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
                         @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps",
                         @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
-                        @"mm_x_radar", @"mm_x_height", @"mm_x_telem" ];
+                        @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
+                        @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
+                        @"mm_x_radar_cam" ];
     NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
                         @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS",
                         @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
                         @"Flecha fuera de pantalla (detras)",
-                        @"Radar 2D", @"Indicador de altura", @"Telemetria" ];
+                        @"Radar 2D", @"Indicador de altura", @"Telemetria",
+                        @"Brujula de bearings", @"Estelas (ultimos 2 s)",
+                        @"Anti-solape de etiquetas", @"Radar: arriba = mi vista" ];
     for (NSUInteger i = 0; i < xkeys.count; i++) {
-        UIView *xrow = mm_switch_row(xtit[i], xkeys[i], NO);
+        BOOL xdef = [xkeys[i] isEqualToString:@"mm_x_radar_cam"];   /* default ON */
+        UIView *xrow = mm_switch_row(xtit[i], xkeys[i], xdef);
         xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
         [g_p_more addSubview:xrow];
     }
@@ -3519,7 +4303,8 @@ static void mm_build_ui(void)
     t2.font = [UIFont boldSystemFontOfSize:10.0];
     [g_p_more addSubview:t2]; ry += 20.0;
     NSArray *t2tit = @[ @"ESP de esqueleto",
-                        @"ESP de granadas", @"ESP de loot / vehiculos" ];
+                        @"ESP de granadas", @"ESP de loot / vehiculos",
+                        @"Prediccion de proxima zona (BR)" ];
     for (NSUInteger i = 0; i < t2tit.count; i++) {
         UISwitch *t2sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
         t2sw.on = NO; t2sw.enabled = NO;    /* gated */
@@ -3700,7 +4485,7 @@ static void mm_set_panel(BOOL open)
         }
         mm_refresh_info();
     } @catch (NSException *e) {
-        NSLog(@"%s set_panel: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s set_panel: %@", MM_TAG, e.reason);
     }
 }
 
@@ -3782,7 +4567,7 @@ static BOOL mm_place_ui(void)
             [host addSubview:g_root];
             recolocar = YES;
             g_via = "ventana_del_juego";
-            NSLog(@"%s UI enganchada a la ventana del juego (nivel=%.0f clase=%@)",
+            MM_LOG(@"%s UI enganchada a la ventana del juego (nivel=%.0f clase=%@)",
                   MM_TAG, host.windowLevel, NSStringFromClass(host.class));
         }
         if (host.subviews.lastObject != g_root) [host bringSubviewToFront:g_root];
@@ -3861,7 +4646,7 @@ static BOOL mm_place_ui(void)
             bx = MAX(r + 4.0, MIN(g_root.bounds.size.width  - r - 4.0,  bx));
             by = MAX(r + 44.0, MIN(g_root.bounds.size.height - r - 60.0, by));
             g_btn.center = CGPointMake(bx, by);
-            NSLog(@"%s boton+panel listos via=%s", MM_TAG, g_via);
+            MM_LOG(@"%s boton+panel listos via=%s", MM_TAG, g_via);
         }
 
         mm_apply_stream();
@@ -3890,7 +4675,7 @@ static BOOL mm_place_ui(void)
 
         return YES;
     } @catch (NSException *e) {
-        NSLog(@"%s excepcion colocando la UI: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s excepcion colocando la UI: %@", MM_TAG, e.reason);
         return NO;
     }
 }
@@ -3905,17 +4690,18 @@ static void mm_tick(void)
         BOOL fast = (g_tries <= MM_FAST_TRIES);
         BOOL ok = mm_place_ui();
         if (g_probe == nil && mm_uptime() > 2.0) mm_probe_run();
+        if (g_br_probe == nil && mm_uptime() > 2.0) mm_br_probe_run();
         mm_refresh_info();
 
         if (fast) {
             if (!ok && (g_tries % MM_FAST_LOG_EVERY) == 0)
-                NSLog(@"%s esperando escena/ventana... intento %d/%d (escenas=%d ventanas=%d)",
+                MM_LOG(@"%s esperando escena/ventana... intento %d/%d (escenas=%d ventanas=%d)",
                       MM_TAG, g_tries, MM_FAST_TRIES, mm_scene_count(), mm_window_count());
             if (!ok && g_tries == MM_FAST_TRIES)
-                NSLog(@"%s fase rapida agotada; sigo intentando cada %d s",
+                MM_LOG(@"%s fase rapida agotada; sigo intentando cada %d s",
                       MM_TAG, MM_SLOW_SECS);
         } else {
-            NSLog(@"%s latido vivo_s=%d escenas=%d estado=%@ ventanas=%d boton=%s panel=%s via=%s",
+            MM_LOG(@"%s latido vivo_s=%d escenas=%d estado=%@ ventanas=%d boton=%s panel=%s via=%s",
                   MM_TAG, (int)mm_uptime(), mm_scene_count(), mm_scene_state(),
                   mm_window_count(), ok ? "SI" : "NO",
                   g_panel_open ? "abierto" : "cerrado", g_via);
@@ -3926,7 +4712,7 @@ static void mm_tick(void)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(next * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ mm_tick(); });
     } @catch (NSException *e) {
-        NSLog(@"%s excepcion en el latido: %@", MM_TAG, e.reason);
+        MM_LOG(@"%s excepcion en el latido: %@", MM_TAG, e.reason);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ mm_tick(); });
     }
@@ -4115,7 +4901,7 @@ static void mm_lic_check(void)
     NSString *st = [NSString stringWithFormat:@"lic=%@ sku=%@ reason=%@ exp_dias=%ld enforce=%@",
                     g_lic_valid ? @"si" : @"no", g_lic_sku ?: @"-", g_lic_reason ?: @"-",
                     g_lic_exp ? (g_lic_exp - now) / 86400 : 0, g_lic_enforce ? @"si" : @"no"];
-    NSLog(@"%s licencia: %@ (hwid=%@…)", MM_TAG, st, [mm_lic_hwid() substringToIndex:12]);
+    MM_LOG(@"%s licencia: %@ (hwid=%@…)", MM_TAG, st, [mm_lic_hwid() substringToIndex:12]);
     mm_write_status([@"licencia " stringByAppendingString:st]);
     /* ENFORCE (cuando se valide en equipo): if (g_lic_enforce && !g_lic_valid)
        -> no instalar hooks / apagar feats; por ahora solo observa. */
@@ -4125,7 +4911,7 @@ __attribute__((constructor)) static void modmenu_init(void)
 {
     g_t0 = [NSDate date].timeIntervalSinceReferenceDate;
     mm_reset_options();   /* v0.2.7: opciones a fabrica en cada arranque */
-    NSLog(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
+    MM_LOG(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
           MM_TAG, MODMENU_VERSION, mm_my_path(), (int)getpid());
     mm_write_status(@"arranque (opciones a fabrica)");
     mm_lic_check();       /* v0.3.7: licencia (observacion; migra KeyGate) */
