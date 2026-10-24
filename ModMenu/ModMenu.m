@@ -2079,7 +2079,7 @@ static void mm_probe_run(void)
             @"base=0x%lX tabla=0x%lX",
             (unsigned long)base, (unsigned long)tbl];
 
-        static const struct { int pos; const char *que; } slots[] = MM_PROBE_SLOTS;
+        static const struct { int pos; const char *que; } slots[] = { MM_PROBE_SLOTS };
 
         int enCod = 0, malos = 0;
         const int nslots = (int)(sizeof(slots) / sizeof(slots[0]));
