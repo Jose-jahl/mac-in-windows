@@ -263,7 +263,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.4.2"
+#define MODMENU_VERSION     "0.4.3"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -282,7 +282,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.4.2";
+const char *modmenu_build_id = "modmenu-glass-0.4.3";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -1190,7 +1190,9 @@ static NSArray *mm_profile_keys(void)
               @"mm_esp_count", @"mm_esp_box_style", @"mm_esp_theme",
               @"mm_x_cross", @"mm_x_aimring", @"mm_x_head", @"mm_x_distcol",
               @"mm_x_lowhp", @"mm_x_fps", @"mm_theme_accent",
-              @"mm_menu_opacity", @"mm_menu_scale" ];
+              @"mm_menu_opacity", @"mm_menu_scale",
+              @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
+              @"mm_x_cross_style", @"mm_x_maxn" ];   /* 0.4: perfiles completos (v0.4.2) */
 }
 
 static void mm_profile_save(int slot)
@@ -1253,6 +1255,15 @@ static void mm_esp_frame(double t)
 {
     @try {
         if (g_esp == nil) return;
+        /* v0.4.3 (0.1): version gate — no leer offsets de 1.0.57 contra otra version del juego. */
+        static int g_ver_ok = -1;
+        if (g_ver_ok < 0) {
+            NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
+            g_ver_ok = (gv != nil && [gv isEqualToString:@FUSION_OFFSETS_VERSION]) ? 1 : 0;
+            if (!g_ver_ok) NSLog(@"%s version gate: juego %@ != offsets %s -> ESP OFF",
+                                 MM_TAG, gv, FUSION_OFFSETS_VERSION);
+        }
+        if (!g_ver_ok) { if (!g_esp.hidden) g_esp.hidden = YES; return; }
         if (g_panic) {                 /* v0.4.0 #8: todo oculto en modo panico */
             if (!g_esp.hidden) g_esp.hidden = YES;
             return;
@@ -1920,7 +1931,7 @@ static void mm_esp_collect_real(void)
        DIBUJAR. Antes se recortaba el escaneo a 24 y se perdia rango real. */
     if (loopn > 200) loopn = 200;
 
-    for (int i = 0; i < loopn && drawn < MM_MAX_BOXES; i++) {
+    for (int i = 0; i < loopn; i++) {   /* v0.4.3 (0.6): escanea TODOS; closest-N al insertar */
         uint64_t pawn = 0;
         if (!mm_r64((uintptr_t)items + OFF_ARR_DATA + (uintptr_t)i * 8, &pawn) || pawn == 0)
             continue;
@@ -2071,10 +2082,22 @@ static void mm_esp_collect_real(void)
             nb.h = g_boxes[q].h * 0.55 + nb.h * 0.45;
             break;
         }
-        nuevos[drawn++] = nb;
-        if (robot) g_count_bots++;
-        else       g_count_players++;
+        /* v0.4.3 (0.6): si el array esta lleno, reemplaza la caja mas LEJANA si esta
+           es mas cercana. Asi nunca se pierde el enemigo de al lado por el orden. */
+        int slot;
+        if (drawn < MM_MAX_BOXES) slot = drawn++;
+        else {
+            int far = 0; float fd = nuevos[0].dist;
+            for (int q = 1; q < MM_MAX_BOXES; q++) if (nuevos[q].dist > fd) { fd = nuevos[q].dist; far = q; }
+            if (nb.dist >= fd) continue;   /* las 32 ya son mas cercanas: descarta */
+            slot = far;
+        }
+        nuevos[slot] = nb;
     }
+
+    /* 0.6: contadores desde el set final (closest-N), no durante la insercion. */
+    g_count_players = 0; g_count_bots = 0;
+    for (int q = 0; q < drawn; q++) { if (nuevos[q].robot) g_count_bots++; else g_count_players++; }
 
     memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
@@ -2224,6 +2247,9 @@ static void mm_guest_reset_prompt(void)
 static void mm_write_status(NSString *nota)
 {
     @try {
+        /* v0.4.3 (0.8): modmenu_status.txt es evidencia forense; solo se escribe con
+           el modo debug ON (default OFF). El operador lo prende para diagnosticar. */
+        if (!mm_def_bool(@"mm_debug", NO)) return;
         NSString *docs = mm_docs_dir();
         if (docs.length == 0) return;
 
@@ -3087,6 +3113,19 @@ static void mm_build_ui(void)
     [pfload addTarget:[MMTargets shared] action:@selector(onProfileLoad)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:pfload];
+
+    /* v0.4.3 (0.8): debug — prende el status file (modmenu_status.txt) para diagnosticar.
+       Default OFF: sin esto no se escribe evidencia forense. */
+    UISwitch *dbg = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
+    dbg.on = mm_def_bool(@"mm_debug", NO);
+    dbg.onTintColor = mm_verde();
+    dbg.accessibilityIdentifier = @"mm_debug";
+    dbg.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    [dbg addTarget:[MMTargets shared] action:@selector(onSwitch:)
+        forControlEvents:UIControlEventValueChanged];
+    UIView *dbgr = mm_row(@"Debug (status file)", dbg);
+    dbgr.frame = CGRectMake(0, 176.0, 284.0, 31.0);
+    [g_p_misc addSubview:dbgr];
 
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
