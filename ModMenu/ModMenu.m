@@ -264,6 +264,10 @@
 #include <string.h>
 
 #define MODMENU_VERSION     "0.4.3"
+
+/* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
+   mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
+#include "fusion_offsets.generated.h"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
