@@ -12,6 +12,22 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.5.0 (24 oct) - FASE 2: LIMPIEZA + ESP DETRAS DE LA ESPALDA.
+ *    - fuera "Marcar visibles" (Tier-2 v0.4.4): el get_isVisible del juego
+ *      llamado desde el hilo del overlay CONGELABA la partida. Se elimina el
+ *      toggle, el puntero y la VA del contrato: nunca mas una llamada asi;
+ *    - fuera "Vida numerica" (mm_x_hpnum): el numero sobre la caja se
+ *      confundia con la barra; queda solo la barra de salud;
+ *    - ESP a la espalda: el radar y el contador JUG/BOT ya no dependen de la
+ *      proyeccion (track mundial nuevo) y, con "Flecha fuera de pantalla",
+ *      una flecha al borde senala a los que quedan detras de la camara;
+ *    - opacidad del menu ARREGLADA: el latido forzaba alpha 1.0 y pisaba el
+ *      slider (min 0.4); ahora respeta el valor elegido;
+ *    - boton flotante: emblema dibujado (anillo neon + F de trazo redondeado
+ *      con glow + arco de acento giratorio) en vez de la "F" de texto;
+ *    - INFO: nota de rendimiento (activar todo no agrega riesgo de seguridad;
+ *      el costo es FPS en el equipo).
+ *
  *  v0.3.7 (21 oct) - LICENCIA en FusionCore (migra KeyGate): verifica un token
  *    ES256 (firma r||s -> DER -> Security.framework) guardado en el Keychain,
  *    con HWID = SHA256(identifierForVendor + uuid-keychain + sal). Sin 2a dylib
@@ -263,7 +279,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.4.4"
+#define MODMENU_VERSION     "0.5.0"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -286,11 +302,13 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.4.4";
+const char *modmenu_build_id = "modmenu-glass-0.5.0";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
+@class MMBtnGlyph;                /* v0.5.0: emblema dibujado del boton       */
+static MMBtnGlyph *g_btn_glyph = nil;
 static UIView   *g_panel = nil;   /* panel desplegable                        */
 static CAGradientLayer *g_panel_neon = nil; /* v0.3.1: fondo glass neon       */
 static UIVisualEffectView *g_panel_blur = nil;
@@ -334,12 +352,28 @@ typedef struct {
     float   hpMax;              /* v0.2.4: salud maxima (100 por defecto)*/
     int     robot;
     int     alive;
-    int     visible;            /* v0.4.4 Tier-2: 1 visible, 0 ocluido, -1 sin dato */
     int     hasName;            /* v0.2.4: 1 si name trae nombre real   */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
 } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
+/* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
+   de la camara no se puede proyectar (no hay caja), pero SI esta en el mundo:
+   el radar, el contador JUG/BOT y la flecha "detras de ti" salen de aca. */
+#define MM_MAX_TRACKS 64
+typedef struct {
+    float wx, wy, wz;   /* posicion mundial del pawn                    */
+    float dist;         /* distancia al jugador local (m)               */
+    float vx, vy;       /* coords en espacio de camara (dir. si detras) */
+    float sx, sy;       /* proyeccion cruda (aunque caiga fuera)        */
+    int   robot;
+    int   alive;
+    int   proj;         /* 1 = tiene caja dibujable en g_boxes          */
+    int   behind;       /* 1 = detras de la camara (no proyectable)     */
+    int   has_sx;       /* 1 = la proyeccion dio un punto (aunque fuera)*/
+} MMTrack;
+static MMTrack      g_tracks[MM_MAX_TRACKS];
+static int          g_track_count = 0;
 /* v0.4.4: datos para radar 2D / altura / telemetria (se llenan en el colector) */
 static float        g_local_pos[3] = { 0.0f, 0.0f, 0.0f };
 static int          g_have_local = 0;
@@ -548,7 +582,9 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
     CGContextStrokeRect(ctx, CGRectMake(3.0, 3.0, bs.size.width - 6.0, bs.size.height - 6.0));
 }
 
-/* v0.4.4 (Fase 1.1): radar 2D norte-arriba (reusa world-pos del colector). */
+/* v0.4.4 (Fase 1.1): radar 2D norte-arriba.
+   v0.5.0: dibuja desde el TRACK mundial, no desde las cajas: los enemigos
+   detras de la camara (o fuera del cuadro) siguen apareciendo en el radar. */
 static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
 {
     if (!g_have_local) return;
@@ -567,15 +603,17 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
     CGContextStrokePath(ctx);
     CGContextSetRGBFillColor(ctx, 0.9, 0.95, 1.0, 0.95);
     CGContextFillEllipseInRect(ctx, CGRectMake(cx - 2.5, cy - 2.5, 5.0, 5.0));
-    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        MMEspBox *b = &g_boxes[i];
-        if (!b->alive) continue;
-        float px = cx + ((b->wx - g_local_pos[0]) / rng) * R;
-        float py = cy + ((b->wz - g_local_pos[2]) / rng) * R;
+    for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
+        MMTrack *tk = &g_tracks[i];
+        if (!tk->alive) continue;
+        float px = cx + ((tk->wx - g_local_pos[0]) / rng) * R;
+        float py = cy + ((tk->wz - g_local_pos[2]) / rng) * R;
         float ox = px - cx, oy = py - cy, d = (float)sqrt(ox * ox + oy * oy);
         if (d > R - 2.0) { float s = (R - 2.0f) / d; px = cx + ox * s; py = cy + oy * s; }
-        if (b->robot) CGContextSetRGBFillColor(ctx, 0.63, 0.30, 1.0, 0.95);
-        else          CGContextSetRGBFillColor(ctx, 1.0, 0.25, 0.30, 0.95);
+        /* v0.5.0: mas tenue el que NO tiene caja en pantalla (detras/fuera). */
+        CGFloat al = tk->proj ? 0.95 : 0.55;
+        if (tk->robot) CGContextSetRGBFillColor(ctx, 0.63, 0.30, 1.0, al);
+        else           CGContextSetRGBFillColor(ctx, 1.0, 0.25, 0.30, al);
         CGContextFillEllipseInRect(ctx, CGRectMake(px - 2.2, py - 2.2, 4.4, 4.4));
     }
 }
@@ -637,7 +675,6 @@ static void mm_draw_telem(CGRect bs)
     [mm_neon_green() getRed:&ar green:&ag blue:&ab alpha:&aalpha];
 
     /* v0.4.2: features nuevas de solo-lectura (reusan g_boxes). */
-    BOOL conHpNum    = mm_def_bool(@"mm_x_hpnum", NO);
     BOOL conPriority = mm_def_bool(@"mm_x_priority", NO);
     BOOL conWarn     = mm_def_bool(@"mm_x_warn", NO);
     BOOL conArrow    = mm_def_bool(@"mm_x_arrow", NO);
@@ -651,7 +688,6 @@ static void mm_draw_telem(CGRect bs)
     BOOL conRadar   = mm_def_bool(@"mm_x_radar", NO);
     BOOL conHeight  = mm_def_bool(@"mm_x_height", NO);
     BOOL conTelem   = mm_def_bool(@"mm_x_telem", NO);
-    BOOL conVisMark = mm_def_bool(@"mm_x_vis", NO);       /* Tier-2: marcar visibles */
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
@@ -662,7 +698,9 @@ static void mm_draw_telem(CGRect bs)
     if (conRadar)   mm_draw_radar(ctx, bs, ar, ag, ab);
     if (conTelem)   mm_draw_telem(bs);
 
-    if (g_box_count <= 0) return;
+    /* v0.5.0: aunque no haya cajas (todos los enemigos detras de la camara),
+       el lienzo sigue: la flecha "fuera de pantalla" tiene que poder salir. */
+    if (g_box_count <= 0 && g_track_count <= 0) return;
 
     /* v0.4.2: pre-pass — objetivo prioritario (mas cercano vivo) y umbral closest-N. */
     int priIdx = -1; float priDist = 1e9f; float distThresh = 1e9f;
@@ -732,8 +770,6 @@ static void mm_draw_telem(CGRect bs)
         if (conLowHp && b->hp >= 0.0f && b->hpMax > 1.0f && (b->hp / b->hpMax) < 0.30f) {
             cr = 1.0f; cg = 0.78f; cb = 0.12f;
         }
-        /* v0.4.4 (Tier-2): atenua a los que NO estan en linea de vision (visible==0). */
-        if (conVisMark && b->visible == 0) { cr *= 0.48f; cg *= 0.48f; cb *= 0.48f; }
 
         if (conLineas) {
             /* v0.2.5: origen elegible. OFF = borde inferior -> pies de la caja;
@@ -791,14 +827,6 @@ static void mm_draw_telem(CGRect bs)
             CGContextSetRGBStrokeColor(ctx, 0.20, 0.95, 1.0, 0.95);
             CGContextStrokeRect(ctx, hr);
         }
-        /* v0.4.2 (vida numerica): HP sobre la caja, arriba-derecha. */
-        if (conHpNum && b->hp >= 0.0f && b->hpMax > 1.0f) {
-            NSString *hs = [NSString stringWithFormat:@"%d", (int)(b->hp + 0.5f)];
-            NSDictionary *ha = @{ NSFontAttributeName: fDist,
-                NSForegroundColorAttributeName: [UIColor colorWithRed:cr green:cg blue:cb alpha:0.96],
-                NSShadowAttributeName: txtShadow };
-            [hs drawAtPoint:CGPointMake(CGRectGetMaxX(r) + 2.0, r.origin.y - 1.0) withAttributes:ha];
-        }
         /* v0.4.2 (flecha off-screen): si la caja cae fuera de pantalla, flecha al borde. */
         if (conArrow) {
             CGFloat mx = CGRectGetMidX(r), my = CGRectGetMidY(r);
@@ -814,13 +842,6 @@ static void mm_draw_telem(CGRect bs)
                 NSForegroundColorAttributeName: [UIColor colorWithRed:cr green:cg blue:cb alpha:0.92],
                 NSShadowAttributeName: txtShadow };
             [hhs drawAtPoint:CGPointMake(CGRectGetMaxX(r) + 2.0, CGRectGetMidY(r) - 5.0) withAttributes:hha];
-        }
-        /* v0.4.4 (Tier-2 visibilidad): punto en esquina si el pawn esta en linea de vision. */
-        if (conVisMark && b->visible == 1) {
-            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.5);
-            CGContextFillEllipseInRect(ctx, CGRectMake(r.origin.x - 2.6, r.origin.y - 2.6, 6.2, 6.2));
-            CGContextSetRGBFillColor(ctx, 0.20, 1.0, 0.58, 0.98);
-            CGContextFillEllipseInRect(ctx, CGRectMake(r.origin.x - 1.8, r.origin.y - 1.8, 4.6, 4.6));
         }
 
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
@@ -881,6 +902,31 @@ static void mm_draw_telem(CGRect bs)
             if (dy + dsz.height > bs.size.height - 2.0)
                 dy = MAX(0.0, r.origin.y - dsz.height - 1.0);
             [ds drawAtPoint:CGPointMake(dx, dy) withAttributes:dattr];
+        }
+    }
+
+    /* v0.5.0: flecha a enemigos SIN caja en pantalla — detras de la camara o
+       muy fuera del cuadro — con el toggle "Flecha fuera de pantalla". Antes
+       el enemigo a la espalda simplemente desaparecia sin dejar rastro. */
+    if (conArrow) {
+        for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
+            MMTrack *tk = &g_tracks[i];
+            if (!tk->alive || tk->proj) continue;
+            CGFloat acr = tk->robot ? crBot : crJug;
+            CGFloat acg = tk->robot ? cgBot : cgJug;
+            CGFloat acb = tk->robot ? cbBot : cbJug;
+            if (tk->behind) {
+                /* direccion en espacio de camara: x derecha, y arriba
+                   (la pantalla invierte y). Si queda justo detras: abajo. */
+                CGFloat dx = (CGFloat)tk->vx, dy = (CGFloat)(-tk->vy);
+                if (fabs(dx) < 0.02 && fabs(dy) < 0.02) { dx = 0.0; dy = 1.0; }
+                mm_draw_edge_arrow(ctx, bs, bs.size.width / 2.0 + dx * 1000.0,
+                                   bs.size.height / 2.0 + dy * 1000.0,
+                                   acr, acg, acb);
+            } else if (tk->has_sx) {
+                mm_draw_edge_arrow(ctx, bs, (CGFloat)tk->sx, (CGFloat)tk->sy,
+                                   acr, acg, acb);
+            }
         }
     }
 
@@ -1259,9 +1305,9 @@ static void mm_reset_options(void)
                            @"mm_esp_count", @"mm_esp_box_style", @"mm_esp_theme",
                            @"mm_x_cross", @"mm_x_aimring", @"mm_x_fps",
                            @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp",
-                           @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn",
+                           @"mm_x_priority", @"mm_x_warn",
                            @"mm_x_arrow", @"mm_x_cross_style", @"mm_x_maxn",
-                           @"mm_x_radar", @"mm_x_height", @"mm_x_telem", @"mm_x_vis" ];
+                           @"mm_x_radar", @"mm_x_height", @"mm_x_telem" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
     } @catch (NSException *e) {
@@ -1281,9 +1327,9 @@ static NSArray *mm_profile_keys(void)
               @"mm_x_cross", @"mm_x_aimring", @"mm_x_head", @"mm_x_distcol",
               @"mm_x_lowhp", @"mm_x_fps", @"mm_theme_accent",
               @"mm_menu_opacity", @"mm_menu_scale",
-              @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
+              @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
               @"mm_x_cross_style", @"mm_x_maxn",
-              @"mm_x_radar", @"mm_x_height", @"mm_x_telem", @"mm_x_vis" ];   /* 0.4.4: Fase 1 + Tier-2 */
+              @"mm_x_radar", @"mm_x_height", @"mm_x_telem" ];   /* 0.4.4: Fase 1 (0.5.0: sin hpnum/vis) */
 }
 
 static void mm_profile_save(int slot)
@@ -1794,7 +1840,6 @@ static MMMatFn    g_fp_proj      = NULL;
 static MMVec3Fn   g_fp_transpos  = NULL;
 static MMGetIntFn g_fp_health    = NULL; /* opcional: si no valida, sin salud */
 static MMGetFltFn g_fp_health_f  = NULL; /* v0.2.6: misma direccion, tipo float */
-static MMGetIntFn g_fp_visible   = NULL; /* v0.4.4 Tier-2: opcional (get_isVisible) */
 static int        g_fp_state     = -1;  /* -1 sin probar / 0 error / 1 ok */
 static NSString  *g_esp_diag     = nil; /* motivo del ultimo fallo / ok   */
 static NSString  *g_hp_diag      = nil; /* v0.2.6: muestra cruda de salud */
@@ -1866,7 +1911,6 @@ static void mm_game_resolve(void)
             MMMatFn    fp4 = (MMMatFn)(b + MM_GAME_DELTA(VA_PROJ_INJ));
             MMVec3Fn   fp5 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
             MMGetIntFn fp6 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_HEALTH));
-            MMGetIntFn fp7 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_ISVISIBLE));
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
@@ -1878,8 +1922,6 @@ static void mm_game_resolve(void)
 
             /* el de salud es OPCIONAL: si no valida, el ESP sigue sin barra */
             BOOL hpOk = mm_ptr_en_imagen((const void *)fp6, b);
-            /* v0.4.4 Tier-2: visibilidad tambien OPCIONAL (clase ofuscada). */
-            BOOL visOk = mm_ptr_en_imagen((const void *)fp7, b);
 
             g_game_base    = b;
             g_fp_gameplay  = fp0;
@@ -1890,7 +1932,6 @@ static void mm_game_resolve(void)
             g_fp_transpos  = fp5;
             g_fp_health    = hpOk ? fp6 : NULL;
             g_fp_health_f  = hpOk ? (MMGetFltFn)fp6 : NULL;   /* v0.2.6 */
-            g_fp_visible   = visOk ? fp7 : NULL;              /* v0.4.4 Tier-2 */
             g_fp_state     = 1;
             NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
@@ -1921,9 +1962,13 @@ static void mm_game_resolve(void)
               proyectan como puntos del mundo con MM_BOX_TOP_UP/FEET_DN)
      ndc  = clip.xyz / clip.w        (si |w| <= 0.001 -> 0)
      px   = ndc.x + W/2 + ndc.x*(W/2)
-     py   = ndc.y + H/2 - ndc.y*(H/2) */
+     py   = ndc.y + H/2 - ndc.y*(H/2)
+   v0.5.0: si el punto quedo detras de la camara (cz < 0.01) devuelve NO y
+   deja *detras=1 + la direccion en espacio de camara (*vxo,*vyo: x derecha,
+   y arriba) para el indicador de enemigos a la espalda. */
 static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
-                   BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out)
+                   BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
+                   int *detras, float *vxo, float *vyo)
 {
     float x = p[0], y = p[1], z = p[2];
     float vx = view[0] * x + view[4] * y + view[8]  * z + view[12];
@@ -1931,12 +1976,16 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
     float vz = view[2] * x + view[6] * y + view[10] * z + view[14];
     float vw = view[3] * x + view[7] * y + view[11] * z + view[15];
 
+    /* v0.5.0: direccion en espacio de camara (costo cero) para la flecha. */
+    if (vxo != NULL) *vxo = vx;
+    if (vyo != NULL) *vyo = vy;
+
     float cx = proj[0] * vx + proj[4] * vy + proj[8]  * vz + proj[12] * vw;
     float cy = proj[1] * vx + proj[5] * vy + proj[9]  * vz + proj[13] * vw;
     float cz = proj[2] * vx + proj[6] * vy + proj[10] * vz + proj[14] * vw;
     float cw = proj[3] * vx + proj[7] * vy + proj[11] * vz + proj[15] * vw;
 
-    if (!(cz >= 0.01f)) return NO;
+    if (!(cz >= 0.01f)) { if (detras != NULL) *detras = 1; return NO; }
     if (cabeza) cy += 0.5f;
 
     float nx = 0.0f, ny = 0.0f;
@@ -1952,6 +2001,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 static void mm_esp_collect_real(void)
 {
     g_box_count = 0;
+    g_track_count = 0;                     /* v0.5.0: track mundial */
     g_count_players = 0;
     g_count_bots = 0;
     g_esp_players = 0;
@@ -2021,7 +2071,6 @@ static void mm_esp_collect_real(void)
 
     float rango = mm_def_float(@"mm_esp_range", 300.0f);
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
-    BOOL conVis    = mm_def_bool(@"mm_x_vis", NO);        /* v0.4.4 Tier-2: visibilidad */
     BOOL conJug    = mm_def_bool(@"mm_esp_players", NO);  /* v0.2.7: a fabrica */
     BOOL conBots   = mm_def_bool(@"mm_esp_bots", NO);     /* v0.2.7: a fabrica */
     int drawn = 0;
@@ -2069,6 +2118,24 @@ static void mm_esp_collect_real(void)
             if (dist > rango) continue;
         }
 
+        /* v0.5.0: TRACK MUNDIAL (independiente de la proyeccion). Antes, si el
+           pawn no se podia proyectar (detras de la camara) se descartaba del
+           todo: desaparecia del radar y del contador JUG/BOT. El track existe
+           siempre que el pawn este vivo, del tipo pedido y dentro de rango. */
+        MMTrack tk;
+        memset(&tk, 0, sizeof(tk));
+        tk.wx = wp[0]; tk.wy = wp[1]; tk.wz = wp[2];
+        tk.dist = dist; tk.robot = robot; tk.alive = 1;
+        int tslot = -1;
+        if (g_track_count < MM_MAX_TRACKS) tslot = g_track_count++;
+        else {
+            int farT = 0; float fdT = g_tracks[0].dist;
+            for (int q = 1; q < MM_MAX_TRACKS; q++)
+                if (g_tracks[q].dist > fdT) { fdT = g_tracks[q].dist; farT = q; }
+            if (dist < fdT) tslot = farT;   /* si no entra, igual sigue a cajas */
+        }
+        if (tslot >= 0) g_tracks[tslot] = tk;
+
         /* v0.2.5: caja de cuerpo completo. La posicion del pawn proyecta a la
            altura del cuello, no a los pies (verificado en captura): el +0.5
            de clip que usa GL para la "cabeza" solo separaba unos pixeles y
@@ -2078,10 +2145,30 @@ static void mm_esp_collect_real(void)
         float wpTop[3]  = { wp[0], wp[1] + MM_BOX_TOP_UP,  wp[2] };
         float wpFeet[3] = { wp[0], wp[1] - MM_BOX_FEET_DN, wp[2] };
         CGPoint cab, pies;
-        if (!mm_w2s(view, proj, wpTop,  NO, W, H, &cab))  continue;
-        if (!mm_w2s(view, proj, wpFeet, NO, W, H, &pies)) continue;
-        if (cab.x  < -W || cab.x  > 2.0 * W || cab.y  < -H || cab.y  > 2.0 * H) continue;
-        if (pies.x < -W || pies.x > 2.0 * W || pies.y < -H || pies.y > 2.0 * H) continue;
+        int detCab = 0, detPies = 0;
+        float camX = 0.0f, camY = 0.0f;
+        BOOL okCab  = mm_w2s(view, proj, wpTop,  NO, W, H, &cab,  &detCab,  &camX, &camY);
+        BOOL okPies = mm_w2s(view, proj, wpFeet, NO, W, H, &pies, &detPies, &camX, &camY);
+        if (!okCab || !okPies) {
+            /* v0.5.0: sin caja (detras de la camara o no proyectable), pero el
+               track queda: el radar, el contador y la flecha lo siguen viendo. */
+            if (tslot >= 0) {
+                g_tracks[tslot].behind = (detCab || detPies) ? 1 : 0;
+                g_tracks[tslot].vx = camX; g_tracks[tslot].vy = camY;
+            }
+            continue;
+        }
+        if (cab.x  < -W || cab.x  > 2.0 * W || cab.y  < -H || cab.y  > 2.0 * H ||
+            pies.x < -W || pies.x > 2.0 * W || pies.y < -H || pies.y > 2.0 * H) {
+            /* v0.5.0: muy fuera del cuadro: sin caja, pero la flecha puede
+               apuntarlo (misma idea que el viejo "fuera de pantalla"). */
+            if (tslot >= 0) {
+                g_tracks[tslot].has_sx = 1;
+                g_tracks[tslot].sx = (float)((cab.x + pies.x) * 0.5);
+                g_tracks[tslot].sy = (float)((cab.y + pies.y) * 0.5);
+            }
+            continue;
+        }
 
         CGFloat bh = pies.y - cab.y;
         /* v0.2.4: antes 4 px dejaba fuera a los lejanos (cajas pequenas) */
@@ -2158,20 +2245,6 @@ static void mm_esp_collect_real(void)
             }
         }
 
-        /* --- v0.4.4 Tier-2: visibilidad (get_isVisible, OPCIONAL) ---
-           Se llama IGUAL que GetHealth (lectura pura, puntero validado con
-           dladdr). Solo si el operador prendio el toggle y el puntero valido.
-           Se acepta solo 0/1 (bool); cualquier otra cosa = sin dato (-1). */
-        int vis = -1;
-        if (conVis && g_fp_visible != NULL) {
-            uint64_t pk = 0;
-            if (mm_r64((uintptr_t)pawn, &pk)) {
-                int32_t rv = g_fp_visible((void *)(uintptr_t)pawn);
-                int32_t lo = rv & 0xFF;
-                if (lo == 0 || lo == 1) vis = lo;
-            }
-        }
-
         MMEspBox nb;
         memset(&nb, 0, sizeof(nb));
         nb.pawn = pawn;
@@ -2185,7 +2258,6 @@ static void mm_esp_collect_real(void)
         nb.hpMax = hpMax;
         nb.robot = robot;
         nb.alive = 1;
-        nb.visible = vis;                              /* v0.4.4 Tier-2 */
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
 
@@ -2210,18 +2282,24 @@ static void mm_esp_collect_real(void)
             slot = far;
         }
         nuevos[slot] = nb;
+        if (tslot >= 0) g_tracks[tslot].proj = 1;   /* v0.5.0: track con caja */
     }
 
-    /* 0.6: contadores desde el set final (closest-N), no durante la insercion. */
+    /* v0.5.0: contadores desde el TRACK mundial (no desde las cajas): incluye
+       a los que quedaron detras de la camara o fuera del cuadro. Antes el
+       marcador JUG/BOT solo contaba lo dibujable y la espalda "no existia". */
     g_count_players = 0; g_count_bots = 0;
-    for (int q = 0; q < drawn; q++) { if (nuevos[q].robot) g_count_bots++; else g_count_players++; }
+    for (int q = 0; q < g_track_count && q < MM_MAX_TRACKS; q++) {
+        if (!g_tracks[q].alive) continue;
+        if (g_tracks[q].robot) g_count_bots++; else g_count_players++;
+    }
 
     memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
     g_collect_ms = (CACurrentMediaTime() - _col_t0) * 1000.0;   /* v0.4.4: telemetria */
     g_esp_diag = [NSString stringWithFormat:
-                  @"cam=ok lista=%d cajas=%d jug=%d bot=%d hp=%s%@",
-                  total, drawn, g_count_players, g_count_bots,
+                  @"cam=ok lista=%d cajas=%d trk=%d jug=%d bot=%d hp=%s%@",
+                  total, drawn, g_track_count, g_count_players, g_count_bots,
                   (g_fp_health != NULL) ? "ok" : "no",
                   (g_hp_diag != nil)
                       ? [NSString stringWithFormat:@" [%@]", g_hp_diag]
@@ -2783,6 +2861,93 @@ static UIView *mm_switch_row(NSString *titulo, NSString *key, BOOL def)
 }
 
 /* v0.2.9: barra "Listo" para cerrar el teclado numerico de los campos de ID. */
+/*---------------------------------------------------------------------------
+ * v0.5.0: EMBLEMA DEL BOTON FLOTANTE (reemplaza la "F" de texto blanca).
+ * Glifo dibujado con Core Graphics: anillo neon tenue, "F" de trazo redondeado
+ * con glow verde y punto de energia morado. Encima, un arco de acento que gira
+ * lento con CABasicAnimation: costo GPU, cero CPU por frame.
+ *--------------------------------------------------------------------------*/
+@interface MMBtnGlyph : UIView
+@property (nonatomic, strong) CAShapeLayer *arc;
+@end
+
+@implementation MMBtnGlyph
+- (instancetype)initWithFrame:(CGRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (self != nil) {
+        self.backgroundColor = [UIColor clearColor];
+        self.opaque = NO;
+        self.userInteractionEnabled = NO;
+        CGFloat w = frame.size.width, h = frame.size.height;
+        _arc = [CAShapeLayer layer];
+        _arc.frame = self.bounds;
+        _arc.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(w / 2.0, h / 2.0)
+                                                   radius:(w / 2.0) - 5.5
+                                               startAngle:0.0
+                                                 endAngle:(CGFloat)(2.0 * M_PI)
+                                                clockwise:YES].CGPath;
+        _arc.fillColor = [UIColor clearColor].CGColor;
+        _arc.strokeColor = [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
+        _arc.lineWidth = 2.2;
+        _arc.lineCap = kCALineCapRound;
+        _arc.strokeStart = 0.0;
+        _arc.strokeEnd = 0.30;
+        [self.layer addSublayer:_arc];
+    }
+    return self;
+}
+
+- (void)drawRect:(CGRect)rect
+{
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (ctx == NULL) return;
+    CGFloat cx = rect.size.width / 2.0, cy = rect.size.height / 2.0;
+
+    /* anillo base tenue */
+    CGContextSetLineWidth(ctx, 1.1);
+    CGContextSetRGBStrokeColor(ctx, 0.32, 1.0, 0.62, 0.45);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - 19.5, cy - 19.5, 39.0, 39.0));
+
+    /* "F" de trazo redondeado con glow neon */
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextSetLineJoin(ctx, kCGLineJoinRound);
+    CGContextSetShadowWithColor(ctx, CGSizeZero, 5.0,
+        [mm_neon_green() colorWithAlphaComponent:0.85].CGColor);
+    CGContextSetRGBStrokeColor(ctx, 0.96, 1.0, 0.97, 1.0);
+    CGContextSetLineWidth(ctx, 3.2);
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, cx - 5.0, cy + 8.0);
+    CGContextAddLineToPoint(ctx, cx - 5.0, cy - 8.0);
+    CGContextAddLineToPoint(ctx, cx + 6.5, cy - 8.0);
+    CGContextStrokePath(ctx);
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, cx - 5.0, cy + 0.5);
+    CGContextAddLineToPoint(ctx, cx + 3.5, cy + 0.5);
+    CGContextStrokePath(ctx);
+
+    /* punto de energia */
+    CGContextSetShadowWithColor(ctx, CGSizeZero, 4.0,
+        [mm_neon_purple() colorWithAlphaComponent:0.9].CGColor);
+    CGContextSetRGBFillColor(ctx, 0.78, 0.58, 1.0, 0.95);
+    CGContextFillEllipseInRect(ctx, CGRectMake(cx + 11.0, cy - 2.2, 4.4, 4.4));
+}
+@end
+
+/* Gira el arco de acento del emblema (se reanuda si iOS lo purgo). */
+static void mm_btn_spin(MMBtnGlyph *g)
+{
+    if (g == nil || g.arc == nil) return;
+    if ([g.arc animationForKey:@"mm_spin"] != nil) return;
+    CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    sp.fromValue = @0.0;
+    sp.toValue = @(2.0 * M_PI);
+    sp.duration = 6.0;
+    sp.repeatCount = HUGE_VALF;
+    sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+    [g.arc addAnimation:sp forKey:@"mm_spin"];
+}
+
 /* Crea boton flotante + panel (una sola vez). */
 static void mm_build_ui(void)
 {
@@ -2801,18 +2966,12 @@ static void mm_build_ui(void)
         g_btn.layer.shadowRadius = 12.0;
         g_btn.layer.shadowOffset = CGSizeZero;
         g_btn.clipsToBounds = NO;
-        [g_btn setTitle:@"F" forState:UIControlStateNormal];
-        [g_btn setTitleColor:[UIColor colorWithWhite:0.98 alpha:1.0]
-                    forState:UIControlStateNormal];
-        UIFont *bf = [UIFont fontWithName:@"AvenirNext-Bold" size:23.0];
-        if (bf == nil) bf = [UIFont systemFontOfSize:23.0 weight:UIFontWeightBold];
-        g_btn.titleLabel.font = bf;
-        /* v0.3.2: un poco mas de contraste/glow en el texto del boton. */
-        g_btn.titleLabel.layer.shadowColor =
-            [mm_neon_green() colorWithAlphaComponent:0.70].CGColor;
-        g_btn.titleLabel.layer.shadowOpacity = 0.60;
-        g_btn.titleLabel.layer.shadowRadius = 3.0;
-        g_btn.titleLabel.layer.shadowOffset = CGSizeZero;
+        /* v0.5.0: emblema dibujado (anillo + F neon + arco giratorio) en vez
+           de la "F" de texto. Ver MMBtnGlyph arriba. */
+        g_btn.accessibilityLabel = @"FUSION";
+        g_btn_glyph = [[MMBtnGlyph alloc] initWithFrame:g_btn.bounds];
+        [g_btn addSubview:g_btn_glyph];
+        mm_btn_spin(g_btn_glyph);
         [g_btn addTarget:[MMTargets shared] action:@selector(onTap)
         forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
@@ -2854,7 +3013,9 @@ static void mm_build_ui(void)
             [UIBezierPath bezierPathWithOvalInRect:g_btn.bounds].CGPath;
         /* v0.4.1: boton mas sobrio y profesional — SIN anillo de color animado
            ni pulso (contrastaban con la identidad). Vidrio estatico + borde fino
-           verde + glow suave fijo + monograma "F". */
+           verde + glow suave fijo.
+           v0.5.0: el glifo interno es un emblema dibujado (anillo neon + "F"
+           de trazo redondeado con glow + arco de acento giratorio). */
     }
 
     /* --- contador JUG/BOT (v0.3.2: glass flotante arriba) --- */
@@ -3254,13 +3415,13 @@ static void mm_build_ui(void)
 
     NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
                         @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps",
-                        @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
-                        @"mm_x_radar", @"mm_x_height", @"mm_x_telem", @"mm_x_vis" ];
+                        @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
+                        @"mm_x_radar", @"mm_x_height", @"mm_x_telem" ];
     NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
                         @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS",
-                        @"Vida numerica", @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
-                        @"Flecha fuera de pantalla",
-                        @"Radar 2D", @"Indicador de altura", @"Telemetria", @"Marcar visibles" ];
+                        @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
+                        @"Flecha fuera de pantalla (detras)",
+                        @"Radar 2D", @"Indicador de altura", @"Telemetria" ];
     for (NSUInteger i = 0; i < xkeys.count; i++) {
         UIView *xrow = mm_switch_row(xtit[i], xkeys[i], NO);
         xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
@@ -3357,7 +3518,7 @@ static void mm_build_ui(void)
     t2.textColor = [UIColor colorWithWhite:0.55 alpha:1.0];
     t2.font = [UIFont boldSystemFontOfSize:10.0];
     [g_p_more addSubview:t2]; ry += 20.0;
-    NSArray *t2tit = @[ @"ESP de esqueleto", @"Visible / tapado",
+    NSArray *t2tit = @[ @"ESP de esqueleto",
                         @"ESP de granadas", @"ESP de loot / vehiculos" ];
     for (NSUInteger i = 0; i < t2tit.count; i++) {
         UISwitch *t2sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
@@ -3575,6 +3736,13 @@ static void mm_refresh_info(void)
                               NSForegroundColorAttributeName:
                                   [UIColor colorWithWhite:0.95 alpha:1.0],
                               NSParagraphStyleAttributeName: ps }]];
+        /* v0.5.0: nota pedida por el operador — seguridad vs rendimiento. */
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"Activar todas las opciones no da problemas de seguridad;\nel costo es rendimiento (FPS) en el dispositivo.\n\n"
+                attributes:@{ NSFontAttributeName: itemFont,
+                              NSForegroundColorAttributeName:
+                                  [UIColor colorWithWhite:0.95 alpha:1.0],
+                              NSParagraphStyleAttributeName: ps }]];
         [t appendAttributedString:[[NSAttributedString alloc]
             initWithString:@"Proyecto desarrollado por\nJose Lopez — Ing. de Sistemas\n\n"
                 attributes:@{ NSFontAttributeName: bodyFont,
@@ -3705,11 +3873,20 @@ static BOOL mm_place_ui(void)
            recoloco la UI, se reposiciona con la memoria de siempre). */
         if (g_panel_open && g_panel != nil) {
             if (recolocar) mm_position_panel();
-            if (g_panel.hidden || g_panel.alpha < 0.95) {
+            /* v0.5.0 FIX: antes el latido forzaba alpha 1.0 cuando quedaba por
+               debajo de 0.95 y pisaba la opacidad elegida en el slider
+               (0.4-1.0) a los pocos segundos. Ahora se respeta el valor. */
+            CGFloat mmOp = mm_def_float(@"mm_menu_opacity", 1.0f);
+            if (mmOp < 0.4f) mmOp = 0.4f; if (mmOp > 1.0f) mmOp = 1.0f;
+            if (g_panel.hidden || g_panel.alpha < mmOp - 0.05f) {
                 g_panel.hidden = NO;
-                g_panel.alpha = 1.0;
+                g_panel.alpha = mmOp;
             }
         }
+
+        /* v0.5.0: si iOS purgo la animacion del emblema (background), se
+           reanuda; es una animacion de GPU, sin costo de CPU por frame. */
+        mm_btn_spin(g_btn_glyph);
 
         return YES;
     } @catch (NSException *e) {
