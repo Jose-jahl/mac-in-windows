@@ -263,7 +263,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.4.1"
+#define MODMENU_VERSION     "0.4.2"
 #define MM_TAG              "[MODMENU]"
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
@@ -282,7 +282,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.4.1";
+const char *modmenu_build_id = "modmenu-glass-0.4.2";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -453,19 +453,27 @@ static double g_fps = 0.0;
 static UIColor *mm_neon_green(void);
 static UIColor *mm_neon_purple(void);
 
-/* v0.4.0 (#1 crosshair): mira central con sombra, color de acento del tema. */
-static void mm_draw_crosshair(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
+/* v0.4.0 (#1 crosshair) + v0.4.2 estilos: 0 cruz+punto · 1 punto · 2 circulo+punto · 3 todo. */
+static void mm_draw_crosshair(CGContextRef ctx, CGRect bs, int style, CGFloat cr, CGFloat cg, CGFloat cb)
 {
     CGFloat cx = bs.size.width / 2.0, cy = bs.size.height / 2.0;
     CGFloat gap = 4.0, len = 9.0;
-    for (int pass = 0; pass < 2; pass++) {
-        if (pass == 0) { CGContextSetLineWidth(ctx, 2.6); CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.5); }
-        else           { CGContextSetLineWidth(ctx, 1.2); CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95); }
-        CGContextMoveToPoint(ctx, cx - gap - len, cy); CGContextAddLineToPoint(ctx, cx - gap, cy);
-        CGContextMoveToPoint(ctx, cx + gap, cy);       CGContextAddLineToPoint(ctx, cx + gap + len, cy);
-        CGContextMoveToPoint(ctx, cx, cy - gap - len);  CGContextAddLineToPoint(ctx, cx, cy - gap);
-        CGContextMoveToPoint(ctx, cx, cy + gap);        CGContextAddLineToPoint(ctx, cx, cy + gap + len);
-        CGContextStrokePath(ctx);
+    if (style != 1) {
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 0) { CGContextSetLineWidth(ctx, 2.6); CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.5); }
+            else           { CGContextSetLineWidth(ctx, 1.2); CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95); }
+            CGContextMoveToPoint(ctx, cx - gap - len, cy); CGContextAddLineToPoint(ctx, cx - gap, cy);
+            CGContextMoveToPoint(ctx, cx + gap, cy);       CGContextAddLineToPoint(ctx, cx + gap + len, cy);
+            CGContextMoveToPoint(ctx, cx, cy - gap - len);  CGContextAddLineToPoint(ctx, cx, cy - gap);
+            CGContextMoveToPoint(ctx, cx, cy + gap);        CGContextAddLineToPoint(ctx, cx, cy + gap + len);
+            CGContextStrokePath(ctx);
+        }
+    }
+    if (style == 2 || style == 3) {
+        CGFloat rad = 7.0;
+        CGContextSetLineWidth(ctx, 1.4);
+        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.9);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - rad, cy - rad, rad * 2.0, rad * 2.0));
     }
     CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.95);
     CGContextFillRect(ctx, CGRectMake(cx - 1.0, cy - 1.0, 2.0, 2.0));
@@ -496,6 +504,36 @@ static void mm_draw_fps(CGRect bs)
         NSForegroundColorAttributeName: [UIColor colorWithWhite:0.92 alpha:1.0],
         NSShadowAttributeName: sh };
     [s drawAtPoint:CGPointMake(10.0, 44.0) withAttributes:a];
+}
+
+/* v0.4.2: flecha en el borde apuntando a un objetivo fuera de pantalla. */
+static void mm_draw_edge_arrow(CGContextRef ctx, CGRect bs, CGFloat tx, CGFloat ty,
+                               CGFloat cr, CGFloat cg, CGFloat cb)
+{
+    CGFloat cx = bs.size.width / 2.0, cy = bs.size.height / 2.0;
+    CGFloat dx = tx - cx, dy = ty - cy;
+    CGFloat len = (CGFloat)sqrt(dx * dx + dy * dy);
+    if (len < 1.0) return;
+    dx /= len; dy /= len;
+    CGFloat R = (MIN(bs.size.width, bs.size.height) / 2.0) - 26.0;
+    CGFloat px = cx + dx * R, py = cy + dy * R;
+    CGFloat a = 9.0, nx = -dy, ny = dx;
+    CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.9);
+    CGContextMoveToPoint(ctx, px + dx * a, py + dy * a);
+    CGContextAddLineToPoint(ctx, px - dx * a + nx * a * 0.7, py - dy * a + ny * a * 0.7);
+    CGContextAddLineToPoint(ctx, px - dx * a - nx * a * 0.7, py - dy * a - ny * a * 0.7);
+    CGContextClosePath(ctx);
+    CGContextFillPath(ctx);
+}
+
+/* v0.4.2: borde rojo pulsante cuando hay un enemigo muy cerca. */
+static void mm_draw_warn(CGContextRef ctx, CGRect bs)
+{
+    double t = CACurrentMediaTime();
+    CGFloat a = 0.28 + 0.30 * (0.5 + 0.5 * (CGFloat)sin(t * 6.0));
+    CGContextSetLineWidth(ctx, 6.0);
+    CGContextSetRGBStrokeColor(ctx, 1.0, 0.18, 0.24, a);
+    CGContextStrokeRect(ctx, CGRectMake(3.0, 3.0, bs.size.width - 6.0, bs.size.height - 6.0));
 }
 
 @interface MMCanvasView : UIView @end
@@ -537,14 +575,39 @@ static void mm_draw_fps(CGRect bs)
     CGFloat ar = 0.2, ag = 1.0, ab = 0.58, aalpha = 1.0;
     [mm_neon_green() getRed:&ar green:&ag blue:&ab alpha:&aalpha];
 
+    /* v0.4.2: features nuevas de solo-lectura (reusan g_boxes). */
+    BOOL conHpNum    = mm_def_bool(@"mm_x_hpnum", NO);
+    BOOL conPriority = mm_def_bool(@"mm_x_priority", NO);
+    BOOL conWarn     = mm_def_bool(@"mm_x_warn", NO);
+    BOOL conArrow    = mm_def_bool(@"mm_x_arrow", NO);
+    int  crossStyle  = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
+    if (crossStyle < 0 || crossStyle > 3) crossStyle = 0;
+    int  maxN        = (int)mm_def_float(@"mm_x_maxn", 0.0f);
+    if (maxN < 0) maxN = 0; if (maxN > MM_MAX_BOXES) maxN = MM_MAX_BOXES;
+
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
 
     if (conAimRing) mm_draw_aimring(ctx, bs, ar, ag, ab);
-    if (conCross)   mm_draw_crosshair(ctx, bs, ar, ag, ab);
+    if (conCross)   mm_draw_crosshair(ctx, bs, crossStyle, ar, ag, ab);
     if (conFps)     mm_draw_fps(bs);
 
     if (g_box_count <= 0) return;
+
+    /* v0.4.2: pre-pass — objetivo prioritario (mas cercano vivo) y umbral closest-N. */
+    int priIdx = -1; float priDist = 1e9f; float distThresh = 1e9f;
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        if (!g_boxes[i].alive || g_boxes[i].dist <= 0.0f) continue;
+        if (g_boxes[i].dist < priDist) { priDist = g_boxes[i].dist; priIdx = i; }
+    }
+    if (maxN > 0 && maxN < g_box_count) {
+        float ds[MM_MAX_BOXES]; int n = 0;
+        for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++)
+            if (g_boxes[i].alive && g_boxes[i].dist > 0.0f) ds[n++] = g_boxes[i].dist;
+        for (int a2 = 1; a2 < n; a2++) { float k = ds[a2]; int b2 = a2 - 1;
+            while (b2 >= 0 && ds[b2] > k) { ds[b2 + 1] = ds[b2]; b2--; } ds[b2 + 1] = k; }
+        if (maxN - 1 >= 0 && maxN - 1 < n) distThresh = ds[maxN - 1];
+    }
 
     /* v0.3.4: colores y atributos de texto se preparan UNA vez por frame.
        Antes se creaba un NSShadow + dos NSDictionary por cada caja a 30 fps;
@@ -579,6 +642,7 @@ static void mm_draw_fps(CGRect bs)
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
         MMEspBox *b = &g_boxes[i];
         if (!b->alive) continue;
+        if (maxN > 0 && b->dist > distThresh + 0.01f) continue;   /* v0.4.2: closest-N */
         CGRect r = CGRectMake(b->x, b->y, b->w, b->h);
 
         CGFloat cr = b->robot ? crBot : crJug;
@@ -648,6 +712,28 @@ static void mm_draw_fps(CGRect bs)
             CGContextFillEllipseInRect(ctx, CGRectMake(hx - 2.2, hy - 2.2, 4.4, 4.4));
         }
 
+        /* v0.4.2 (prioridad): resalta en cian el objetivo mas cercano. */
+        if (conPriority && i == priIdx) {
+            CGRect hr = CGRectInset(r, -3.0, -3.0);
+            CGContextSetLineWidth(ctx, 2.2);
+            CGContextSetRGBStrokeColor(ctx, 0.20, 0.95, 1.0, 0.95);
+            CGContextStrokeRect(ctx, hr);
+        }
+        /* v0.4.2 (vida numerica): HP sobre la caja, arriba-derecha. */
+        if (conHpNum && b->hp >= 0.0f && b->hpMax > 1.0f) {
+            NSString *hs = [NSString stringWithFormat:@"%d", (int)(b->hp + 0.5f)];
+            NSDictionary *ha = @{ NSFontAttributeName: fDist,
+                NSForegroundColorAttributeName: [UIColor colorWithRed:cr green:cg blue:cb alpha:0.96],
+                NSShadowAttributeName: txtShadow };
+            [hs drawAtPoint:CGPointMake(CGRectGetMaxX(r) + 2.0, r.origin.y - 1.0) withAttributes:ha];
+        }
+        /* v0.4.2 (flecha off-screen): si la caja cae fuera de pantalla, flecha al borde. */
+        if (conArrow) {
+            CGFloat mx = CGRectGetMidX(r), my = CGRectGetMidY(r);
+            if (mx < 0.0 || mx > bs.size.width || my < 0.0 || my > bs.size.height)
+                mm_draw_edge_arrow(ctx, bs, mx, my, cr, cg, cb);
+        }
+
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
            0.2.5 yo la habia ligado a el y con Cajas OFF desaparecia; el
            test la reporto como "no se ve"). Manda solo el toggle "Salud".
@@ -709,6 +795,8 @@ static void mm_draw_fps(CGRect bs)
         }
     }
 
+    /* v0.4.2 (aviso de enemigo cercano): borde rojo pulsante si el mas cercano < 30 m. */
+    if (conWarn && priIdx >= 0 && priDist < 30.0f) mm_draw_warn(ctx, bs);
 }
 @end
 
@@ -725,6 +813,8 @@ static void mm_draw_fps(CGRect bs)
 - (void)onThemeAccent:(UISegmentedControl *)s;
 - (void)onMenuOpacity:(UISlider *)s;
 - (void)onMenuScale:(UISlider *)s;
+- (void)onCrossStyle:(UISegmentedControl *)s;
+- (void)onMaxN:(UISlider *)s;
 - (void)onPanic:(UILongPressGestureRecognizer *)g;
 - (void)onProfileSlot:(UISegmentedControl *)s;
 - (void)onProfileSave;
@@ -889,6 +979,19 @@ static void mm_draw_fps(CGRect bs)
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_menu_scale"];
     if (g_panel != nil && !g_panel.hidden)
         g_panel.transform = CGAffineTransformMakeScale(s.value, s.value);
+}
+
+/* v0.4.2: estilo de crosshair + limite de objetivos (el lienzo los lee en vivo). */
+- (void)onCrossStyle:(UISegmentedControl *)s
+{
+    [[NSUserDefaults standardUserDefaults] setFloat:(float)s.selectedSegmentIndex
+                                             forKey:@"mm_x_cross_style"];
+    mm_write_status(@"crosshair style");
+}
+- (void)onMaxN:(UISlider *)s
+{
+    [[NSUserDefaults standardUserDefaults] setFloat:(float)(int)(s.value + 0.5f)
+                                             forKey:@"mm_x_maxn"];
 }
 
 /* v0.4.0 #8: kill-switch. Long-press en el boton -> oculta TODO al instante;
@@ -1066,7 +1169,9 @@ static void mm_reset_options(void)
                            @"mm_esp_fill", @"mm_esp_range", @"mm_stream",
                            @"mm_esp_count", @"mm_esp_box_style", @"mm_esp_theme",
                            @"mm_x_cross", @"mm_x_aimring", @"mm_x_fps",
-                           @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp" ];
+                           @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp",
+                           @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn",
+                           @"mm_x_arrow", @"mm_x_cross_style", @"mm_x_maxn" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
     } @catch (NSException *e) {
@@ -2991,9 +3096,12 @@ static void mm_build_ui(void)
     [g_p_more addSubview:xh];
 
     NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
-                        @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps" ];
+                        @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps",
+                        @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow" ];
     NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
-                        @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS" ];
+                        @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS",
+                        @"Vida numerica", @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
+                        @"Flecha fuera de pantalla" ];
     for (NSUInteger i = 0; i < xkeys.count; i++) {
         UIView *xrow = mm_switch_row(xtit[i], xkeys[i], NO);
         xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
@@ -3001,6 +3109,38 @@ static void mm_build_ui(void)
     }
 
     CGFloat ry = 24.0 + (CGFloat)xkeys.count * 31.0 + 10.0;   /* bajo los toggles */
+
+    /* v0.4.2: estilo de crosshair */
+    UILabel *csl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    csl.text = @"Estilo de crosshair";
+    csl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    csl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:csl]; ry += 20.0;
+    UISegmentedControl *css = [[UISegmentedControl alloc]
+        initWithItems:@[@"Cruz", @"Punto", @"Circulo", @"Todo"]];
+    css.frame = CGRectMake(6.0, ry, 272.0, 28.0);
+    { int cv = (int)mm_def_float(@"mm_x_cross_style", 0.0f); if (cv < 0 || cv > 3) cv = 0; css.selectedSegmentIndex = cv; }
+    if ([css respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        css.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
+    [css setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor colorWithWhite:0.88 alpha:1.0],
+        NSFontAttributeName:[UIFont systemFontOfSize:10.0] } forState:UIControlStateNormal];
+    [css addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:css]; ry += 38.0;
+
+    /* v0.4.2: limite de objetivos (closest-N) */
+    UILabel *mnl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    mnl.text = @"Limite de objetivos (0 = todos)";
+    mnl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    mnl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:mnl]; ry += 18.0;
+    UISlider *mns = [[UISlider alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 28.0)];
+    mns.minimumValue = 0.0f; mns.maximumValue = 32.0f;
+    mns.value = mm_def_float(@"mm_x_maxn", 0.0f);
+    mns.tintColor = mm_neon_green();
+    [mns addTarget:[MMTargets shared] action:@selector(onMaxN:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:mns]; ry += 36.0;
 
     /* #10 selector de tema del menu (re-skina todo el acento) */
     UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
