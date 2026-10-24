@@ -3,7 +3,7 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-23T01:53:31.481Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-24T17:55:29.939Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
@@ -20,6 +20,7 @@
 #define VA_PROJ_INJ   0x108BDACF8ULL  /* projectionMatrix_Injected */
 #define VA_TRANSPOS   0x108C63B10ULL  /* Transform.get_position_Injected */
 #define VA_HEALTH     0x1018B5524ULL  /* GetHealth */
+#define VA_ISVISIBLE  0x1087A7B40ULL  /* get_isVisible */
 
 /* --- offsets de struct (pinned por version; validados en runtime) --- */
 #define OFF_GP_LIST         0x178  /* gameplay -> List<Pawn> */

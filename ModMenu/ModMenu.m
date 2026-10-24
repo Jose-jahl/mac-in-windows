@@ -263,7 +263,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.4.3"
+#define MODMENU_VERSION     "0.4.4"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -286,7 +286,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.4.3";
+const char *modmenu_build_id = "modmenu-glass-0.4.4";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -329,15 +329,23 @@ typedef struct {
     uint64_t pawn;              /* v0.2.4: dueno de la caja (estabilidad) */
     CGFloat x, y, w, h;
     float   dist;
+    float   wx, wy, wz;         /* v0.4.4: posicion mundial (radar 2D / altura) */
     float   hp;                 /* v0.2.4: salud actual (-1 = sin dato) */
     float   hpMax;              /* v0.2.4: salud maxima (100 por defecto)*/
     int     robot;
     int     alive;
+    int     visible;            /* v0.4.4 Tier-2: 1 visible, 0 ocluido, -1 sin dato */
     int     hasName;            /* v0.2.4: 1 si name trae nombre real   */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
 } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
+/* v0.4.4: datos para radar 2D / altura / telemetria (se llenan en el colector) */
+static float        g_local_pos[3] = { 0.0f, 0.0f, 0.0f };
+static int          g_have_local = 0;
+static float        g_view_mtx[16];
+static int          g_have_view = 0;
+static double       g_collect_ms = 0.0;
 static int          g_count_players = 0; /* v0.3.0: dibujados por tipo     */
 static int          g_count_bots = 0;
 static UIView      *g_esp   = nil;    /* lienzo MMCanvasView              */
@@ -540,6 +548,55 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
     CGContextStrokeRect(ctx, CGRectMake(3.0, 3.0, bs.size.width - 6.0, bs.size.height - 6.0));
 }
 
+/* v0.4.4 (Fase 1.1): radar 2D norte-arriba (reusa world-pos del colector). */
+static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
+{
+    if (!g_have_local) return;
+    CGFloat R = 54.0, cx = bs.size.width - R - 14.0, cy = R + 48.0;
+    float rng = mm_def_float(@"mm_esp_range", 300.0f); if (rng < 40.0f) rng = 40.0f;
+    CGContextSetRGBFillColor(ctx, 0.02, 0.05, 0.04, 0.55);
+    CGContextFillEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
+    CGContextSetLineWidth(ctx, 1.2);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.6);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.22);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - R * 0.5, cy - R * 0.5, R, R));
+    CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.1);
+    CGContextMoveToPoint(ctx, cx - R, cy); CGContextAddLineToPoint(ctx, cx + R, cy);
+    CGContextMoveToPoint(ctx, cx, cy - R); CGContextAddLineToPoint(ctx, cx, cy + R);
+    CGContextStrokePath(ctx);
+    CGContextSetRGBFillColor(ctx, 0.9, 0.95, 1.0, 0.95);
+    CGContextFillEllipseInRect(ctx, CGRectMake(cx - 2.5, cy - 2.5, 5.0, 5.0));
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        MMEspBox *b = &g_boxes[i];
+        if (!b->alive) continue;
+        float px = cx + ((b->wx - g_local_pos[0]) / rng) * R;
+        float py = cy + ((b->wz - g_local_pos[2]) / rng) * R;
+        float ox = px - cx, oy = py - cy, d = (float)sqrt(ox * ox + oy * oy);
+        if (d > R - 2.0) { float s = (R - 2.0f) / d; px = cx + ox * s; py = cy + oy * s; }
+        if (b->robot) CGContextSetRGBFillColor(ctx, 0.63, 0.30, 1.0, 0.95);
+        else          CGContextSetRGBFillColor(ctx, 1.0, 0.25, 0.30, 0.95);
+        CGContextFillEllipseInRect(ctx, CGRectMake(px - 2.2, py - 2.2, 4.4, 4.4));
+    }
+}
+
+/* v0.4.4 (Fase 1.7): telemetria (tiempo de colecta, cajas, jug/bot). */
+static void mm_draw_telem(CGRect bs)
+{
+    (void)bs;
+    NSString *s = [NSString stringWithFormat:@"col %.1fms  cajas %d  jug %d bot %d",
+                   g_collect_ms, g_box_count, g_count_players, g_count_bots];
+    UIFont *f = [UIFont monospacedDigitSystemFontOfSize:9.0 weight:UIFontWeightMedium];
+    if (f == nil) f = [UIFont systemFontOfSize:9.0];
+    NSShadow *sh = [[NSShadow alloc] init];
+    sh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.8];
+    sh.shadowBlurRadius = 2.0; sh.shadowOffset = CGSizeMake(0.0, 1.0);
+    NSDictionary *a = @{ NSFontAttributeName: f,
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.78 alpha:1.0],
+        NSShadowAttributeName: sh };
+    [s drawAtPoint:CGPointMake(10.0, 60.0) withAttributes:a];
+}
+
 @interface MMCanvasView : UIView @end
 
 @implementation MMCanvasView
@@ -589,12 +646,21 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
     int  maxN        = (int)mm_def_float(@"mm_x_maxn", 0.0f);
     if (maxN < 0) maxN = 0; if (maxN > MM_MAX_BOXES) maxN = MM_MAX_BOXES;
 
+    /* v0.4.4 (Fase 1): overlay de informacion — radar 2D, altura, telemetria.
+       Solo lectura; reusan el world-pos que el colector ya calculo. */
+    BOOL conRadar   = mm_def_bool(@"mm_x_radar", NO);
+    BOOL conHeight  = mm_def_bool(@"mm_x_height", NO);
+    BOOL conTelem   = mm_def_bool(@"mm_x_telem", NO);
+    BOOL conVisMark = mm_def_bool(@"mm_x_vis", NO);       /* Tier-2: marcar visibles */
+
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
 
     if (conAimRing) mm_draw_aimring(ctx, bs, ar, ag, ab);
     if (conCross)   mm_draw_crosshair(ctx, bs, crossStyle, ar, ag, ab);
     if (conFps)     mm_draw_fps(bs);
+    if (conRadar)   mm_draw_radar(ctx, bs, ar, ag, ab);
+    if (conTelem)   mm_draw_telem(bs);
 
     if (g_box_count <= 0) return;
 
@@ -666,6 +732,8 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
         if (conLowHp && b->hp >= 0.0f && b->hpMax > 1.0f && (b->hp / b->hpMax) < 0.30f) {
             cr = 1.0f; cg = 0.78f; cb = 0.12f;
         }
+        /* v0.4.4 (Tier-2): atenua a los que NO estan en linea de vision (visible==0). */
+        if (conVisMark && b->visible == 0) { cr *= 0.48f; cg *= 0.48f; cb *= 0.48f; }
 
         if (conLineas) {
             /* v0.2.5: origen elegible. OFF = borde inferior -> pies de la caja;
@@ -736,6 +804,23 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
             CGFloat mx = CGRectGetMidX(r), my = CGRectGetMidY(r);
             if (mx < 0.0 || mx > bs.size.width || my < 0.0 || my > bs.size.height)
                 mm_draw_edge_arrow(ctx, bs, mx, my, cr, cg, cb);
+        }
+        /* v0.4.4 (altura): diferencia de altura vs. el jugador local (+ arriba / - abajo). */
+        if (conHeight && g_have_local) {
+            float dh = b->wy - g_local_pos[1];
+            NSString *hhs = [NSString stringWithFormat:@"%@%dm",
+                             dh >= 0.0f ? @"▲" : @"▼", (int)(fabsf(dh) + 0.5f)];
+            NSDictionary *hha = @{ NSFontAttributeName: fDist,
+                NSForegroundColorAttributeName: [UIColor colorWithRed:cr green:cg blue:cb alpha:0.92],
+                NSShadowAttributeName: txtShadow };
+            [hhs drawAtPoint:CGPointMake(CGRectGetMaxX(r) + 2.0, CGRectGetMidY(r) - 5.0) withAttributes:hha];
+        }
+        /* v0.4.4 (Tier-2 visibilidad): punto en esquina si el pawn esta en linea de vision. */
+        if (conVisMark && b->visible == 1) {
+            CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.5);
+            CGContextFillEllipseInRect(ctx, CGRectMake(r.origin.x - 2.6, r.origin.y - 2.6, 6.2, 6.2));
+            CGContextSetRGBFillColor(ctx, 0.20, 1.0, 0.58, 0.98);
+            CGContextFillEllipseInRect(ctx, CGRectMake(r.origin.x - 1.8, r.origin.y - 1.8, 4.6, 4.6));
         }
 
         /* v0.2.6: barra de salud INDEPENDIENTE del toggle "Cajas" (en la
@@ -1175,7 +1260,8 @@ static void mm_reset_options(void)
                            @"mm_x_cross", @"mm_x_aimring", @"mm_x_fps",
                            @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp",
                            @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn",
-                           @"mm_x_arrow", @"mm_x_cross_style", @"mm_x_maxn" ];
+                           @"mm_x_arrow", @"mm_x_cross_style", @"mm_x_maxn",
+                           @"mm_x_radar", @"mm_x_height", @"mm_x_telem", @"mm_x_vis" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
     } @catch (NSException *e) {
@@ -1196,7 +1282,8 @@ static NSArray *mm_profile_keys(void)
               @"mm_x_lowhp", @"mm_x_fps", @"mm_theme_accent",
               @"mm_menu_opacity", @"mm_menu_scale",
               @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
-              @"mm_x_cross_style", @"mm_x_maxn" ];   /* 0.4: perfiles completos (v0.4.2) */
+              @"mm_x_cross_style", @"mm_x_maxn",
+              @"mm_x_radar", @"mm_x_height", @"mm_x_telem", @"mm_x_vis" ];   /* 0.4.4: Fase 1 + Tier-2 */
 }
 
 static void mm_profile_save(int slot)
@@ -1707,6 +1794,7 @@ static MMMatFn    g_fp_proj      = NULL;
 static MMVec3Fn   g_fp_transpos  = NULL;
 static MMGetIntFn g_fp_health    = NULL; /* opcional: si no valida, sin salud */
 static MMGetFltFn g_fp_health_f  = NULL; /* v0.2.6: misma direccion, tipo float */
+static MMGetIntFn g_fp_visible   = NULL; /* v0.4.4 Tier-2: opcional (get_isVisible) */
 static int        g_fp_state     = -1;  /* -1 sin probar / 0 error / 1 ok */
 static NSString  *g_esp_diag     = nil; /* motivo del ultimo fallo / ok   */
 static NSString  *g_hp_diag      = nil; /* v0.2.6: muestra cruda de salud */
@@ -1778,6 +1866,7 @@ static void mm_game_resolve(void)
             MMMatFn    fp4 = (MMMatFn)(b + MM_GAME_DELTA(VA_PROJ_INJ));
             MMVec3Fn   fp5 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
             MMGetIntFn fp6 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_HEALTH));
+            MMGetIntFn fp7 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_ISVISIBLE));
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
@@ -1789,6 +1878,8 @@ static void mm_game_resolve(void)
 
             /* el de salud es OPCIONAL: si no valida, el ESP sigue sin barra */
             BOOL hpOk = mm_ptr_en_imagen((const void *)fp6, b);
+            /* v0.4.4 Tier-2: visibilidad tambien OPCIONAL (clase ofuscada). */
+            BOOL visOk = mm_ptr_en_imagen((const void *)fp7, b);
 
             g_game_base    = b;
             g_fp_gameplay  = fp0;
@@ -1799,6 +1890,7 @@ static void mm_game_resolve(void)
             g_fp_transpos  = fp5;
             g_fp_health    = hpOk ? fp6 : NULL;
             g_fp_health_f  = hpOk ? (MMGetFltFn)fp6 : NULL;   /* v0.2.6 */
+            g_fp_visible   = visOk ? fp7 : NULL;              /* v0.4.4 Tier-2 */
             g_fp_state     = 1;
             NSLog(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
@@ -1886,8 +1978,10 @@ static void mm_esp_collect_real(void)
     uint64_t chk = 0;
     if (cam == NULL) { g_esp_diag = @"esperando camara"; return; }
     if (!mm_r64((uintptr_t)cam, &chk)) { g_esp_diag = @"camara ilegible"; return; }
+    double _col_t0 = CACurrentMediaTime();
     g_fp_w2c(cam, view);
     g_fp_proj(cam, proj);
+    memcpy(g_view_mtx, view, sizeof(g_view_mtx)); g_have_view = 1;   /* v0.4.4: radar */
 
     /* gameplay + lista de jugadores */
     void *gp = g_fp_gameplay();
@@ -1922,9 +2016,12 @@ static void mm_esp_collect_real(void)
             haveLocal = isfinite(lpos[0]) && isfinite(lpos[1]) && isfinite(lpos[2]);
         }
     }
+    memcpy(g_local_pos, lpos, sizeof(g_local_pos));   /* v0.4.4: radar/altura */
+    g_have_local = haveLocal ? 1 : 0;
 
     float rango = mm_def_float(@"mm_esp_range", 300.0f);
     BOOL conSalud  = mm_def_bool(@"mm_esp_health", NO);   /* v0.2.4 */
+    BOOL conVis    = mm_def_bool(@"mm_x_vis", NO);        /* v0.4.4 Tier-2: visibilidad */
     BOOL conJug    = mm_def_bool(@"mm_esp_players", NO);  /* v0.2.7: a fabrica */
     BOOL conBots   = mm_def_bool(@"mm_esp_bots", NO);     /* v0.2.7: a fabrica */
     int drawn = 0;
@@ -2061,6 +2158,20 @@ static void mm_esp_collect_real(void)
             }
         }
 
+        /* --- v0.4.4 Tier-2: visibilidad (get_isVisible, OPCIONAL) ---
+           Se llama IGUAL que GetHealth (lectura pura, puntero validado con
+           dladdr). Solo si el operador prendio el toggle y el puntero valido.
+           Se acepta solo 0/1 (bool); cualquier otra cosa = sin dato (-1). */
+        int vis = -1;
+        if (conVis && g_fp_visible != NULL) {
+            uint64_t pk = 0;
+            if (mm_r64((uintptr_t)pawn, &pk)) {
+                int32_t rv = g_fp_visible((void *)(uintptr_t)pawn);
+                int32_t lo = rv & 0xFF;
+                if (lo == 0 || lo == 1) vis = lo;
+            }
+        }
+
         MMEspBox nb;
         memset(&nb, 0, sizeof(nb));
         nb.pawn = pawn;
@@ -2069,10 +2180,12 @@ static void mm_esp_collect_real(void)
         nb.w = bw;
         nb.h = bh;
         nb.dist = dist;
+        nb.wx = wp[0]; nb.wy = wp[1]; nb.wz = wp[2];   /* v0.4.4: world-pos */
         nb.hp = hp;
         nb.hpMax = hpMax;
         nb.robot = robot;
         nb.alive = 1;
+        nb.visible = vis;                              /* v0.4.4 Tier-2 */
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
 
@@ -2105,6 +2218,7 @@ static void mm_esp_collect_real(void)
 
     memcpy(g_boxes, nuevos, sizeof(MMEspBox) * (size_t)drawn);
     g_box_count = drawn;
+    g_collect_ms = (CACurrentMediaTime() - _col_t0) * 1000.0;   /* v0.4.4: telemetria */
     g_esp_diag = [NSString stringWithFormat:
                   @"cam=ok lista=%d cajas=%d jug=%d bot=%d hp=%s%@",
                   total, drawn, g_count_players, g_count_bots,
@@ -3140,11 +3254,13 @@ static void mm_build_ui(void)
 
     NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
                         @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps",
-                        @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow" ];
+                        @"mm_x_hpnum", @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
+                        @"mm_x_radar", @"mm_x_height", @"mm_x_telem", @"mm_x_vis" ];
     NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
                         @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS",
                         @"Vida numerica", @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
-                        @"Flecha fuera de pantalla" ];
+                        @"Flecha fuera de pantalla",
+                        @"Radar 2D", @"Indicador de altura", @"Telemetria", @"Marcar visibles" ];
     for (NSUInteger i = 0; i < xkeys.count; i++) {
         UIView *xrow = mm_switch_row(xtit[i], xkeys[i], NO);
         xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
