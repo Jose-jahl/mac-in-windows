@@ -3,13 +3,16 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-25T02:35:31.302Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-25T04:56:49.766Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
 
 #define FUSION_OFFSETS_VERSION  "1.0.57"
 #define FUSION_OFFSETS_BUILD    "modmenu-glass-0.3.5"
+#define FUSION_PACK_VERSION     "1.0.57"
+#define FUSION_LATEST_PACK      "1.0.57"
+#define FUSION_EXPERIMENT_ID    "exp-1a53be17"
 #define FUSION_IMAGE_BASE       0x100000000ULL
 
 /* --- funciones del juego (VA absolutas) --- */

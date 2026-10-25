@@ -12,6 +12,19 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.7.0 (24 oct) - FASE 1 (cierre) + FASE 4 (producto) EN EL MENU.
+ *    - perfiles: 5 slots con nombre, presets MP/BR/Stream/Bajo y export/import
+ *      JSON por portapapeles;
+ *    - guard termico (thermalState serious/critical baja el ritmo y apaga el
+ *      relleno), Stream automatico si UIScreen.isCaptured y boton fantasma;
+ *    - crash counter: dos arranques sucios seguidos -> modo seguro + aviso;
+ *    - paleta para daltonismo y acento custom con UIColorPickerViewController;
+ *    - guard de captura experimental (canvas de UITextField secureTextEntry,
+ *      opt-in, con fallback a la ventana);
+ *    - licencia in-menu sin red: HWID, pegar token, revalidar y estado;
+ *    - INFO con chips por capa (offsets/ESP/NoJB/lic) + pack y experiment ID;
+ *    - crumbs de la ultima accion y salud de la sesion en el status.
+ *
  *  v0.6.4 (24 oct) - LOTE 2 DE UX + CPU DEL TEXTO.
  *    - lista de objetivos ordenada por distancia (radar/arriba = vista, flecha
  *      relativa a la camara), barra rapida de 3 toggles junto al boton, gestos
@@ -294,11 +307,22 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.6.4"
+#define MODMENU_VERSION     "0.7.0"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
 #include "fusion_offsets.generated.h"
+/* v0.7.0 (4.3/4.4): metadatos del pack. El generador los emite; si un header
+   viejo no los trae, quedan valores honestos (version del contrato / sin ID). */
+#ifndef FUSION_PACK_VERSION
+#define FUSION_PACK_VERSION FUSION_OFFSETS_VERSION
+#endif
+#ifndef FUSION_LATEST_PACK
+#define FUSION_LATEST_PACK FUSION_OFFSETS_VERSION
+#endif
+#ifndef FUSION_EXPERIMENT_ID
+#define FUSION_EXPERIMENT_ID "exp-local"
+#endif
 /* 0.13: matematicas puras (w2s/distancia/box/closest-N). Se incluye TEMPRANO
    porque drawRect (mucho antes del bloque ESP) ya usa closest-N. */
 #include "mm_math.h"
@@ -320,7 +344,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.6.4";
+const char *modmenu_build_id = "modmenu-glass-0.7.0";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -497,6 +521,22 @@ static NSString    *g_probe = nil;    /* texto de la sonda (fase B)       */
 static int          g_probe_ok = -1;  /* -1 pendiente / 0 revisar / 1 ok  */
 static NSString    *g_br_probe = nil; /* BR probe (prologo decodificado)  */
 
+/* v0.7.0 - Fase 1.11/1.12/1.13/4.5: salud del equipo, arranque sucio y crumbs.
+   Todo es estado local; nada de red, nada de llamadas al juego. */
+static int   g_thermal_level = 0;          /* 0 nominal .. 3 critical */
+static int   g_captured = 0;               /* pantalla capturada (record/stream) */
+static int   g_dirty_boots = 0;            /* arranques sin cierre limpio */
+static int   g_boot_forced = 0;            /* modo seguro forzado por crash counter */
+static int   g_boot_alerted = 0;
+static char  g_last_action[48] = "boot";   /* ultima feature tocada (4.5) */
+static NSString *g_lic_status_label = nil; /* 4.2: estado de licencia en MISC */
+static UILabel  *g_lic_label = nil;
+static UILabel  *g_profile_name_label = nil;
+static UIView   *g_secure_host = nil;      /* 1.15: contenedor seguro (opt-in) */
+static UIView   *g_secure_canvas = nil;
+static int       g_secure_canvas_state = -1; /* -1 sin probar / 0 sin canvas / 1 ok */
+static int       g_cb_mode = 0;            /* 1.16: paleta daltonismo */
+
 /* prototipos */
 static void mm_tick(void);
 static void mm_set_panel(BOOL open);
@@ -519,6 +559,12 @@ static NSString *mm_tr(NSString *es);
 static void mm_esp_frame(double t);
 static void mm_profile_save(int slot);   /* v0.4.0 #7: perfiles de config */
 static BOOL mm_profile_load(int slot);
+static NSString *mm_profile_name(int slot);
+static void mm_profile_set_name(int slot, NSString *name);
+static void mm_profile_apply_preset(int which);
+static void mm_profile_export(void);
+static void mm_profile_import(void);
+static BOOL mm_place_ui(void);
 static void mm_esp_collect_real(void);
 static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
@@ -528,6 +574,19 @@ static void mm_br_probe_run(void);     /* 0.6.0: dump de los setters de Radiatio
 static void mm_br_zone_read(void);     /* 0.6.3: lee el manager si hay offsets verificados */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
+static void mm_mark_action(const char *a);
+static void mm_boot_check(void);
+static void mm_health_update(void);
+static BOOL mm_stream_effective(void);
+static UIViewController *mm_top_vc(void);
+static NSString *mm_lic_hwid(void);
+static BOOL mm_lic_verify_token(NSString *token);
+static void mm_lic_save_token(NSString *token);
+static void mm_lic_check(void);
+static void mm_refresh_license_label(void);
+static NSString *mm_lic_short_status(void);
+static BOOL mm_lic_is_valid(void);
+static UIWindow *mm_host_window(void);
 
 /* v0.2.9: fase D (guest reset) */
 static void mm_guest_reset_prompt(void);
@@ -596,6 +655,9 @@ static const MMDrawOpts *mm_draw_opts(void)
     if (o->crossStyle < 0 || o->crossStyle > 3) o->crossStyle = 0;
     if (o->maxN < 0) o->maxN = 0;
     if (o->maxN > MM_MAX_BOXES) o->maxN = MM_MAX_BOXES;
+    /* 1.12: con el equipo caliente se apaga el relleno (lo mas caro de pintar)
+       sin tocar la preferencia del operador. */
+    if (g_thermal_level >= 2) o->fill = NO;
     g_draw_opts_ok = YES;
     return o;
 }
@@ -624,6 +686,23 @@ static const MMDrawOpts *mm_draw_opts(void)
 @end
 
 /*---------------------------------------------------------------------------
+ * v0.7.0 (1.15): host seguro para el guard de captura.
+ *   El contenido vive dentro del canvas de un UITextField secureTextEntry:
+ *   iOS lo excluye de capturas y grabacion. El hitTest del campo se reenvia
+ *   al overlay; fuera del overlay devuelve nil y el toque sigue al juego.
+ *   Es OPT-IN y con fallback: si no hay canvas, la UI queda en la ventana.
+ *--------------------------------------------------------------------------*/
+@interface MMSecureHost : UITextField @end
+
+@implementation MMSecureHost
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event
+{
+    if (g_root == nil || g_root.hidden || g_root.alpha < 0.01) return nil;
+    return [g_root hitTest:point withEvent:event];
+}
+@end
+
+/*---------------------------------------------------------------------------
  * v0.3.0: ayudas de dibujo del pulido ESP.
  *   - tema 0 clasico: jugador rojo / bot ambar;
  *   - tema 1 neon:    jugador verde / bot cian;
@@ -631,6 +710,18 @@ static const MMDrawOpts *mm_draw_opts(void)
  *--------------------------------------------------------------------------*/
 static void mm_esp_color(int robot, int tema, CGFloat *r, CGFloat *g, CGFloat *b)
 {
+    if (g_cb_mode) {
+        /* 1.16: paletas para daltonismo. Naranja vs azul (protan/deutan) y
+           magenta vs verde-cian (tritan) mantienen el par separado. */
+        if (g_cb_mode == 3) {
+            if (robot) { *r = 0.15; *g = 0.85; *b = 0.85; }
+            else       { *r = 0.95; *g = 0.25; *b = 0.85; }
+        } else {
+            if (robot) { *r = 0.30; *g = 0.58; *b = 1.00; }
+            else       { *r = 1.00; *g = 0.62; *b = 0.10; }
+        }
+        return;
+    }
     if (tema == 1) {
         if (robot) { *r = 0.20; *g = 0.85; *b = 1.00; }
         else       { *r = 0.30; *g = 1.00; *b = 0.45; }
@@ -2001,6 +2092,24 @@ static NSString *mm_tr(NSString *es)
         @"Vibracion al tocar": @"Haptics",
         @"Idioma (reiniciar)": @"Language (restart)",
         @"Auto-test del overlay": @"Overlay self-test",
+        @"Perfiles (5 slots)": @"Profiles (5 slots)",
+        @"Nombre": @"Name",
+        @"Exportar": @"Export",
+        @"Importar": @"Import",
+        @"Presets contextuales": @"Context presets",
+        @"Bajo": @"Low-end",
+        @"Stream auto al grabar": @"Auto stream when recording",
+        @"Guard de captura (experimental)": @"Capture guard (experimental)",
+        @"Licencia (observacion)": @"License (observation)",
+        @"Telemetria local (opt-in)": @"Local telemetry (opt-in)",
+        @"Pegar token": @"Paste token",
+        @"Revalidar": @"Revalidate",
+        @"Paleta daltonismo": @"Colorblind palette",
+        @"Normal": @"Normal",
+        @"Color de acento (custom)": @"Accent color (custom)",
+        @"Modo seguro forzado": @"Safe mode forced",
+        @"Dos arranques sin cierre limpio seguidos. El overlay quedo apagado; revisa MISC.":
+            @"Two unclean launches in a row. The overlay is off; check MISC.",
         @"CAJAS": @"BOXES",
         @"NOMBRES": @"NAMES",
         @"Debug (status file): ON  -  tocar = escribir TXT": @"Debug (status file): ON  -  tap = write TXT",
@@ -2040,7 +2149,7 @@ static void mm_haptic(int style)
     } @catch (NSException *e) {}
 }
 
-@interface MMTargets : NSObject
+@interface MMTargets : NSObject <UIColorPickerViewControllerDelegate>
 + (MMTargets *)shared;
 - (void)onFrame:(CADisplayLink *)link;
 - (void)onPanelPan:(UIPanGestureRecognizer *)g;
@@ -2063,6 +2172,14 @@ static void mm_haptic(int style)
 - (void)onHeaderSwipe:(UISwipeGestureRecognizer *)g;
 - (void)onSelfTest:(UIButton *)b;
 - (void)onLang:(UISegmentedControl *)s;
+- (void)onProfileName;
+- (void)onProfileExport;
+- (void)onProfileImport;
+- (void)onPreset:(UIButton *)b;
+- (void)onColorMode:(UISegmentedControl *)s;
+- (void)onAccentPick:(UIButton *)b;
+- (void)onLicensePaste;
+- (void)onLicenseCheck;
 @end
 
 @implementation MMTargets
@@ -2166,6 +2283,8 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_esp_count"]) mm_refresh_count_glass();
     if ([k isEqualToString:@"mm_safe_mode"]) mm_apply_safe_mode();
     if ([k isEqualToString:@"mm_quickbar"]) mm_refresh_quickbar();
+    if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
+    if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_stream"]) {
         mm_apply_stream();
         /* Al activarlo desde VIS se cierra el panel para dejar limpia la
@@ -2360,24 +2479,149 @@ static void mm_haptic(int style)
     mm_write_status(g_panic ? @"panic ON" : @"panic OFF");
 }
 
-/* v0.4.0 #7: perfiles de config (3 slots). */
-- (void)onProfileSlot:(UISegmentedControl *)s { g_profile_slot = (int)s.selectedSegmentIndex; }
+/* v0.4.0 #7 / v0.7.0 (1.8): perfiles de config (5 slots, nombre, presets). */
+- (void)onProfileSlot:(UISegmentedControl *)s
+{
+    g_profile_slot = (int)s.selectedSegmentIndex;
+    if (g_profile_name_label != nil)
+        g_profile_name_label.text = mm_profile_name(g_profile_slot);
+}
 - (void)onProfileSave
 {
     mm_profile_save(g_profile_slot);
+    mm_mark_action("perfil guardar");
     mm_show_alert(@"Perfiles",
-                  [NSString stringWithFormat:@"Configuracion guardada en P%d.", g_profile_slot + 1]);
+                  [NSString stringWithFormat:@"%@ guardado.", mm_profile_name(g_profile_slot)]);
 }
 - (void)onProfileLoad
 {
     if (mm_profile_load(g_profile_slot)) {
+        mm_mark_action("perfil cargar");
         mm_write_status(@"perfil cargado");
         mm_show_alert(@"Perfiles",
-                      [NSString stringWithFormat:@"P%d cargado y aplicado.", g_profile_slot + 1]);
+                      [NSString stringWithFormat:@"%@ cargado y aplicado.", mm_profile_name(g_profile_slot)]);
     } else {
         mm_show_alert(@"Perfiles",
-                      [NSString stringWithFormat:@"P%d esta vacio. Guardalo primero.", g_profile_slot + 1]);
+                      [NSString stringWithFormat:@"%@ esta vacio. Guardalo primero.", mm_profile_name(g_profile_slot)]);
     }
+}
+
+- (void)onProfileName
+{
+    mm_haptic(0);
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"Nombre del perfil"
+                         message:[NSString stringWithFormat:@"Slot %d", g_profile_slot + 1]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = mm_profile_name(g_profile_slot);
+        tf.placeholder = @"MP / BR / Stream / Bajo";
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"Cancelar"
+                                          style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Guardar"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *x) {
+        UITextField *tf = a.textFields.firstObject;
+        mm_profile_set_name(g_profile_slot, tf.text);
+        if (g_profile_name_label != nil)
+            g_profile_name_label.text = mm_profile_name(g_profile_slot);
+    }]];
+    [mm_top_vc() presentViewController:a animated:YES completion:nil];
+}
+
+- (void)onProfileExport
+{
+    mm_mark_action("perfil export");
+    mm_profile_export();
+}
+
+- (void)onProfileImport
+{
+    mm_mark_action("perfil import");
+    mm_profile_import();
+}
+
+/* 1.8: presets contextuales. tag 0 MP / 1 BR / 2 Stream / 3 Bajo. */
+- (void)onPreset:(UIButton *)b
+{
+    mm_haptic(1);
+    mm_profile_apply_preset((int)b.tag);
+    static const char *names[] = { "preset MP", "preset BR", "preset Stream", "preset bajo" };
+    if (b.tag >= 0 && b.tag < 4) mm_mark_action(names[b.tag]);
+    mm_write_status(@"preset aplicado");
+}
+
+/* 1.16: paleta para daltonismo (0 normal / 1 protan-deutan / 3 tritan). */
+- (void)onColorMode:(UISegmentedControl *)s
+{
+    int v = (int)s.selectedSegmentIndex;
+    if (v < 0 || v > 2) v = 0;
+    g_cb_mode = (v == 1) ? 1 : ((v == 2) ? 3 : 0);
+    [[NSUserDefaults standardUserDefaults] setInteger:g_cb_mode forKey:@"mm_color_mode"];
+    mm_opts_invalidate();
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+    mm_write_status(@"paleta daltonismo");
+}
+
+/* 1.16: acento personalizado con UIColorPickerViewController (iOS 14+). */
+- (void)onAccentPick:(UIButton *)b
+{
+    mm_haptic(0);
+    if (@available(iOS 14.0, *)) {
+        UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
+        p.delegate = self;
+        p.supportsAlpha = NO;
+        p.selectedColor = mm_neon_green();
+        UIViewController *vc = mm_top_vc();
+        if (vc != nil) [vc presentViewController:p animated:YES completion:nil];
+    }
+}
+
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)vc
+{
+    CGFloat r = 0.2f, g = 1.0f, b = 0.58f, a = 1.0f;
+    @try { [vc.selectedColor getRed:&r green:&g blue:&b alpha:&a]; } @catch (NSException *e) {}
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setFloat:(float)r forKey:@"mm_accent1_r"];
+    [ud setFloat:(float)g forKey:@"mm_accent1_g"];
+    [ud setFloat:(float)b forKey:@"mm_accent1_b"];
+    [ud setInteger:MM_THEME_COUNT forKey:@"mm_theme_accent"];
+    [ud synchronize];
+    if (g_panel != nil) {
+        g_panel.layer.borderColor = [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
+        g_panel.layer.shadowColor = [mm_neon_purple() colorWithAlphaComponent:0.90].CGColor;
+    }
+    mm_write_status(@"acento custom");
+}
+
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)vc
+{
+    mm_mark_action("acento custom");
+}
+
+/* 4.2: licencia in-menu sin red (token por portapapeles). */
+- (void)onLicensePaste
+{
+    NSString *t = [UIPasteboard generalPasteboard].string;
+    t = [t stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (t.length == 0) {
+        mm_show_alert(@"Licencia", @"El portapapeles esta vacio.");
+        return;
+    }
+    mm_lic_save_token(t);
+    mm_lic_check();
+    mm_refresh_license_label();
+    mm_mark_action("licencia pegar");
+    mm_show_alert(@"Licencia", mm_lic_short_status());
+}
+
+- (void)onLicenseCheck
+{
+    mm_lic_check();
+    mm_refresh_license_label();
+    mm_mark_action("licencia revisar");
+    mm_show_alert(@"Licencia", mm_lic_short_status());
 }
 
 - (void)onGuestReset
@@ -2547,8 +2791,155 @@ static NSArray *mm_profile_keys(void)
               @"mm_x_cross_style", @"mm_x_maxn",
               @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
               @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
-              @"mm_x_radar_cam", @"mm_x_targetlist" ];   /* 0.4.4: Fase 1 (0.5.0: sin hpnum/vis) */
+              @"mm_x_radar_cam", @"mm_x_targetlist",
+              @"mm_auto_stream", @"mm_guard_capture", @"mm_color_mode",
+              @"mm_quickbar" ];   /* v0.7.0: lote 1.8/1.13/1.15/1.16 */
 }
+
+/* v0.7.0 (1.8): cinco slots con nombre, presets contextuales y JSON.
+   Los presets escriben SOLO claves de feature; no tocan idioma, haptics ni
+   posiciones. Nombre y JSON viven en NSUserDefaults / portapapeles. */
+static NSString *mm_profile_name(int slot)
+{
+    NSString *k = [NSString stringWithFormat:@"mm_profile_name_%d", slot];
+    NSString *n = [[NSUserDefaults standardUserDefaults] stringForKey:k];
+    if (n.length == 0) n = [NSString stringWithFormat:@"P%d", slot + 1];
+    return n;
+}
+
+static void mm_profile_set_name(int slot, NSString *name)
+{
+    NSString *n = [name stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (n.length == 0) n = [NSString stringWithFormat:@"P%d", slot + 1];
+    [[NSUserDefaults standardUserDefaults]
+        setObject:n forKey:[NSString stringWithFormat:@"mm_profile_name_%d", slot]];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+static void mm_preset_set(NSDictionary *d)
+{
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    for (NSString *k in d) [ud setObject:d[k] forKey:k];
+    [ud synchronize];
+    mm_opts_invalidate();
+}
+
+static void mm_profile_apply_preset(int which)
+{
+    NSNumber *Y = @YES, *N = @NO;
+    if (which == 0) {          /* MP: tiroteo, poco ruido */
+        mm_preset_set(@{ @"mm_esp_master": Y, @"mm_esp_box": Y, @"mm_esp_players": Y,
+            @"mm_esp_bots": Y, @"mm_esp_name": Y, @"mm_esp_dist": Y, @"mm_esp_health": Y,
+            @"mm_esp_lines": N, @"mm_esp_lines_top": N, @"mm_esp_fill": N,
+            @"mm_esp_range": @150.0f, @"mm_esp_count": N, @"mm_esp_box_style": @0.0f,
+            @"mm_esp_theme": @0.0f, @"mm_stream": N, @"mm_auto_stream": Y,
+            @"mm_x_cross": Y, @"mm_x_aimring": N, @"mm_x_head": N, @"mm_x_distcol": Y,
+            @"mm_x_lowhp": Y, @"mm_x_fps": Y, @"mm_x_priority": Y, @"mm_x_warn": Y,
+            @"mm_x_arrow": Y, @"mm_x_radar": N, @"mm_x_height": Y, @"mm_x_telem": N,
+            @"mm_x_bearings": N, @"mm_x_trails": N, @"mm_x_declutter": Y,
+            @"mm_x_radar_cam": Y, @"mm_x_targetlist": Y, @"mm_x_maxn": @0.0f });
+    } else if (which == 1) {   /* BR: mapa y zona */
+        mm_preset_set(@{ @"mm_esp_master": Y, @"mm_esp_box": Y, @"mm_esp_players": Y,
+            @"mm_esp_bots": Y, @"mm_esp_name": Y, @"mm_esp_dist": Y, @"mm_esp_health": Y,
+            @"mm_esp_lines": Y, @"mm_esp_lines_top": Y, @"mm_esp_fill": N,
+            @"mm_esp_range": @300.0f, @"mm_esp_count": Y, @"mm_esp_box_style": @0.0f,
+            @"mm_esp_theme": @1.0f, @"mm_stream": N, @"mm_auto_stream": Y,
+            @"mm_x_cross": N, @"mm_x_aimring": N, @"mm_x_head": N, @"mm_x_distcol": Y,
+            @"mm_x_lowhp": Y, @"mm_x_fps": Y, @"mm_x_priority": Y, @"mm_x_warn": Y,
+            @"mm_x_arrow": Y, @"mm_x_radar": Y, @"mm_x_height": Y, @"mm_x_telem": Y,
+            @"mm_x_bearings": Y, @"mm_x_trails": Y, @"mm_x_declutter": Y,
+            @"mm_x_radar_cam": Y, @"mm_x_targetlist": Y, @"mm_x_maxn": @0.0f });
+    } else if (which == 2) {   /* Stream: solo lo que se quiere grabar */
+        mm_preset_set(@{ @"mm_esp_master": Y, @"mm_esp_box": Y, @"mm_esp_players": Y,
+            @"mm_esp_bots": Y, @"mm_esp_name": Y, @"mm_esp_dist": Y, @"mm_esp_health": N,
+            @"mm_esp_lines": N, @"mm_esp_lines_top": N, @"mm_esp_fill": N,
+            @"mm_esp_range": @200.0f, @"mm_esp_count": N, @"mm_esp_box_style": @0.0f,
+            @"mm_esp_theme": @2.0f, @"mm_stream": Y, @"mm_auto_stream": Y,
+            @"mm_x_cross": N, @"mm_x_aimring": N, @"mm_x_head": N, @"mm_x_distcol": N,
+            @"mm_x_lowhp": N, @"mm_x_fps": N, @"mm_x_priority": N, @"mm_x_warn": N,
+            @"mm_x_arrow": N, @"mm_x_radar": N, @"mm_x_height": N, @"mm_x_telem": N,
+            @"mm_x_bearings": N, @"mm_x_trails": N, @"mm_x_declutter": Y,
+            @"mm_x_radar_cam": Y, @"mm_x_targetlist": N, @"mm_x_maxn": @0.0f });
+    } else {                   /* Bajo: equipo justo */
+        mm_preset_set(@{ @"mm_esp_master": Y, @"mm_esp_box": Y, @"mm_esp_players": Y,
+            @"mm_esp_bots": Y, @"mm_esp_name": Y, @"mm_esp_dist": Y, @"mm_esp_health": N,
+            @"mm_esp_lines": N, @"mm_esp_lines_top": N, @"mm_esp_fill": N,
+            @"mm_esp_range": @120.0f, @"mm_esp_count": N, @"mm_esp_box_style": @1.0f,
+            @"mm_esp_theme": @0.0f, @"mm_stream": N, @"mm_auto_stream": Y,
+            @"mm_x_cross": N, @"mm_x_aimring": N, @"mm_x_head": N, @"mm_x_distcol": N,
+            @"mm_x_lowhp": N, @"mm_x_fps": N, @"mm_x_priority": Y, @"mm_x_warn": N,
+            @"mm_x_arrow": N, @"mm_x_radar": N, @"mm_x_height": N, @"mm_x_telem": N,
+            @"mm_x_bearings": N, @"mm_x_trails": N, @"mm_x_declutter": N,
+            @"mm_x_radar_cam": Y, @"mm_x_targetlist": N, @"mm_x_maxn": @12.0f });
+    }
+    mm_sync_switches(g_panel);
+    mm_apply_esp_lock();
+    mm_apply_stream();
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+    mm_mark_action("preset");
+}
+
+static void mm_profile_export(void)
+{
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        for (NSString *k in mm_profile_keys()) {
+            id v = [ud objectForKey:k];
+            if (v != nil) d[k] = v;
+        }
+        d[@"_fusion"] = @{ @"slot": @(g_profile_slot),
+                           @"name": mm_profile_name(g_profile_slot),
+                           @"build": @MODMENU_VERSION };
+        NSData *j = [NSJSONSerialization dataWithJSONObject:d options:0 error:nil];
+        if (j == nil) return;
+        NSString *s = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
+        [UIPasteboard generalPasteboard].string = s ?: @"";
+        mm_haptic(1);
+        mm_show_alert(mm_tr(@"Perfil exportado"),
+                      [NSString stringWithFormat:@"%@\n%d claves en el portapapeles.",
+                       mm_profile_name(g_profile_slot), (int)d.count]);
+    } @catch (NSException *e) {
+        MM_LOG(@"%s perfil export: %@", MM_TAG, e.reason);
+    }
+}
+
+static void mm_profile_import(void)
+{
+    @try {
+        NSString *s = [UIPasteboard generalPasteboard].string;
+        if (s.length == 0) {
+            mm_show_alert(mm_tr(@"Importar perfil"), mm_tr(@"El portapapeles esta vacio."));
+            return;
+        }
+        NSData *d = [s dataUsingEncoding:NSUTF8StringEncoding];
+        id o = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (![o isKindOfClass:[NSDictionary class]]) {
+            mm_show_alert(mm_tr(@"Importar perfil"), mm_tr(@"El JSON no es un objeto."));
+            return;
+        }
+        NSDictionary *dict = (NSDictionary *)o;
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        int n = 0;
+        for (NSString *k in mm_profile_keys()) {
+            id v = dict[k];
+            if (v != nil) { [ud setObject:v forKey:k]; n++; }
+        }
+        [ud synchronize];
+        mm_opts_invalidate();
+        mm_sync_switches(g_panel);
+        mm_apply_esp_lock();
+        mm_apply_stream();
+        if (g_esp != nil) [g_esp setNeedsDisplay];
+        mm_haptic(1);
+        mm_show_alert(mm_tr(@"Perfil importado"),
+                      [NSString stringWithFormat:@"%d claves aplicadas.", n]);
+    } @catch (NSException *e) {
+        MM_LOG(@"%s perfil import: %@", MM_TAG, e.reason);
+    }
+}
+
 
 static void mm_profile_save(int slot)
 {
@@ -2679,6 +3070,13 @@ static void mm_esp_frame(double t)
             if (!g_esp.hidden) g_esp.hidden = YES;
             mm_refresh_count_glass();
             return;
+        }
+        /* 1.12: guard termico. serious = 1 de cada 2 frames; critical = 1 de 4.
+           No toca preferencias ni el estado del overlay: solo baja el ritmo. */
+        if (g_thermal_level >= 2) {
+            static unsigned s_thermal_skip = 0;
+            unsigned mod = (g_thermal_level >= 3) ? 4u : 2u;
+            if ((++s_thermal_skip % mod) != 0) return;
         }
         if (g_esp.hidden) { g_esp.hidden = NO; s_digest = 0; }   /* v0.6.2: fuerza 1er paint */
 
@@ -4007,6 +4405,7 @@ static void mm_write_status(NSString *nota)
             @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d arriba=%d rango=%d contador=%d estilo=%d tema=%d\n"
             @"stream=%d\n"
             @"ui=safe=%d quickbar=%d haptics=%d lang=%d objetivos=%d pint_s=%.0f\n"
+            @"salud=temp=%d captura=%d auto_stream=%d guard=%d boot=%d stream_eff=%d crumb=%s\n"
             @"overlay=brujula=%d estelas=%d declutter=%d radar_cam=%d lect_s=%.0f mem_mb=%.0f fov=%.0f\n"
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
@@ -4038,6 +4437,10 @@ static void mm_write_status(NSString *nota)
             mm_lang(),
             (int)mm_def_bool(@"mm_x_targetlist", NO),
             g_paint_fps,
+            g_thermal_level, g_captured,
+            (int)mm_def_bool(@"mm_auto_stream", YES),
+            g_secure_canvas_state, g_dirty_boots,
+            (int)mm_stream_effective(), g_last_action,
             (int)mm_def_bool(@"mm_x_bearings", NO),
             (int)mm_def_bool(@"mm_x_trails", NO),
             (int)mm_def_bool(@"mm_x_declutter", NO),
@@ -4091,21 +4494,39 @@ static const MMTheme g_mm_themes[] = {
 };
 #define MM_THEME_COUNT ((int)(sizeof(g_mm_themes) / sizeof(g_mm_themes[0])))
 
+/* v0.7.0 (1.16): acento personalizado. El indice MM_THEME_COUNT es el slot
+   custom; los temas fijos no cambian. Se lee una vez por uso, no por frame. */
+static UIColor *mm_accent_custom(BOOL secundario)
+{
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSString *suf = secundario ? @"2" : @"1";
+    float r = [ud floatForKey:[@"mm_accent" stringByAppendingFormat:@"%@_r", suf]];
+    float g = [ud floatForKey:[@"mm_accent" stringByAppendingFormat:@"%@_g", suf]];
+    float b = [ud floatForKey:[@"mm_accent" stringByAppendingFormat:@"%@_b", suf]];
+    if ((r + g + b) < 0.05f) {
+        if (secundario) { r = 0.63f; g = 0.30f; b = 1.00f; }
+        else            { r = 0.20f; g = 1.00f; b = 0.58f; }
+    }
+    return [UIColor colorWithRed:r green:g blue:b alpha:1.0];
+}
+
 static int mm_theme_idx(void)
 {
     int i = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"];
-    if (i < 0 || i >= MM_THEME_COUNT) i = 0;
+    if (i < 0 || i > MM_THEME_COUNT) i = 0;   /* == COUNT -> custom */
     return i;
 }
 
 static UIColor *mm_neon_green(void)
 {
+    if (mm_theme_idx() == MM_THEME_COUNT) return mm_accent_custom(NO);
     MMTheme t = g_mm_themes[mm_theme_idx()];
     return [UIColor colorWithRed:t.ar green:t.ag blue:t.ab alpha:1.0];
 }
 
 static UIColor *mm_neon_purple(void)
 {
+    if (mm_theme_idx() == MM_THEME_COUNT) return mm_accent_custom(YES);
     MMTheme t = g_mm_themes[mm_theme_idx()];
     return [UIColor colorWithRed:t.br green:t.bg blue:t.bb alpha:1.0];
 }
@@ -4288,7 +4709,7 @@ static BOOL mm_count_glass_visible(void)
     return g_count_glass != nil &&
            mm_def_bool(@"mm_esp_master", NO) &&
            mm_def_bool(@"mm_esp_count", NO) &&
-           !mm_def_bool(@"mm_stream", NO);
+           !mm_stream_effective();
 }
 
 static void mm_build_count_glass(void)
@@ -4942,15 +5363,15 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:gr];
 
-    /* v0.4.0 #7: perfiles de configuracion (3 slots) */
+    /* v0.7.0 (1.8): perfiles de configuracion, 5 slots con nombre y presets. */
     UILabel *pfl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 78.0, 272.0, 16.0)];
-    pfl.text = mm_tr(@"Perfiles de configuracion");
+    pfl.text = mm_tr(@"Perfiles (5 slots)");
     pfl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
     pfl.font = [UIFont boldSystemFontOfSize:12.0];
     [g_p_misc addSubview:pfl];
 
     UISegmentedControl *pfseg = [[UISegmentedControl alloc]
-        initWithItems:@[@"P1", @"P2", @"P3"]];
+        initWithItems:@[@"P1", @"P2", @"P3", @"P4", @"P5"]];
     pfseg.frame = CGRectMake(6.0, 100.0, 272.0, 28.0);
     pfseg.selectedSegmentIndex = 0;
     if ([pfseg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
@@ -4961,8 +5382,16 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_misc addSubview:pfseg];
 
+    g_profile_name_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 132.0, 272.0, 14.0)];
+    g_profile_name_label.text = mm_profile_name(0);
+    g_profile_name_label.textColor = [mm_neon_green() colorWithAlphaComponent:0.95];
+    g_profile_name_label.font = [UIFont fontWithName:@"Menlo-Bold" size:10.5] ?:
+                                [UIFont boldSystemFontOfSize:10.5];
+    g_profile_name_label.textAlignment = NSTextAlignmentCenter;
+    [g_p_misc addSubview:g_profile_name_label];
+
     UIButton *pfsave = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfsave.frame = CGRectMake(6.0, 134.0, 132.0, 32.0);
+    pfsave.frame = CGRectMake(6.0, 152.0, 132.0, 32.0);
     pfsave.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
     pfsave.layer.cornerRadius = 7.0;
     [pfsave setTitle:mm_tr(@"Guardar") forState:UIControlStateNormal];
@@ -4973,7 +5402,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:pfsave];
 
     UIButton *pfload = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfload.frame = CGRectMake(146.0, 134.0, 132.0, 32.0);
+    pfload.frame = CGRectMake(146.0, 152.0, 132.0, 32.0);
     pfload.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
     pfload.layer.cornerRadius = 7.0;
     [pfload setTitle:mm_tr(@"Cargar") forState:UIControlStateNormal];
@@ -4983,13 +5412,69 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:pfload];
 
+    UIButton *pfname = [UIButton buttonWithType:UIButtonTypeCustom];
+    pfname.frame = CGRectMake(6.0, 190.0, 88.0, 30.0);
+    pfname.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    pfname.layer.cornerRadius = 7.0;
+    [pfname setTitle:mm_tr(@"Nombre") forState:UIControlStateNormal];
+    [pfname setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    pfname.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [pfname addTarget:[MMTargets shared] action:@selector(onProfileName)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:pfname];
+
+    UIButton *pfex = [UIButton buttonWithType:UIButtonTypeCustom];
+    pfex.frame = CGRectMake(98.0, 190.0, 88.0, 30.0);
+    pfex.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    pfex.layer.cornerRadius = 7.0;
+    [pfex setTitle:mm_tr(@"Exportar") forState:UIControlStateNormal];
+    [pfex setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    pfex.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [pfex addTarget:[MMTargets shared] action:@selector(onProfileExport)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:pfex];
+
+    UIButton *pfim = [UIButton buttonWithType:UIButtonTypeCustom];
+    pfim.frame = CGRectMake(190.0, 190.0, 88.0, 30.0);
+    pfim.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    pfim.layer.cornerRadius = 7.0;
+    [pfim setTitle:mm_tr(@"Importar") forState:UIControlStateNormal];
+    [pfim setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    pfim.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [pfim addTarget:[MMTargets shared] action:@selector(onProfileImport)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:pfim];
+
+    UILabel *psh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 228.0, 272.0, 16.0)];
+    psh.text = mm_tr(@"Presets contextuales");
+    psh.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    psh.font = [UIFont systemFontOfSize:11.0];
+    [g_p_misc addSubview:psh];
+
+    NSArray *psn = @[@"MP", @"BR", @"Stream", @"Bajo"];
+    for (NSUInteger i = 0; i < psn.count; i++) {
+        UIButton *pb = [UIButton buttonWithType:UIButtonTypeCustom];
+        pb.frame = CGRectMake(6.0 + (CGFloat)i * 69.0, 246.0, 65.0, 30.0);
+        pb.tag = (NSInteger)i;
+        pb.backgroundColor = [UIColor colorWithRed:0.14 green:0.14 blue:0.30 alpha:0.95];
+        pb.layer.cornerRadius = 7.0;
+        pb.layer.borderWidth = 0.7;
+        pb.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
+        [pb setTitle:psn[i] forState:UIControlStateNormal];
+        [pb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        pb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+        [pb addTarget:[MMTargets shared] action:@selector(onPreset:)
+            forControlEvents:UIControlEventTouchUpInside];
+        [g_p_misc addSubview:pb];
+    }
+
     /* v0.4.3 (0.8): debug — prende el status file (modmenu_status.txt) para diagnosticar.
        Default OFF: sin esto no se escribe evidencia forense. */
     /* v0.6.1: boton de fila completa en lugar del UISwitch. El switch chico
        junto al borde no recibia el toque en algunos equipos; este boton
        comparte pagina con Guardar/Cargar, que si responden. */
     g_dbgbtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    g_dbgbtn.frame = CGRectMake(6.0, 176.0, 272.0, 34.0);
+    g_dbgbtn.frame = CGRectMake(6.0, 286.0, 272.0, 34.0);
     g_dbgbtn.layer.cornerRadius = 8.0;
     g_dbgbtn.layer.borderWidth = 1.0;
     g_dbgbtn.layer.borderColor =
@@ -5003,7 +5488,7 @@ static void mm_build_ui(void)
 
     /* v0.6.1: volcado manual del status, sin depender de ningun toggle. */
     UIButton *stb = [UIButton buttonWithType:UIButtonTypeCustom];
-    stb.frame = CGRectMake(6.0, 214.0, 272.0, 34.0);
+    stb.frame = CGRectMake(6.0, 324.0, 272.0, 34.0);
     stb.backgroundColor = [UIColor colorWithRed:0.10 green:0.30 blue:0.52 alpha:0.95];
     stb.layer.cornerRadius = 8.0;
     stb.layer.borderWidth = 1.0;
@@ -5018,25 +5503,34 @@ static void mm_build_ui(void)
 
     /* v0.6.4: MISC paso a scroll (348 pt ya estaban llenos). */
     UIView *smr = mm_switch_row(@"Modo seguro (apaga overlay)", @"mm_safe_mode", NO);
-    smr.frame = CGRectMake(0, 256.0, 284.0, 34.0);
+    smr.frame = CGRectMake(0, 362.0, 284.0, 34.0);
     [g_p_misc addSubview:smr];
 
     UIView *qbr = mm_switch_row(@"Barra rapida (3 toggles)", @"mm_quickbar", NO);
-    qbr.frame = CGRectMake(0, 290.0, 284.0, 34.0);
+    qbr.frame = CGRectMake(0, 396.0, 284.0, 34.0);
     [g_p_misc addSubview:qbr];
 
     UIView *hpr = mm_switch_row(@"Vibracion al tocar", @"mm_haptics", YES);
-    hpr.frame = CGRectMake(0, 324.0, 284.0, 34.0);
+    hpr.frame = CGRectMake(0, 430.0, 284.0, 34.0);
     [g_p_misc addSubview:hpr];
 
-    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 362.0, 272.0, 16.0)];
+    /* v0.7.0 (1.13/1.15): stream automatico y guard de captura. */
+    UIView *asr = mm_switch_row(@"Stream auto al grabar", @"mm_auto_stream", YES);
+    asr.frame = CGRectMake(0, 464.0, 284.0, 34.0);
+    [g_p_misc addSubview:asr];
+
+    UIView *gcr = mm_switch_row(@"Guard de captura (experimental)", @"mm_guard_capture", NO);
+    gcr.frame = CGRectMake(0, 498.0, 284.0, 34.0);
+    [g_p_misc addSubview:gcr];
+
+    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 536.0, 272.0, 16.0)];
     lgl.text = mm_tr(@"Idioma (reiniciar)");
     lgl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
     lgl.font = [UIFont systemFontOfSize:11.0];
     [g_p_misc addSubview:lgl];
 
     UISegmentedControl *lgs = [[UISegmentedControl alloc] initWithItems:@[@"ES", @"EN"]];
-    lgs.frame = CGRectMake(6.0, 380.0, 272.0, 28.0);
+    lgs.frame = CGRectMake(6.0, 554.0, 272.0, 28.0);
     lgs.selectedSegmentIndex = (mm_lang() == 1) ? 1 : 0;
     if ([lgs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
         lgs.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
@@ -5052,7 +5546,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:lgs];
 
     UIButton *stf = [UIButton buttonWithType:UIButtonTypeCustom];
-    stf.frame = CGRectMake(6.0, 416.0, 272.0, 34.0);
+    stf.frame = CGRectMake(6.0, 592.0, 272.0, 34.0);
     stf.backgroundColor = [UIColor colorWithRed:0.12 green:0.34 blue:0.30 alpha:0.95];
     stf.layer.cornerRadius = 8.0;
     stf.layer.borderWidth = 1.0;
@@ -5065,7 +5559,49 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:stf];
 
-    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 462.0);
+    /* v0.7.0 (4.2): licencia in-menu sin red. */
+    UILabel *licl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 634.0, 272.0, 16.0)];
+    licl.text = mm_tr(@"Licencia (observacion)");
+    licl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
+    licl.font = [UIFont boldSystemFontOfSize:12.0];
+    [g_p_misc addSubview:licl];
+
+    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 652.0, 272.0, 30.0)];
+    g_lic_label.numberOfLines = 2;
+    g_lic_label.textColor = [UIColor colorWithWhite:0.86 alpha:1.0];
+    g_lic_label.font = [UIFont fontWithName:@"Menlo" size:9.0] ?:
+                       [UIFont systemFontOfSize:9.0];
+    g_lic_label.text = mm_lic_short_status();
+    [g_p_misc addSubview:g_lic_label];
+
+    UIButton *licp = [UIButton buttonWithType:UIButtonTypeCustom];
+    licp.frame = CGRectMake(6.0, 686.0, 132.0, 30.0);
+    licp.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
+    licp.layer.cornerRadius = 7.0;
+    [licp setTitle:mm_tr(@"Pegar token") forState:UIControlStateNormal];
+    [licp setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    licp.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [licp addTarget:[MMTargets shared] action:@selector(onLicensePaste)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:licp];
+
+    UIButton *licr = [UIButton buttonWithType:UIButtonTypeCustom];
+    licr.frame = CGRectMake(146.0, 686.0, 132.0, 30.0);
+    licr.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    licr.layer.cornerRadius = 7.0;
+    [licr setTitle:mm_tr(@"Revalidar") forState:UIControlStateNormal];
+    [licr setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    licr.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [licr addTarget:[MMTargets shared] action:@selector(onLicenseCheck)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:licr];
+
+    /* 4.8: telemetria local, opt-in y sin red. */
+    UIView *usr = mm_switch_row(@"Telemetria local (opt-in)", @"mm_usage_optin", NO);
+    usr.frame = CGRectMake(0, 722.0, 284.0, 34.0);
+    [g_p_misc addSubview:usr];
+
+    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 766.0);
 
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
@@ -5150,6 +5686,40 @@ static void mm_build_ui(void)
     [tac addTarget:[MMTargets shared] action:@selector(onThemeAccent:)
         forControlEvents:UIControlEventValueChanged];
     [g_p_more addSubview:tac]; ry += 38.0;
+
+    /* v0.7.0 (1.16): paleta para daltonismo. */
+    UILabel *cbl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    cbl.text = mm_tr(@"Paleta daltonismo");
+    cbl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    cbl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:cbl]; ry += 20.0;
+    UISegmentedControl *cbs = [[UISegmentedControl alloc]
+        initWithItems:@[mm_tr(@"Normal"), @"Protan/Deutan", @"Tritan"]];
+    cbs.frame = CGRectMake(6.0, ry, 272.0, 28.0);
+    cbs.selectedSegmentIndex = (g_cb_mode == 1) ? 1 : ((g_cb_mode == 3) ? 2 : 0);
+    if ([cbs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        cbs.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
+    [cbs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+            [UIColor colorWithWhite:0.88 alpha:1.0],
+            NSFontAttributeName: [UIFont systemFontOfSize:10.0] }
+                        forState:UIControlStateNormal];
+    [cbs addTarget:[MMTargets shared] action:@selector(onColorMode:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:cbs]; ry += 38.0;
+
+    /* v0.7.0 (1.16): acento personalizado (UIColorPickerViewController). */
+    UIButton *acb = [UIButton buttonWithType:UIButtonTypeCustom];
+    acb.frame = CGRectMake(6.0, ry, 272.0, 30.0);
+    acb.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    acb.layer.cornerRadius = 7.0;
+    acb.layer.borderWidth = 0.7;
+    acb.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
+    [acb setTitle:mm_tr(@"Color de acento (custom)") forState:UIControlStateNormal];
+    [acb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    acb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [acb addTarget:[MMTargets shared] action:@selector(onAccentPick:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_more addSubview:acb]; ry += 40.0;
 
     /* #11 opacidad del menu */
     UILabel *ol = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
@@ -5299,7 +5869,7 @@ static void mm_refresh_quickbar(void)
 {
     if (g_quickbar == nil) return;
     BOOL hide = !mm_def_bool(@"mm_quickbar", NO) || g_panel_open || g_panic ||
-                mm_def_bool(@"mm_stream", NO) || mm_def_bool(@"mm_safe_mode", NO);
+                mm_stream_effective() || mm_def_bool(@"mm_safe_mode", NO);
     g_quickbar.hidden = hide;
     if (hide) return;
     mm_layout_quickbar();
@@ -5436,6 +6006,13 @@ static void mm_self_test(void)
     [r appendFormat:@"INFO   %-12s %@\n", "br",
         (BR_STRUCT_MGR_VA != 0ULL) ? @"offsets verificados (reader ON)"
                                    : @"sin offsets (reader OFF, inerte)"];
+    [r appendFormat:@"INFO   %-12s %s · %s · juego %@\n", "pack",
+        FUSION_PACK_VERSION, FUSION_EXPERIMENT_ID, gv];
+    [r appendFormat:@"INFO   %-12s temp=%d captura=%d boot=%d forzado=%d crumb=%s\n", "salud",
+        g_thermal_level, g_captured, g_dirty_boots, g_boot_forced, g_last_action];
+    [r appendFormat:@"INFO   %-12s %@\n", "guard",
+        (g_secure_canvas_state == 1) ? @"canvas seguro disponible"
+            : ((g_secure_canvas_state == 0) ? @"sin canvas (fallback a ventana)" : @"sin probar")];
     [r appendFormat:@"INFO   %-12s pint %.0f/s  lect %.0f/s  mem %.0f MB\n",
         "ritmo", g_paint_fps, g_reads_per_s, g_mem_mb];
 #undef MM_CK
@@ -5467,14 +6044,109 @@ static void mm_apply_esp_lock(void)
     mm_refresh_count_glass();   /* v0.3.2: el maestro tambien manda */
 }
 
+/* v0.7.0 - Fase 1.11/1.12/1.13/4.5: estado local de la sesion. */
+static void mm_mark_action(const char *a)
+{
+    if (a == NULL) return;
+    strncpy(g_last_action, a, sizeof(g_last_action) - 1);
+    g_last_action[sizeof(g_last_action) - 1] = '\0';
+}
+
+static BOOL mm_stream_effective(void)
+{
+    if (mm_def_bool(@"mm_stream", NO)) return YES;
+    return (mm_def_bool(@"mm_auto_stream", YES) && g_captured) ? YES : NO;
+}
+
+/* 1.12 + 1.13 + 1.11: termico, captura de pantalla y arranque limpio. */
+static void mm_write_usage(void)
+{
+    @try {
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) return;
+        NSArray *fkeys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_name",
+                            @"mm_esp_dist", @"mm_esp_health", @"mm_x_radar",
+                            @"mm_x_bearings", @"mm_x_trails", @"mm_x_targetlist",
+                            @"mm_safe_mode", @"mm_stream", @"mm_auto_stream",
+                            @"mm_guard_capture", @"mm_color_mode" ];
+        NSMutableDictionary *f = [NSMutableDictionary dictionary];
+        for (NSString *k in fkeys) f[k] = @(mm_def_bool(k, NO));
+        NSDictionary *d = @{ @"build": @MODMENU_VERSION,
+                             @"game": @FUSION_OFFSETS_VERSION,
+                             @"session_s": @((int)mm_uptime()),
+                             @"thermal": @(g_thermal_level),
+                             @"captured": @(g_captured),
+                             @"features": f };
+        NSData *j = [NSJSONSerialization dataWithJSONObject:d options:0 error:nil];
+        if (j != nil)
+            [j writeToFile:[docs stringByAppendingPathComponent:@"fusion_usage.json"]
+                atomically:YES];
+    } @catch (NSException *e) {}
+}
+
+static void mm_health_update(void)
+{
+    @try {
+        static int s_last_thermal = -1, s_last_stream = -1;
+        static double s_last_usage = -100.0;
+        NSProcessInfoThermalState ts = NSProcessInfo.processInfo.thermalState;
+        g_thermal_level = (int)ts;
+        if (g_thermal_level != s_last_thermal) {
+            s_last_thermal = g_thermal_level;
+            mm_opts_invalidate();
+        }
+        if (@available(iOS 11.0, *))
+            g_captured = UIScreen.mainScreen.isCaptured ? 1 : 0;
+
+        int st = mm_stream_effective() ? 1 : 0;
+        if (st != s_last_stream) {
+            s_last_stream = st;
+            mm_apply_stream();
+        }
+        /* 4.8: telemetria local opt-in, un volcado por minuto. */
+        if (mm_def_bool(@"mm_usage_optin", NO) && (mm_uptime() - s_last_usage) > 60.0) {
+            s_last_usage = mm_uptime();
+            mm_write_usage();
+        }
+        /* 1.11: 20 s con la UI viva = arranque limpio. */
+        if (g_dirty_boots != 0 && mm_uptime() > 20.0) {
+            g_dirty_boots = 0;
+            NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+            [ud setInteger:0 forKey:@"mm_dirty_boots"];
+            [ud synchronize];
+        }
+    } @catch (NSException *e) {}
+}
+
+/* 1.11: dos arranques sin cierre limpio seguidos -> modo seguro y aviso.
+   Se ejecuta en el constructor, antes de que la UI exista. */
+static void mm_boot_check(void)
+{
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        int d = (int)[ud integerForKey:@"mm_dirty_boots"];
+        if (d >= 2) {
+            g_boot_forced = 1;
+            g_dirty_boots = 0;
+            [ud setBool:YES forKey:@"mm_safe_mode"];
+            [ud setInteger:0 forKey:@"mm_dirty_boots"];
+        } else {
+            g_dirty_boots = d + 1;
+            [ud setInteger:g_dirty_boots forKey:@"mm_dirty_boots"];
+        }
+        [ud synchronize];
+        mm_mark_action("boot");
+    } @catch (NSException *e) {}
+}
+
 static void mm_apply_stream(void)
 {
-    BOOL on = mm_def_bool(@"mm_stream", NO);
-    /* v0.3.0: el boton queda al 10% (no desaparece) para poder reabrir el
-       panel y apagar Stream Mode; la marca de agua se oculta de verdad.
-       Cerrar el panel es decision de onSwitch, no de este latido. */
+    BOOL on = mm_stream_effective();
+    /* v0.3.0: el boton queda visible al 10% para poder reabrir el panel y
+       apagar Stream Mode. 1.14: con Stream automatico pasa a "fantasma"
+       (2%) con el mismo hotspot de 54 pt; nunca alpha 0 (perderia toques). */
     if (g_btn != nil) {
-        g_btn.alpha = on ? 0.10 : 1.0;
+        g_btn.alpha = on ? 0.02 : 1.0;
         g_btn.userInteractionEnabled = YES;
     }
     if (g_marca != nil) {
@@ -5580,10 +6252,48 @@ static void mm_refresh_info(void)
                               NSForegroundColorAttributeName: mm_neon_green(),
                               NSKernAttributeName: @2.0 }];
         [t appendAttributedString:[[NSAttributedString alloc]
-            initWithString:[NSString stringWithFormat:@"v%s\n\n", MODMENU_VERSION]
+            initWithString:[NSString stringWithFormat:@"v%s\n", MODMENU_VERSION]
                 attributes:@{ NSFontAttributeName: verFont,
                               NSForegroundColorAttributeName:
                                   [mm_neon_purple() colorWithAlphaComponent:0.95] }]];
+        /* v0.7.0 (4.6): chips de self-check por capa. */
+        {
+            NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
+            int sOff = ([gv isEqualToString:@FUSION_OFFSETS_VERSION] &&
+                        VA_GAMEPLAY != 0 && VA_LOCALPAWN != 0 && VA_MAINCAM != 0) ? 1 : -1;
+            int sEsp = (g_fp_state == 1) ? 1 : ((g_fp_state == 0) ? -1 : 0);
+            int sNojb = (g_nojb_passes > 0) ? 1 : 0;
+            int sLic = mm_lic_is_valid() ? 1 : 0;
+            UIColor *cg = [UIColor colorWithRed:0.20 green:1.00 blue:0.58 alpha:1.0];
+            UIColor *ca = [UIColor colorWithRed:1.00 green:0.72 blue:0.20 alpha:1.0];
+            UIColor *cr = [UIColor colorWithRed:1.00 green:0.35 blue:0.35 alpha:1.0];
+            UIFont *cf = [UIFont boldSystemFontOfSize:10.0];
+#define MM_CHIP(nm, st) do { \
+    UIColor *_c = ((st) == 1) ? cg : (((st) == 0) ? ca : cr); \
+    [t appendAttributedString:[[NSAttributedString alloc] \
+        initWithString:[NSString stringWithFormat:@"● %@  ", (nm)] \
+            attributes:@{ NSFontAttributeName: cf, NSForegroundColorAttributeName: _c }]]; \
+} while (0)
+            MM_CHIP(@"offsets", sOff);
+            MM_CHIP(@"ESP", sEsp);
+            MM_CHIP(@"NoJB", sNojb);
+            MM_CHIP(@"lic", sLic);
+#undef MM_CHIP
+            [t appendAttributedString:[[NSAttributedString alloc]
+                initWithString:[NSString stringWithFormat:@"\npack %s · %s\n",
+                                FUSION_PACK_VERSION, FUSION_EXPERIMENT_ID]
+                    attributes:@{ NSFontAttributeName: verFont,
+                                  NSForegroundColorAttributeName:
+                                      [UIColor colorWithWhite:0.62 alpha:1.0] }]];
+            if (strcmp(FUSION_LATEST_PACK, FUSION_PACK_VERSION) != 0) {
+                [t appendAttributedString:[[NSAttributedString alloc]
+                    initWithString:[NSString stringWithFormat:@"ACTUALIZACION: pack %s disponible\n",
+                                    FUSION_LATEST_PACK]
+                        attributes:@{ NSFontAttributeName: cf,
+                                      NSForegroundColorAttributeName: ca }]];
+            }
+            [t appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
+        }
         [t appendAttributedString:[[NSAttributedString alloc]
             initWithString:mm_tr(@"Aimbot no toggleable para mayor seguridad.\n\n")
                 attributes:@{ NSFontAttributeName: itemFont,
@@ -5615,14 +6325,66 @@ static void mm_refresh_info(void)
 /* Coloca (o recoloca) la UI DENTRO de la ventana del juego. Devuelve YES si
    quedo enganchada. Se ejecuta en el main queue, una vez por tick.
    v0.2.1: ya NO creamos ventana propia (rompia la rotacion y los toques). */
+/* 1.15: elige el contenedor de la UI. Con el guard OFF es la ventana del
+   juego; con el guard ON, el canvas del campo seguro (fallback a la ventana). */
+static UIView *mm_ui_container(UIWindow *host)
+{
+    if (host == nil) return nil;
+    BOOL guard = mm_def_bool(@"mm_guard_capture", NO);
+    if (g_secure_host != nil) g_secure_host.hidden = !guard;
+    if (!guard) return host;
+
+    if (g_secure_host == nil) {
+        MMSecureHost *f = [[MMSecureHost alloc] initWithFrame:host.bounds];
+        f.secureTextEntry = YES;
+        f.textColor = [UIColor clearColor];
+        f.tintColor = [UIColor clearColor];
+        f.backgroundColor = [UIColor clearColor];
+        f.autoresizingMask = UIViewAutoresizingFlexibleWidth |
+                             UIViewAutoresizingFlexibleHeight;
+        g_secure_host = f;
+    }
+    if (g_secure_host.superview != host) {
+        [g_secure_host removeFromSuperview];
+        g_secure_host.frame = host.bounds;
+        [host addSubview:g_secure_host];
+    }
+    [g_secure_host layoutIfNeeded];
+
+    if (g_secure_canvas == nil) {
+        UIView *best = nil;
+        for (UIView *v in g_secure_host.subviews) {
+            NSString *cn = NSStringFromClass(v.class);
+            if ([cn rangeOfString:@"Canvas"].location != NSNotFound ||
+                [cn rangeOfString:@"Content"].location != NSNotFound) { best = v; break; }
+        }
+        if (best == nil && g_secure_host.subviews.count > 0)
+            best = g_secure_host.subviews.firstObject;
+        if (best != nil) {
+            best.userInteractionEnabled = YES;
+            g_secure_canvas = best;
+            g_secure_canvas_state = 1;
+        } else {
+            g_secure_canvas_state = 0;
+        }
+    }
+    if (g_secure_canvas != nil) {
+        g_secure_canvas.frame = g_secure_host.bounds;
+        return g_secure_canvas;
+    }
+    return host;
+}
+
 static BOOL mm_place_ui(void)
 {
     @try {
         UIWindow *host = mm_host_window();
         if (host == nil) return NO;
+        UIView *container = mm_ui_container(host);
+        if (container == nil) return NO;
 
         if (g_root == nil) {
-            g_root = [[MMPassView alloc] initWithFrame:host.bounds];
+            g_root = [[MMPassView alloc] initWithFrame:container.bounds];
             g_root.backgroundColor = [UIColor clearColor];
             g_root.opaque = NO;  /* v0.2.7: capa transparente limpia */
             g_root.autoresizingMask = UIViewAutoresizingFlexibleWidth |
@@ -5630,16 +6392,16 @@ static BOOL mm_place_ui(void)
         }
 
         BOOL recolocar = NO;
-        if (g_root.superview != host) {
+        if (g_root.superview != container) {
             [g_root removeFromSuperview];
-            g_root.frame = host.bounds;
-            [host addSubview:g_root];
+            g_root.frame = container.bounds;
+            [container addSubview:g_root];
             recolocar = YES;
             g_via = "ventana_del_juego";
             MM_LOG(@"%s UI enganchada a la ventana del juego (nivel=%.0f clase=%@)",
                   MM_TAG, host.windowLevel, NSStringFromClass(host.class));
         }
-        if (host.subviews.lastObject != g_root) [host bringSubviewToFront:g_root];
+        if (container.subviews.lastObject != g_root) [container bringSubviewToFront:g_root];
 
         if (g_btn == nil) mm_build_ui();
 
@@ -5766,7 +6528,13 @@ static void mm_tick(void)
         g_tries++;
         if (!g_ui_ok) g_ui_ok = YES;
         BOOL fast = (g_tries <= MM_FAST_TRIES);
+        mm_health_update();
         BOOL ok = mm_place_ui();
+        if (g_boot_forced && !g_boot_alerted && mm_uptime() > 4.0) {
+            g_boot_alerted = 1;
+            mm_show_alert(mm_tr(@"Modo seguro forzado"),
+                          mm_tr(@"Dos arranques sin cierre limpio seguidos. El overlay quedo apagado; revisa MISC."));
+        }
         if (g_probe == nil && mm_uptime() > 2.0) mm_probe_run();
         if (g_br_probe == nil && mm_uptime() > 2.0) mm_br_probe_run();
         mm_refresh_info();
@@ -5981,14 +6749,44 @@ static void mm_lic_check(void)
                     g_lic_exp ? (g_lic_exp - now) / 86400 : 0, g_lic_enforce ? @"si" : @"no"];
     MM_LOG(@"%s licencia: %@ (hwid=%@…)", MM_TAG, st, [mm_lic_hwid() substringToIndex:12]);
     mm_write_status([@"licencia " stringByAppendingString:st]);
+    mm_refresh_license_label();
     /* ENFORCE (cuando se valide en equipo): if (g_lic_enforce && !g_lic_valid)
        -> no instalar hooks / apagar feats; por ahora solo observa. */
+}
+
+/* v0.7.0 (4.2): cliente in-menu sin red. El token se pega desde el
+   portapapeles (lo emite el Studio/servidor), se guarda en el Keychain y se
+   valida con la misma ruta que el arranque. */
+static void mm_lic_save_token(NSString *token)
+{
+    if (token.length == 0) return;
+    mm_lic_kc_set(@"token", [token dataUsingEncoding:NSUTF8StringEncoding]);
+}
+
+static NSString *mm_lic_short_status(void)
+{
+    NSString *h = mm_lic_hwid();
+    NSString *shortH = h.length > 8 ? [h substringToIndex:8] : h;
+    return [NSString stringWithFormat:@"HWID %@  ·  %@  ·  SKU %@",
+            shortH, g_lic_valid ? @"activa" : (g_lic_reason ?: @"sin token"),
+            g_lic_sku ?: @"-"];
+}
+
+static BOOL mm_lic_is_valid(void) { return g_lic_valid; }
+
+static void mm_refresh_license_label(void)
+{
+    if (g_lic_label == nil) return;
+    g_lic_label.text = mm_lic_short_status();
 }
 
 __attribute__((constructor)) static void modmenu_init(void)
 {
     g_t0 = [NSDate date].timeIntervalSinceReferenceDate;
+    mm_boot_check();      /* 1.11: crash counter ANTES de tocar la UI */
     mm_reset_options();   /* v0.2.7: opciones a fabrica en cada arranque */
+    g_cb_mode = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_color_mode"];
+    if (g_cb_mode != 1 && g_cb_mode != 3) g_cb_mode = 0;
     MM_LOG(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
           MM_TAG, MODMENU_VERSION, mm_my_path(), (int)getpid());
     mm_write_status(@"arranque (opciones a fabrica)");
