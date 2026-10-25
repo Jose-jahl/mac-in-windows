@@ -280,7 +280,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.6.2"
+#define MODMENU_VERSION     "0.6.3"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -306,7 +306,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.6.2";
+const char *modmenu_build_id = "modmenu-glass-0.6.3";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -401,6 +401,17 @@ typedef struct {
 } MMTrail;
 static MMTrail      g_trails[MM_MAX_TRAILS];
 
+/* v0.6.3: zona BR leida del manager del juego. Inerte hasta que el contrato
+   traiga offsets verificados (BR_STRUCT_* != 0). Solo se dibuja en el radar. */
+typedef struct {
+    int    ok;
+    float  x, y, z;      /* centro actual (mundo)   */
+    float  r;            /* radio actual (m)        */
+    double t;            /* ultima lectura          */
+} MMBrZone;
+static MMBrZone     g_br_zone;
+static NSString    *g_br_zone_info = nil;
+
 /* v0.4.4: datos para radar 2D / altura / telemetria (se llenan en el colector) */
 static float        g_local_pos[3] = { 0.0f, 0.0f, 0.0f };
 static int          g_have_local = 0;
@@ -442,6 +453,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
 static void mm_br_probe_run(void);     /* 0.6.0: dump de los setters de RadiationZone */
+static void mm_br_zone_read(void);     /* 0.6.3: lee el manager si hay offsets verificados */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 
@@ -885,6 +897,37 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
         CGContextClosePath(ctx);
         CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.96);
         CGContextFillPath(ctx);
+        CGContextRestoreGState(ctx);
+    }
+
+    /* v0.6.3: zona de radiacion actual. Solo aparece si el contrato trae
+       offsets verificados por el probe (si no, g_br_zone.ok == 0). */
+    if (g_br_zone.ok && g_have_local) {
+        CGContextSaveGState(ctx);
+        CGContextAddEllipseInRect(ctx, CGRectMake(cx - (R - 1.0), cy - (R - 1.0),
+                                                 (R - 1.0) * 2.0, (R - 1.0) * 2.0));
+        CGContextClip(ctx);
+        float zdx = g_br_zone.x - g_local_pos[0];
+        float zdz = g_br_zone.z - g_local_pos[2];
+        float zpx, zpy;
+        if (camUp) {
+            float vx = g_view_mtx[0] * zdx + g_view_mtx[8]  * zdz;
+            float vz = g_view_mtx[2] * zdx + g_view_mtx[10] * zdz;
+            zpx = (float)cx + (vx / radarRng) * (float)R;
+            zpy = (float)cy + (vz / radarRng) * (float)R;
+        } else {
+            zpx = (float)cx + (zdx / radarRng) * (float)R;
+            zpy = (float)cy + (zdz / radarRng) * (float)R;
+        }
+        CGFloat zpr = (CGFloat)(g_br_zone.r / radarRng) * R;
+        if (zpr > 0.5) {
+            CGContextSetLineWidth(ctx, 1.5);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.55);
+            CGContextStrokeEllipseInRect(ctx, CGRectMake(zpx - zpr, zpy - zpr,
+                                                         zpr * 2.0, zpr * 2.0));
+        }
+        CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.90);
+        CGContextFillEllipseInRect(ctx, CGRectMake(zpx - 2.0, zpy - 2.0, 4.0, 4.0));
         CGContextRestoreGState(ctx);
     }
 
@@ -2202,6 +2245,12 @@ static unsigned long long mm_frame_digest(void)
     MM_FNV(&tc, sizeof(tc));
     if (bc > 0) MM_FNV(g_boxes, sizeof(MMEspBox) * (size_t)bc);
     if (tc > 0) MM_FNV(g_tracks, sizeof(MMTrack) * (size_t)tc);
+    /* v0.6.3: la zona BR tambien manda (sin el timestamp de lectura). */
+    MM_FNV(&g_br_zone.ok, sizeof(g_br_zone.ok));
+    MM_FNV(&g_br_zone.x, sizeof(g_br_zone.x));
+    MM_FNV(&g_br_zone.y, sizeof(g_br_zone.y));
+    MM_FNV(&g_br_zone.z, sizeof(g_br_zone.z));
+    MM_FNV(&g_br_zone.r, sizeof(g_br_zone.r));
     const MMDrawOpts *o = mm_draw_opts();
     MM_FNV(o, sizeof(*o));
 #undef MM_FNV
@@ -2248,6 +2297,7 @@ static void mm_esp_frame(double t)
         static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
+            mm_br_zone_read();              /* v0.6.3: zona BR (2 Hz, si hay offsets) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
         }
         /* v0.6.2: repintar solo si algo visible cambio. Parado en el lobby o
@@ -2868,6 +2918,63 @@ static BOOL mm_r64(uintptr_t addr, uint64_t *out)
     uint64_t v = mm_safe_read64(addr, &ok);
     if (ok && out != NULL) *out = v;
     return ok;
+}
+
+/* v0.6.3: lee la zona de radiacion actual del manager BR.
+   Requiere offsets VERIFICADOS en el contrato (el header emite 0 si no hay):
+   - BR_STRUCT_MGR_VA   : direccion del slot estatico que guarda el manager
+   - BR_STRUCT_SHAPE_OFF: 3 floats (x,y,z) del centro
+   - BR_STRUCT_RADIUS_OFF: float del radio
+   Si falta cualquiera, la funcion sale sin tocar nada. Lectura a 2 Hz. */
+static void mm_br_zone_read(void)
+{
+    if (BR_STRUCT_MGR_VA == 0ULL || BR_STRUCT_SHAPE_OFF == 0 ||
+        BR_STRUCT_RADIUS_OFF == 0) return;
+    static double s_last = 0.0;
+    double now = CACurrentMediaTime();
+    if (s_last > 0.0 && now - s_last < 0.5) return;
+    s_last = now;
+    @try {
+        const struct mach_header *hdr = _dyld_get_image_header(0);
+        if (hdr == NULL) return;
+        uintptr_t base = (uintptr_t)hdr;
+        uintptr_t slot = base + (uintptr_t)(BR_STRUCT_MGR_VA - FUSION_IMAGE_BASE);
+        uint64_t mgr = 0;
+        if (!mm_r64(slot, &mgr) || mgr == 0) {
+            g_br_zone.ok = 0;
+            g_br_zone_info = @"sin manager";
+            return;
+        }
+        float shp[3] = { 0.0f, 0.0f, 0.0f };
+        if (!mm_vm_read((uintptr_t)mgr + BR_STRUCT_SHAPE_OFF, shp, sizeof(shp))) {
+            g_br_zone.ok = 0;
+            g_br_zone_info = @"shape ilegible";
+            return;
+        }
+        float rad = 0.0f;
+        if (!mm_vm_read((uintptr_t)mgr + BR_STRUCT_RADIUS_OFF, &rad, sizeof(rad))) {
+            g_br_zone.ok = 0;
+            g_br_zone_info = @"radius ilegible";
+            return;
+        }
+        if (!isfinite(shp[0]) || !isfinite(shp[1]) || !isfinite(shp[2]) ||
+            !isfinite(rad) || rad < 1.0f || rad > 50000.0f) {
+            g_br_zone.ok = 0;
+            g_br_zone_info = @"valores fuera de rango";
+            return;
+        }
+        g_br_zone.x = shp[0];
+        g_br_zone.y = shp[1];
+        g_br_zone.z = shp[2];
+        g_br_zone.r = rad;
+        g_br_zone.t = now;
+        g_br_zone.ok = 1;
+        g_br_zone_info = [NSString stringWithFormat:@"r=%.0f c=(%.0f,%.0f)",
+                          rad, shp[0], shp[2]];
+    } @catch (NSException *e) {
+        g_br_zone.ok = 0;
+        g_br_zone_info = @"excepcion";
+    }
 }
 
 /* el puntero cae dentro de la imagen del juego? Acepta dos senales (dladdr
@@ -3496,6 +3603,7 @@ static void mm_write_status(NSString *nota)
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
             @"br_probe=%s\n"
+            @"br_zone=%s\n"
             @"esp_real=%@ lista=%d dibujados=%d jug=%d bot=%d\n"
             @"nojb=%@\n"
             @"nota=%@\n",
@@ -3526,6 +3634,7 @@ static void mm_write_status(NSString *nota)
             (g_link != nil && !g_link.paused) ? "activo" : "parado",
             g_probe != nil ? g_probe.UTF8String : "pendiente",
             g_br_probe != nil ? g_br_probe.UTF8String : "pendiente",
+            g_br_zone_info != nil ? g_br_zone_info.UTF8String : "off",
             (g_esp_diag != nil) ? g_esp_diag : @"-",
             g_esp_players, g_box_count, g_count_players, g_count_bots,
             mm_nojb_resumen(),
