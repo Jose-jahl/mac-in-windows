@@ -5390,14 +5390,14 @@ static void mm_self_test(void)
     if (_c) ok++; else bad++; } while (0)
 
     MM_CK("version", [gv isEqualToString:@FUSION_OFFSETS_VERSION],
-          [NSString stringWithFormat:@"juego %@ / offsets %s", gv, FUSION_OFFSETS_VERSION]);
+          ([NSString stringWithFormat:@"juego %@ / offsets %s", gv, FUSION_OFFSETS_VERSION]));
 
     const struct mach_header *hdr = _dyld_get_image_header(0);
     uint32_t magic = 0;
     BOOL img = (hdr != NULL) && mm_vm_read((uintptr_t)hdr, &magic, sizeof(magic));
     MM_CK("imagen", img && (magic == 0xFEEDFACF || magic == 0xFEEDFACE),
-          img ? [NSString stringWithFormat:@"base=0x%lX", (unsigned long)(uintptr_t)hdr]
-              : @"cabecera ilegible");
+          (img ? [NSString stringWithFormat:@"base=0x%lX", (unsigned long)(uintptr_t)hdr]
+               : @"cabecera ilegible"));
 
     BOOL offs = (VA_GAMEPLAY != 0 && VA_LOCALPAWN != 0 && VA_MAINCAM != 0 &&
                  VA_W2C_INJ != 0 && VA_PROJ_INJ != 0 && VA_TRANSPOS != 0 &&
@@ -5416,7 +5416,7 @@ static void mm_self_test(void)
 
     BOOL canvasOk = (g_esp != nil && g_link != nil && !g_link.paused);
     MM_CK("lienzo", canvasOk,
-          canvasOk ? [NSString stringWithFormat:@"link %.0f fps", g_fps] : @"sin display link");
+          (canvasOk ? [NSString stringWithFormat:@"link %.0f fps", g_fps] : @"sin display link"));
 
     if (g_fp_state == 1)
         MM_CK("punteros", YES, @"ESP resolvio las funciones");
@@ -5427,7 +5427,7 @@ static void mm_self_test(void)
 
     if (g_collect_ms > 0.0)
         MM_CK("colecta", g_collect_ms < 12.0,
-              [NSString stringWithFormat:@"%.1f ms  cajas %d", g_collect_ms, g_box_count]);
+              ([NSString stringWithFormat:@"%.1f ms  cajas %d", g_collect_ms, g_box_count]));
     else
         [r appendFormat:@"INFO   %-12s %@\n", "colecta", @"sin datos (ESP nunca activado)"];
 
