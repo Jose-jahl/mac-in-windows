@@ -12,6 +12,15 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.7.1 (25 oct) - CIERRE DE FASE 1 + REVOCACION OFFLINE.
+ *    - lista de objetivos con nombre + HP y toque para resaltar la caja;
+ *    - doble toque en el boton = maestro; swipe de 2 dedos en el encabezado =
+ *      perfil anterior/siguiente; el toque simple sigue abriendo el panel;
+ *    - dos acentos custom y 3 temas guardados (T1/T2/T3);
+ *    - marca HWID opt-in en INFO (hash corto, no el HWID completo);
+ *    - auto-test copiable al portapapeles;
+ *    - revocacion offline: fusion_config.json firmado con "revoked": [hwid].
+ *
  *  v0.7.0 (24 oct) - FASE 1 (cierre) + FASE 4 (producto) EN EL MENU.
  *    - perfiles: 5 slots con nombre, presets MP/BR/Stream/Bajo y export/import
  *      JSON por portapapeles;
@@ -307,7 +316,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.0"
+#define MODMENU_VERSION     "0.7.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -361,7 +370,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.0";
+const char *modmenu_build_id = "modmenu-glass-0.7.1";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -400,6 +409,9 @@ static const char *g_via   = "-";     /* donde quedo colgada la UI        */
 static BOOL  g_panel_open  = NO;
 static BOOL  g_panic       = NO;  /* v0.4.0 #8: kill-switch (long-press boton)  */
 static int   g_profile_slot = 0;  /* v0.4.0 #7: slot de perfil seleccionado     */
+static UISegmentedControl *g_profile_seg = nil;  /* v0.7.0: sincroniza swipe */
+static int   g_theme_slot = 0;    /* v0.7.0: slot de tema guardado              */
+static int   g_accent_slot = 0;   /* v0.7.0: 0 = acento 1, 1 = acento 2        */
 static CGPoint g_panel_drag0;         /* v0.2.4: inicio de arrastre panel */
 static int   g_tries       = 0;
 static NSTimeInterval g_t0 = 0;
@@ -430,6 +442,7 @@ static int          g_box_count = 0;  /* cajas listas para pintar         */
    el radar, el contador JUG/BOT y la flecha "detras de ti" salen de aca. */
 #define MM_MAX_TRACKS 64
 typedef struct {
+    uint64_t pawn;      /* v0.7.0: enlace con la caja (nombre/HP en la lista) */
     float wx, wy, wz;   /* posicion mundial del pawn                    */
     float dist;         /* distancia al jugador local (m)               */
     float vx, vy;       /* coords en espacio de camara (dir. si detras) */
@@ -442,6 +455,37 @@ typedef struct {
 } MMTrack;
 static MMTrack      g_tracks[MM_MAX_TRACKS];
 static int          g_track_count = 0;
+
+/* v0.7.0 (1.2): lista de objetivos interactiva. La fila tocada resalta la
+   caja del pawn; el area de toque es SOLO el rectangulo de la lista y solo
+   cuando la lista esta visible (el resto del overlay sigue dejando pasar). */
+#define MM_TL_ROWS     6
+#define MM_TL_BOX_X    6.0
+#define MM_TL_BOX_Y    92.0
+#define MM_TL_BOX_W    148.0
+#define MM_TL_ROW_Y    110.0
+#define MM_TL_ROW_H    14.0
+static uint64_t     g_tl_sel_pawn = 0;
+static double       g_tl_sel_t = 0.0;
+
+/* Orden por distancia de los tracks vivos (mismo criterio que el dibujo). */
+static int mm_tl_order(int *idx, int max)
+{
+    int n = 0;
+    for (int k = 0; k < max; k++) {
+        int best = -1; float bd = 1.0e9f;
+        for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
+            if (!g_tracks[i].alive) continue;
+            BOOL used = NO;
+            for (int q = 0; q < n; q++) if (idx[q] == i) { used = YES; break; }
+            if (used) continue;
+            if (g_tracks[i].dist < bd) { bd = g_tracks[i].dist; best = i; }
+        }
+        if (best < 0) break;
+        idx[n++] = best;
+    }
+    return n;
+}
 
 /* v0.6.4: cache de los NSString que drawRect usa por caja (nombre, distancia y
    altura). Antes cada frame creaba hasta 3 NSString por enemigo; con 32 cajas a
@@ -557,6 +601,7 @@ static int       g_cb_mode = 0;            /* 1.16: paleta daltonismo */
 static int       g_cfg_loaded = 0;
 static int       g_cfg_valid = 0;
 static NSSet    *g_cfg_disabled = nil;
+static NSSet    *g_cfg_revoked = nil;   /* 4.2: HWIDs revocados por config firmado */
 static NSString *g_cfg_latest = nil;
 static NSString *g_cfg_error = nil;
 
@@ -609,6 +654,8 @@ static void mm_lic_check(void);
 static void mm_refresh_license_label(void);
 static NSString *mm_lic_short_status(void);
 static BOOL mm_lic_is_valid(void);
+static NSString *mm_build_mark(void);
+static void mm_refresh_info(void);
 static UIWindow *mm_host_window(void);
 
 /* v0.2.9: fase D (guest reset) */
@@ -1330,21 +1377,11 @@ static void mm_draw_target_list(CGContextRef ctx, CGRect bs)
     (void)bs;
     if (!g_have_local || g_track_count <= 0) return;
 
-    enum { MM_TL_ROWS = 6 };
-    int idx[MM_TL_ROWS]; int n = 0;
-    for (int k = 0; k < MM_TL_ROWS; k++) {
-        int best = -1; float bd = 1.0e9f;
-        for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
-            if (!g_tracks[i].alive) continue;
-            BOOL used = NO;
-            for (int q = 0; q < n; q++) if (idx[q] == i) { used = YES; break; }
-            if (used) continue;
-            if (g_tracks[i].dist < bd) { bd = g_tracks[i].dist; best = i; }
-        }
-        if (best < 0) break;
-        idx[n++] = best;
-    }
+    int idx[MM_TL_ROWS];
+    int n = mm_tl_order(idx, MM_TL_ROWS);
     if (n <= 0) return;
+    if (g_tl_sel_pawn != 0 &&
+        (CACurrentMediaTime() - g_tl_sel_t) > 6.0) g_tl_sel_pawn = 0;
 
     const MMDrawOpts *o = mm_draw_opts();
     static UIFont *hf = nil, *rf = nil;
@@ -1371,7 +1408,7 @@ static void mm_draw_target_list(CGContextRef ctx, CGRect bs)
         raTheme = o->theme;
     }
 
-    CGFloat x = 10.0, y = 96.0, w = 140.0, rh = 14.0;
+    CGFloat x = 10.0, y = 96.0, w = 140.0, rh = MM_TL_ROW_H;
     CGFloat hgt = 16.0 + rh * (CGFloat)n + 4.0;
     CGContextSetRGBFillColor(ctx, 0.01, 0.03, 0.02, 0.46);
     CGContextFillRect(ctx, CGRectMake(x - 4.0, y - 4.0, w, hgt));
@@ -1384,8 +1421,25 @@ static void mm_draw_target_list(CGContextRef ctx, CGRect bs)
 
     for (int k = 0; k < n; k++) {
         MMTrack *t = &g_tracks[idx[k]];
-        NSString *line = [NSString stringWithFormat:@"%3dm  %@",
-                          (int)(t->dist + 0.5f), t->robot ? @"BOT" : @"JUG"];
+        const MMEspBox *b = NULL;
+        for (int q = 0; q < g_box_count; q++) {
+            if (g_boxes[q].alive && g_boxes[q].pawn == t->pawn) { b = &g_boxes[q]; break; }
+        }
+        NSString *nm = nil;
+        if (b != NULL && b->hasName) {
+            nm = [NSString stringWithUTF8String:b->name];
+        }
+        if (nm.length == 0) nm = t->robot ? @"BOT" : @"JUG";
+        if (nm.length > 9) nm = [nm substringToIndex:9];
+        int hp = (b != NULL && b->hp >= 0.0f) ? (int)(b->hp + 0.5f) : -1;
+        NSString *line = (hp >= 0)
+            ? [NSString stringWithFormat:@"%3dm %@ %3d", (int)(t->dist + 0.5f), nm, hp]
+            : [NSString stringWithFormat:@"%3dm %@", (int)(t->dist + 0.5f), nm];
+
+        if (t->pawn != 0 && t->pawn == g_tl_sel_pawn) {
+            CGContextSetRGBFillColor(ctx, 0.20, 1.0, 0.58, 0.18);
+            CGContextFillRect(ctx, CGRectMake(x - 3.0, y - 2.0, w - 1.0, rh));
+        }
         [line drawAtPoint:CGPointMake(x, y) withAttributes:(t->robot ? raBot : raJug)];
 
         /* flecha relativa a la camara: arriba = al frente. */
@@ -1663,6 +1717,21 @@ static int mm_declutter_budget(void)
 @interface MMCanvasView : UIView @end
 
 @implementation MMCanvasView
+/* v0.7.0 (1.2): el lienzo solo captura toques dentro de la lista de objetivos
+   y solo cuando la lista esta visible. Fuera de ahi devuelve nil y el toque
+   sigue al juego, igual que antes. */
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event
+{
+    if (g_panel_open) return nil;
+    if (!mm_def_bool(@"mm_esp_master", NO) ||
+        !mm_def_bool(@"mm_x_targetlist", NO) ||
+        mm_def_bool(@"mm_safe_mode", NO) || g_panic || mm_stream_effective()) return nil;
+    if (CGRectContainsPoint(CGRectMake(MM_TL_BOX_X, MM_TL_BOX_Y,
+                                       MM_TL_BOX_W, 16.0 + MM_TL_ROW_H * MM_TL_ROWS + 4.0),
+                            point)) return self;
+    return nil;
+}
+
 - (void)drawRect:(CGRect)rect
 {
     /* v0.6.4: ritmo REAL de pintado (EMA). El FPS del display link no dice
@@ -1878,6 +1947,14 @@ static int mm_declutter_budget(void)
             CGContextSetLineWidth(ctx, 0.9);
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.84);
             mm_esp_box_path(ctx, r, estiloCaja);
+            CGContextStrokePath(ctx);
+        }
+
+        /* v0.7.0 (1.2): objetivo elegido en la lista -> aro blanco en la caja. */
+        if (g_tl_sel_pawn != 0 && b->pawn == g_tl_sel_pawn) {
+            CGContextSetLineWidth(ctx, 2.6);
+            CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.95);
+            mm_esp_box_path(ctx, CGRectInset(r, -3.0, -3.0), estiloCaja);
             CGContextStrokePath(ctx);
         }
 
@@ -2129,6 +2206,12 @@ static NSString *mm_tr(NSString *es)
         @"Revalidar": @"Revalidate",
         @"Paleta daltonismo": @"Colorblind palette",
         @"Normal": @"Normal",
+        @"Marca HWID en INFO (opt-in)": @"HWID mark in INFO (opt-in)",
+        @"Copiar self-test": @"Copy self-test",
+        @"Acento 1": @"Accent 1",
+        @"Acento 2": @"Accent 2",
+        @"Temas guardados": @"Saved themes",
+        @"Temas": @"Themes",
         @"Color de acento (custom)": @"Accent color (custom)",
         @"Modo seguro forzado": @"Safe mode forced",
         @"Dos arranques sin cierre limpio seguidos. El overlay quedo apagado; revisa MISC.":
@@ -2194,6 +2277,14 @@ static void mm_haptic(int style)
 - (void)onHeaderDoubleTap:(UITapGestureRecognizer *)g;
 - (void)onHeaderSwipe:(UISwipeGestureRecognizer *)g;
 - (void)onSelfTest:(UIButton *)b;
+- (void)onSelfTestCopy;
+- (void)onTargetListTap:(UITapGestureRecognizer *)g;
+- (void)onButtonDoubleTap:(UITapGestureRecognizer *)g;
+- (void)onButtonTripleTap:(UITapGestureRecognizer *)g;
+- (void)onProfileSwipe:(UISwipeGestureRecognizer *)g;
+- (void)onThemeSlot:(UISegmentedControl *)s;
+- (void)onThemeSave;
+- (void)onThemeLoad;
 - (void)onLang:(UISegmentedControl *)s;
 - (void)onProfileName;
 - (void)onProfileExport;
@@ -2304,6 +2395,14 @@ static void mm_haptic(int style)
     mm_opts_invalidate();
     if ([k isEqualToString:@"mm_esp_master"]) mm_apply_esp_lock();
     if ([k isEqualToString:@"mm_esp_count"]) mm_refresh_count_glass();
+    if ([k isEqualToString:@"mm_x_targetlist"]) {
+        if (!s.on) g_tl_sel_pawn = 0;
+        if (g_esp != nil) [g_esp setNeedsDisplay];
+    }
+    if ([k isEqualToString:@"mm_build_mark"] && g_info != nil) {
+        g_info.attributedText = nil;
+        mm_refresh_info();
+    }
     if ([k isEqualToString:@"mm_safe_mode"]) mm_apply_safe_mode();
     if ([k isEqualToString:@"mm_quickbar"]) mm_refresh_quickbar();
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
@@ -2400,6 +2499,142 @@ static void mm_haptic(int style)
 {
     mm_haptic(1);
     mm_self_test();
+}
+
+/* 1.20: copiar el ultimo self_test.txt al portapapeles (codigo copiable). */
+- (void)onSelfTestCopy
+{
+    NSString *docs = mm_docs_dir();
+    NSString *p = (docs.length > 0)
+        ? [docs stringByAppendingPathComponent:@"self_test.txt"] : nil;
+    NSString *s = p ? [NSString stringWithContentsOfFile:p
+                                                encoding:NSUTF8StringEncoding
+                                                   error:NULL] : nil;
+    if (s.length == 0) {
+        mm_show_alert(@"Auto-test", @"No hay self_test.txt. Corre el auto-test primero.");
+        return;
+    }
+    [UIPasteboard generalPasteboard].string = s;
+    mm_haptic(1);
+    mm_show_alert(@"Auto-test", @"self_test.txt copiado al portapapeles.");
+}
+
+/* 1.2: tocar una fila de la lista resalta esa caja durante 6 s. */
+- (void)onTargetListTap:(UITapGestureRecognizer *)g
+{
+    UIView *v = g.view;
+    if (v == nil) return;
+    CGPoint p = [g locationInView:v];
+    int idx[MM_TL_ROWS];
+    int n = mm_tl_order(idx, MM_TL_ROWS);
+    int row = (int)floor((p.y - MM_TL_ROW_Y) / MM_TL_ROW_H);
+    if (row < 0 || row >= n) {
+        g_tl_sel_pawn = 0;
+    } else {
+        g_tl_sel_pawn = g_tracks[idx[row]].pawn;
+        g_tl_sel_t = CACurrentMediaTime();
+        mm_haptic(0);
+    }
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+}
+
+/* 1.10: doble toque = maestro; triple toque = radar. Un toque sigue abriendo
+   el panel. Los reconocedores se encadenan para no disparar el panel antes. */
+- (void)onButtonDoubleTap:(UITapGestureRecognizer *)g
+{
+    BOOL on = !mm_def_bool(@"mm_esp_master", NO);
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:@"mm_esp_master"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    mm_opts_invalidate();
+    mm_apply_esp_lock();
+    mm_sync_switches(g_panel);
+    mm_haptic(on ? 1 : 0);
+    mm_write_status(on ? @"master ON (doble toque)" : @"master OFF (doble toque)");
+}
+
+- (void)onButtonTripleTap:(UITapGestureRecognizer *)g
+{
+    BOOL on = !mm_def_bool(@"mm_x_radar", NO);
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:@"mm_x_radar"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    mm_opts_invalidate();
+    mm_sync_switches(g_panel);
+    mm_haptic(1);
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+    mm_write_status(on ? @"radar ON (triple toque)" : @"radar OFF (triple toque)");
+}
+
+/* 1.10: swipe de dos dedos en el encabezado -> perfil anterior/siguiente.
+   Dos dedos para no chocar con el arrastre de una mano. */
+- (void)onProfileSwipe:(UISwipeGestureRecognizer *)g
+{
+    int dir = (g.direction == UISwipeGestureRecognizerDirectionRight) ? -1 : 1;
+    g_profile_slot = (g_profile_slot + dir + 5) % 5;
+    if (g_profile_seg != nil) g_profile_seg.selectedSegmentIndex = g_profile_slot;
+    if (g_profile_name_label != nil)
+        g_profile_name_label.text = mm_profile_name(g_profile_slot);
+    if (mm_profile_load(g_profile_slot)) {
+        mm_mark_action("perfil swipe");
+        mm_write_status(@"perfil por swipe");
+        mm_haptic(1);
+    } else {
+        mm_haptic(0);
+        mm_write_status(@"slot de perfil vacio");
+    }
+}
+
+/* 1.16: temas guardados (3 slots). Guardan el acento activo y los dos colores
+   custom; no tocan features ni posiciones. */
+- (void)onThemeSlot:(UISegmentedControl *)s
+{
+    g_theme_slot = (int)s.selectedSegmentIndex;
+    if (g_theme_slot < 0 || g_theme_slot > 2) g_theme_slot = 0;
+}
+
+- (void)onThemeSave
+{
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSString *p = [NSString stringWithFormat:@"mm_thsave_%d_", g_theme_slot];
+    [ud setInteger:[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"]
+            forKey:[p stringByAppendingString:@"accent"]];
+    [ud setFloat:[ud floatForKey:@"mm_accent1_r"] forKey:[p stringByAppendingString:@"a1r"]];
+    [ud setFloat:[ud floatForKey:@"mm_accent1_g"] forKey:[p stringByAppendingString:@"a1g"]];
+    [ud setFloat:[ud floatForKey:@"mm_accent1_b"] forKey:[p stringByAppendingString:@"a1b"]];
+    [ud setFloat:[ud floatForKey:@"mm_accent2_r"] forKey:[p stringByAppendingString:@"a2r"]];
+    [ud setFloat:[ud floatForKey:@"mm_accent2_g"] forKey:[p stringByAppendingString:@"a2g"]];
+    [ud setFloat:[ud floatForKey:@"mm_accent2_b"] forKey:[p stringByAppendingString:@"a2b"]];
+    [ud synchronize];
+    mm_haptic(1);
+    mm_show_alert(@"Temas", [NSString stringWithFormat:@"Tema guardado en T%d.", g_theme_slot + 1]);
+}
+
+- (void)onThemeLoad
+{
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSString *p = [NSString stringWithFormat:@"mm_thsave_%d_", g_theme_slot];
+    if ([ud objectForKey:[p stringByAppendingString:@"accent"]] == nil) {
+        mm_show_alert(@"Temas", [NSString stringWithFormat:@"T%d esta vacio.", g_theme_slot + 1]);
+        return;
+    }
+    [ud setInteger:[ud integerForKey:[p stringByAppendingString:@"accent"]]
+            forKey:@"mm_theme_accent"];
+    [ud setFloat:[ud floatForKey:[p stringByAppendingString:@"a1r"]] forKey:@"mm_accent1_r"];
+    [ud setFloat:[ud floatForKey:[p stringByAppendingString:@"a1g"]] forKey:@"mm_accent1_g"];
+    [ud setFloat:[ud floatForKey:[p stringByAppendingString:@"a1b"]] forKey:@"mm_accent1_b"];
+    [ud setFloat:[ud floatForKey:[p stringByAppendingString:@"a2r"]] forKey:@"mm_accent2_r"];
+    [ud setFloat:[ud floatForKey:[p stringByAppendingString:@"a2g"]] forKey:@"mm_accent2_g"];
+    [ud setFloat:[ud floatForKey:[p stringByAppendingString:@"a2b"]] forKey:@"mm_accent2_b"];
+    [ud synchronize];
+    if (g_panel != nil) {
+        g_panel.layer.borderColor =
+            [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
+        g_panel.layer.shadowColor =
+            [mm_neon_purple() colorWithAlphaComponent:0.90].CGColor;
+    }
+    mm_opts_invalidate();
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+    mm_haptic(1);
+    mm_write_status(@"tema guardado cargado");
 }
 
 - (void)onLang:(UISegmentedControl *)s
@@ -2587,15 +2822,17 @@ static void mm_haptic(int style)
     mm_write_status(@"paleta daltonismo");
 }
 
-/* 1.16: acento personalizado con UIColorPickerViewController (iOS 14+). */
+/* 1.16: acento personalizado con UIColorPickerViewController (iOS 14+).
+   tag 0 = acento primario, tag 1 = secundario. */
 - (void)onAccentPick:(UIButton *)b
 {
     mm_haptic(0);
+    g_accent_slot = (b.tag == 1) ? 1 : 0;
     if (@available(iOS 14.0, *)) {
         UIColorPickerViewController *p = [[UIColorPickerViewController alloc] init];
         p.delegate = self;
         p.supportsAlpha = NO;
-        p.selectedColor = mm_neon_green();
+        p.selectedColor = (g_accent_slot == 1) ? mm_neon_purple() : mm_neon_green();
         UIViewController *vc = mm_top_vc();
         if (vc != nil) [vc presentViewController:p animated:YES completion:nil];
     }
@@ -2606,16 +2843,19 @@ static void mm_haptic(int style)
     CGFloat r = 0.2f, g = 1.0f, b = 0.58f, a = 1.0f;
     @try { [vc.selectedColor getRed:&r green:&g blue:&b alpha:&a]; } @catch (NSException *e) {}
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setFloat:(float)r forKey:@"mm_accent1_r"];
-    [ud setFloat:(float)g forKey:@"mm_accent1_g"];
-    [ud setFloat:(float)b forKey:@"mm_accent1_b"];
+    NSString *suf = (g_accent_slot == 1) ? @"2" : @"1";
+    [ud setFloat:(float)r forKey:[@"mm_accent" stringByAppendingFormat:@"%@_r", suf]];
+    [ud setFloat:(float)g forKey:[@"mm_accent" stringByAppendingFormat:@"%@_g", suf]];
+    [ud setFloat:(float)b forKey:[@"mm_accent" stringByAppendingFormat:@"%@_b", suf]];
     [ud setInteger:MM_THEME_CUSTOM forKey:@"mm_theme_accent"];
     [ud synchronize];
     if (g_panel != nil) {
         g_panel.layer.borderColor = [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
         g_panel.layer.shadowColor = [mm_neon_purple() colorWithAlphaComponent:0.90].CGColor;
     }
-    mm_write_status(@"acento custom");
+    mm_opts_invalidate();
+    if (g_esp != nil) [g_esp setNeedsDisplay];
+    mm_write_status(g_accent_slot == 1 ? @"acento 2 custom" : @"acento 1 custom");
 }
 
 - (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)vc
@@ -2828,6 +3068,13 @@ static void mm_cfg_load(void)
                 [s addObject:k];
             g_cfg_disabled = s;
         }
+        NSArray *rev = c[@"revoked"];
+        if ([rev isKindOfClass:[NSArray class]]) {
+            NSMutableSet *s = [NSMutableSet set];
+            for (id k in rev) if ([k isKindOfClass:[NSString class]] && [k length] >= 16)
+                [s addObject:[k lowercaseString]];
+            g_cfg_revoked = s;
+        }
         NSString *latest = c[@"latest_pack"];
         if ([latest isKindOfClass:[NSString class]]) g_cfg_latest = latest;
         g_cfg_valid = 1;
@@ -2873,7 +3120,9 @@ static void mm_reset_options(void)
                            @"mm_x_arrow", @"mm_x_cross_style", @"mm_x_maxn",
                            @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
                            @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
-                           @"mm_x_radar_cam", @"mm_x_targetlist" ];
+                           @"mm_x_radar_cam", @"mm_x_targetlist",
+                           @"mm_auto_stream", @"mm_guard_capture",
+                           @"mm_usage_optin", @"mm_build_mark" ];
         for (NSString *k in keys) [ud removeObjectForKey:k];
         [ud synchronize];
         mm_opts_invalidate();
@@ -3091,6 +3340,8 @@ static BOOL mm_profile_load(int slot)
         [ud synchronize];
         mm_opts_invalidate();
         if (g_panel != nil) mm_sync_switches(g_panel);
+        mm_apply_esp_lock();
+        mm_apply_stream();
         if (g_esp != nil) [g_esp setNeedsDisplay];
         return YES;
     } @catch (NSException *e) {
@@ -4167,6 +4418,7 @@ static void mm_esp_collect_real(void)
            siempre que el pawn este vivo, del tipo pedido y dentro de rango. */
         MMTrack tk;
         memset(&tk, 0, sizeof(tk));
+        tk.pawn = pawn;
         tk.wx = wp[0]; tk.wy = wp[1]; tk.wz = wp[2];
         tk.dist = dist; tk.robot = robot; tk.alive = 1;
         int tslot = -1;
@@ -5074,8 +5326,18 @@ static void mm_build_ui(void)
         g_btn_glyph = [[MMBtnGlyph alloc] initWithFrame:g_btn.bounds];
         [g_btn addSubview:g_btn_glyph];
         mm_btn_spin(g_btn_glyph);
-        [g_btn addTarget:[MMTargets shared] action:@selector(onTap)
-        forControlEvents:UIControlEventTouchUpInside];
+        /* v0.7.0 (1.10): un toque abre el panel; doble toque prende/apaga el
+           maestro. El single espera al double (0.35 s) para no abrir el panel
+           en medio de un doble toque. */
+        UITapGestureRecognizer *bt2 = [[UITapGestureRecognizer alloc]
+            initWithTarget:[MMTargets shared] action:@selector(onButtonDoubleTap:)];
+        bt2.numberOfTapsRequired = 2;
+        [g_btn addGestureRecognizer:bt2];
+        UITapGestureRecognizer *bt1 = [[UITapGestureRecognizer alloc]
+            initWithTarget:[MMTargets shared] action:@selector(onTap)];
+        bt1.numberOfTapsRequired = 1;
+        [bt1 requireGestureRecognizerToFail:bt2];
+        [g_btn addGestureRecognizer:bt1];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
             initWithTarget:[MMTargets shared] action:@selector(onPan:)];
         [g_btn addGestureRecognizer:pan];
@@ -5128,7 +5390,11 @@ static void mm_build_ui(void)
         g_esp = [[MMCanvasView alloc] initWithFrame:CGRectZero];
         g_esp.backgroundColor = [UIColor clearColor];
         g_esp.opaque = NO;   /* v0.2.7: sin fondo opaco (evita restos/parpadeo) */
-        g_esp.userInteractionEnabled = NO;
+        /* v0.7.0: el hitTest del lienzo solo acepta el rect de la lista. */
+        g_esp.userInteractionEnabled = YES;
+        UITapGestureRecognizer *tlt = [[UITapGestureRecognizer alloc]
+            initWithTarget:[MMTargets shared] action:@selector(onTargetListTap:)];
+        [g_esp addGestureRecognizer:tlt];
         g_esp.hidden = YES;
     }
     if (g_link == nil) {
@@ -5217,6 +5483,17 @@ static void mm_build_ui(void)
     dtap.numberOfTapsRequired = 2;
     [dz addGestureRecognizer:dtap];
     [dtap requireGestureRecognizerToFail:dpan];
+    /* v0.7.0 (1.10): swipe de DOS dedos en el encabezado -> perfil anterior/siguiente. */
+    UISwipeGestureRecognizer *psl = [[UISwipeGestureRecognizer alloc]
+        initWithTarget:[MMTargets shared] action:@selector(onProfileSwipe:)];
+    psl.direction = UISwipeGestureRecognizerDirectionLeft;
+    psl.numberOfTouchesRequired = 2;
+    [dz addGestureRecognizer:psl];
+    UISwipeGestureRecognizer *psr = [[UISwipeGestureRecognizer alloc]
+        initWithTarget:[MMTargets shared] action:@selector(onProfileSwipe:)];
+    psr.direction = UISwipeGestureRecognizerDirectionRight;
+    psr.numberOfTouchesRequired = 2;
+    [dz addGestureRecognizer:psr];
     [g_panel addSubview:dz];
 
     UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 8.0, 222.0, 20.0)];
@@ -5489,6 +5766,7 @@ static void mm_build_ui(void)
         NSFontAttributeName:[UIFont boldSystemFontOfSize:11.0] } forState:UIControlStateNormal];
     [pfseg addTarget:[MMTargets shared] action:@selector(onProfileSlot:)
         forControlEvents:UIControlEventValueChanged];
+    g_profile_seg = pfseg;
     [g_p_misc addSubview:pfseg];
 
     g_profile_name_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 132.0, 272.0, 14.0)];
@@ -5710,7 +5988,26 @@ static void mm_build_ui(void)
     usr.frame = CGRectMake(0, 722.0, 284.0, 34.0);
     [g_p_misc addSubview:usr];
 
-    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 766.0);
+    /* 1.19: marca de build derivada del HWID (opt-in). */
+    UIView *bmr = mm_switch_row(@"Marca HWID en INFO (opt-in)", @"mm_build_mark", NO);
+    bmr.frame = CGRectMake(0, 760.0, 284.0, 34.0);
+    [g_p_misc addSubview:bmr];
+
+    UIButton *cst = [UIButton buttonWithType:UIButtonTypeCustom];
+    cst.frame = CGRectMake(6.0, 798.0, 272.0, 34.0);
+    cst.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    cst.layer.cornerRadius = 8.0;
+    cst.layer.borderWidth = 0.7;
+    cst.layer.borderColor =
+        [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
+    [cst setTitle:mm_tr(@"Copiar self-test") forState:UIControlStateNormal];
+    [cst setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cst.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
+    [cst addTarget:[MMTargets shared] action:@selector(onSelfTestCopy)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:cst];
+
+    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 846.0);
 
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
@@ -5816,19 +6113,72 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_more addSubview:cbs]; ry += 38.0;
 
-    /* v0.7.0 (1.16): acento personalizado (UIColorPickerViewController). */
+    /* v0.7.0 (1.16): dos acentos personalizados (UIColorPickerViewController). */
     UIButton *acb = [UIButton buttonWithType:UIButtonTypeCustom];
-    acb.frame = CGRectMake(6.0, ry, 272.0, 30.0);
+    acb.frame = CGRectMake(6.0, ry, 132.0, 30.0);
+    acb.tag = 0;
     acb.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
     acb.layer.cornerRadius = 7.0;
     acb.layer.borderWidth = 0.7;
     acb.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
-    [acb setTitle:mm_tr(@"Color de acento (custom)") forState:UIControlStateNormal];
+    [acb setTitle:mm_tr(@"Acento 1") forState:UIControlStateNormal];
     [acb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     acb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
     [acb addTarget:[MMTargets shared] action:@selector(onAccentPick:)
         forControlEvents:UIControlEventTouchUpInside];
-    [g_p_more addSubview:acb]; ry += 40.0;
+    [g_p_more addSubview:acb];
+
+    UIButton *ac2 = [UIButton buttonWithType:UIButtonTypeCustom];
+    ac2.frame = CGRectMake(146.0, ry, 132.0, 30.0);
+    ac2.tag = 1;
+    ac2.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
+    ac2.layer.cornerRadius = 7.0;
+    ac2.layer.borderWidth = 0.7;
+    ac2.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
+    [ac2 setTitle:mm_tr(@"Acento 2") forState:UIControlStateNormal];
+    [ac2 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    ac2.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+    [ac2 addTarget:[MMTargets shared] action:@selector(onAccentPick:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_more addSubview:ac2]; ry += 40.0;
+
+    UILabel *thl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
+    thl.text = mm_tr(@"Temas guardados");
+    thl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    thl.font = [UIFont systemFontOfSize:11.0];
+    [g_p_more addSubview:thl]; ry += 20.0;
+
+    UISegmentedControl *ths = [[UISegmentedControl alloc]
+        initWithItems:@[@"T1", @"T2", @"T3"]];
+    ths.frame = CGRectMake(6.0, ry, 132.0, 28.0);
+    ths.selectedSegmentIndex = 0;
+    if ([ths respondsToSelector:@selector(setSelectedSegmentTintColor:)])
+        ths.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
+    [ths addTarget:[MMTargets shared] action:@selector(onThemeSlot:)
+        forControlEvents:UIControlEventValueChanged];
+    [g_p_more addSubview:ths];
+
+    UIButton *tsv = [UIButton buttonWithType:UIButtonTypeCustom];
+    tsv.frame = CGRectMake(146.0, ry, 64.0, 28.0);
+    tsv.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
+    tsv.layer.cornerRadius = 7.0;
+    [tsv setTitle:mm_tr(@"Guardar") forState:UIControlStateNormal];
+    [tsv setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    tsv.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+    [tsv addTarget:[MMTargets shared] action:@selector(onThemeSave)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_more addSubview:tsv];
+
+    UIButton *tld = [UIButton buttonWithType:UIButtonTypeCustom];
+    tld.frame = CGRectMake(214.0, ry, 64.0, 28.0);
+    tld.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
+    tld.layer.cornerRadius = 7.0;
+    [tld setTitle:mm_tr(@"Cargar") forState:UIControlStateNormal];
+    [tld setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    tld.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+    [tld addTarget:[MMTargets shared] action:@selector(onThemeLoad)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_more addSubview:tld]; ry += 38.0;
 
     /* #11 opacidad del menu */
     UILabel *ol = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
@@ -6117,8 +6467,10 @@ static void mm_self_test(void)
                                    : @"sin offsets (reader OFF, inerte)"];
     [r appendFormat:@"INFO   %-12s %s · %s · juego %@\n", "pack",
         FUSION_PACK_VERSION, FUSION_EXPERIMENT_ID, gv];
-    [r appendFormat:@"INFO   %-12s valid=%d err=%@ disabled=%d\n", "config",
-        g_cfg_valid, g_cfg_error ?: @"-", (int)g_cfg_disabled.count];
+    [r appendFormat:@"INFO   %-12s valid=%d err=%@ disabled=%d rev=%d\n", "config",
+        g_cfg_valid, g_cfg_error ?: @"-", (int)g_cfg_disabled.count, (int)g_cfg_revoked.count];
+    [r appendFormat:@"INFO   %-12s %@\n", "marca",
+        mm_def_bool(@"mm_build_mark", NO) ? mm_build_mark() : @"off (opt-in)"];
     [r appendFormat:@"INFO   %-12s temp=%d captura=%d boot=%d forzado=%d crumb=%s\n", "salud",
         g_thermal_level, g_captured, g_dirty_boots, g_boot_forced, g_last_action];
     [r appendFormat:@"INFO   %-12s %@\n", "guard",
@@ -6142,8 +6494,9 @@ static void mm_self_test(void)
     } @catch (NSException *e) {}
 
     mm_haptic(bad == 0 ? 1 : 0);
+    [UIPasteboard generalPasteboard].string = txt;   /* 1.20: codigo copiable */
     mm_show_alert([NSString stringWithFormat:@"Auto-test: %d OK / %d fallas", ok, bad],
-                  [NSString stringWithFormat:@"%@\n%@", r, path]);
+                  [NSString stringWithFormat:@"%@\n%@\n(copiado al portapapeles)", r, path]);
 }
 
 static void mm_apply_esp_lock(void)
@@ -6396,6 +6749,13 @@ static void mm_refresh_info(void)
                     attributes:@{ NSFontAttributeName: verFont,
                                   NSForegroundColorAttributeName:
                                       [UIColor colorWithWhite:0.62 alpha:1.0] }]];
+            if (mm_def_bool(@"mm_build_mark", NO)) {
+                [t appendAttributedString:[[NSAttributedString alloc]
+                    initWithString:[NSString stringWithFormat:@"marca %@\n", mm_build_mark()]
+                        attributes:@{ NSFontAttributeName: verFont,
+                                      NSForegroundColorAttributeName:
+                                          [UIColor colorWithWhite:0.62 alpha:1.0] }]];
+            }
             if (strcmp(FUSION_LATEST_PACK, FUSION_PACK_VERSION) != 0) {
                 [t appendAttributedString:[[NSAttributedString alloc]
                     initWithString:[NSString stringWithFormat:@"ACTUALIZACION: pack %s disponible\n",
@@ -6758,6 +7118,24 @@ static NSString *mm_lic_hwid(void)
     return h;
 }
 
+/* 1.19: marca corta y estable para rastrear filtraciones sin exponer el HWID
+   completo. Deriva de HWID + build + pack; se muestra solo con opt-in. */
+static NSString *mm_build_mark(void)
+{
+    static NSString *s = nil;
+    if (s != nil) return s;
+    NSString *seed = [NSString stringWithFormat:@"%@|%s|%s",
+                      mm_lic_hwid(), MODMENU_VERSION, FUSION_PACK_VERSION];
+    const char *u = seed.UTF8String;
+    uint32_t h = 2166136261u;
+    while (u != NULL && *u != '\0') {
+        h ^= (uint8_t)(*u++);
+        h *= 16777619u;
+    }
+    s = [NSString stringWithFormat:@"%08x", h];
+    return s;
+}
+
 static NSData *mm_b64url(NSString *s)
 {
     NSMutableString *m = [s mutableCopy];
@@ -6857,6 +7235,11 @@ static void mm_lic_check(void)
     BOOL fromFile = NO;
     NSString *token = mm_lic_load_token(&fromFile);
     g_lic_valid = token ? mm_lic_verify_token(token) : (g_lic_reason = @"sin token", NO);
+    if (g_lic_valid && g_cfg_revoked != nil &&
+        [g_cfg_revoked containsObject:[mm_lic_hwid() lowercaseString]]) {
+        g_lic_valid = NO;
+        g_lic_reason = @"revocado (config)";
+    }
     if (g_lic_valid && fromFile)                     /* migrar el token de archivo al Keychain */
         mm_lic_kc_set(@"token", [token dataUsingEncoding:NSUTF8StringEncoding]);
     long now = (long)time(NULL);
