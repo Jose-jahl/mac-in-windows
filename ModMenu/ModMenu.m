@@ -280,7 +280,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.6.0"
+#define MODMENU_VERSION     "0.6.1"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -306,7 +306,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.6.0";
+const char *modmenu_build_id = "modmenu-glass-0.6.1";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -330,6 +330,7 @@ static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
 static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
 static UIView   *g_p_misc = nil;
+static UIButton *g_dbgbtn = nil;  /* v0.6.1: Debug como boton de fila completa */
 static UIView   *g_p_info = nil;
 static UIView   *g_p_more = nil;  /* v0.4.0: pagina EXTRA (features nuevas)    */
 static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
@@ -429,6 +430,7 @@ static void mm_apply_esp_lock(void);
 static void mm_apply_stream(void);
 static void mm_refresh_info(void);
 static void mm_write_status(NSString *nota);
+static void mm_refresh_debug_button(void);
 static BOOL mm_def_bool(NSString *k, BOOL d);
 static float mm_def_float(NSString *k, float d);
 static void mm_esp_frame(double t);
@@ -1663,6 +1665,36 @@ static int mm_declutter_budget(void)
     mm_write_status(@"ajuste");
 }
 
+/* v0.6.1: Debug como boton de fila completa. En algunos equipos el UISwitch
+   pegado al borde no recibia el toque; un boton grande en la misma pagina
+   (donde Guardar/Cargar si responden) no falla. Tocar alterna y, al prender,
+   escribe el status en el acto. */
+- (void)onDebugToggle:(UIButton *)b
+{
+    BOOL on = !mm_def_bool(@"mm_debug", NO);
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:@"mm_debug"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    mm_refresh_debug_button();
+    mm_write_status(on ? @"manual: debug ON" : @"manual: debug OFF");
+}
+
+- (void)onStatusNow:(UIButton *)b
+{
+    /* Vuelca el status sin importar el estado del toggle (lo prende). */
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_debug"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    mm_refresh_debug_button();
+    mm_write_status(@"manual: escribir status");
+    [b setTitle:@"Escrito: Documents/modmenu_status.txt"
+        forState:UIControlStateNormal];
+    __weak UIButton *wb = b;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (wb != nil)
+            [wb setTitle:@"Escribir status TXT ahora" forState:UIControlStateNormal];
+    });
+}
+
 - (void)onSlider:(UISlider *)s
 {
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:s.accessibilityIdentifier];
@@ -2213,11 +2245,34 @@ static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
     return 0;
 }
 
+/* v0.6.1: el resultado del probe BR se escribe SIEMPRE en
+   Documents/br_probe.txt, sin depender del toggle Debug. Es el dato que el
+   operador necesita extraer: si el toggle no responde, este archivo sigue
+   existiendo. Formato compatible con kit/br-probe/leer-status.ps1. */
+static void mm_write_br_file(NSString *linea)
+{
+    @try {
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0 || linea.length == 0) return;
+        NSString *txt = [NSString stringWithFormat:
+            @"build=%s\ndylib=%s\nuptime_s=%d\nbr_probe=%@\n",
+            MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), linea];
+        [txt writeToFile:[docs stringByAppendingPathComponent:@"br_probe.txt"]
+               atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    } @catch (NSException *e) {
+        MM_LOG(@"%s no pude escribir br_probe.txt: %@", MM_TAG, e.reason);
+    }
+}
+
 static void mm_br_probe_run(void)
 {
     @try {
         const struct mach_header *hdr = _dyld_get_image_header(0);
-        if (hdr == NULL) { g_br_probe = @"sin imagen principal"; return; }
+        if (hdr == NULL) {
+            g_br_probe = @"sin imagen principal";
+            mm_write_br_file(g_br_probe);
+            return;
+        }
         uintptr_t base = (uintptr_t)hdr;
 
         struct { const char *name; uint64_t va; } setters[] = {
@@ -2258,9 +2313,12 @@ static void mm_br_probe_run(void)
             }
         }
         g_br_probe = s;
+        mm_write_br_file(s);
+        mm_write_status(@"br_probe listo");
         MM_LOG(@"%s br_probe: %@", MM_TAG, s);
     } @catch (NSException *e) {
         g_br_probe = [NSString stringWithFormat:@"excepcion: %@", e.reason];
+        mm_write_br_file(g_br_probe);
     }
 }
 
@@ -3727,6 +3785,19 @@ static void mm_btn_spin(MMBtnGlyph *g)
     [g.arc addAnimation:sp forKey:@"mm_spin"];
 }
 
+/* v0.6.1: pinta el boton Debug segun el estado real de la clave. */
+static void mm_refresh_debug_button(void)
+{
+    if (g_dbgbtn == nil) return;
+    BOOL on = mm_def_bool(@"mm_debug", NO);
+    [g_dbgbtn setTitle:(on ? @"Debug (status file): ON  -  tocar = escribir TXT"
+                           : @"Debug (status file): OFF  -  tocar = activar")
+              forState:UIControlStateNormal];
+    g_dbgbtn.backgroundColor = on
+        ? [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95]
+        : [UIColor colorWithRed:0.08 green:0.20 blue:0.34 alpha:0.95];
+}
+
 /* Crea boton flotante + panel (una sola vez). */
 static void mm_build_ui(void)
 {
@@ -4174,16 +4245,36 @@ static void mm_build_ui(void)
 
     /* v0.4.3 (0.8): debug — prende el status file (modmenu_status.txt) para diagnosticar.
        Default OFF: sin esto no se escribe evidencia forense. */
-    UISwitch *dbg = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-    dbg.on = mm_def_bool(@"mm_debug", NO);
-    dbg.onTintColor = mm_verde();
-    dbg.accessibilityIdentifier = @"mm_debug";
-    dbg.transform = CGAffineTransformMakeScale(0.9, 0.9);
-    [dbg addTarget:[MMTargets shared] action:@selector(onSwitch:)
-        forControlEvents:UIControlEventValueChanged];
-    UIView *dbgr = mm_row(@"Debug (status file)", dbg);
-    dbgr.frame = CGRectMake(0, 176.0, 284.0, 31.0);
-    [g_p_misc addSubview:dbgr];
+    /* v0.6.1: boton de fila completa en lugar del UISwitch. El switch chico
+       junto al borde no recibia el toque en algunos equipos; este boton
+       comparte pagina con Guardar/Cargar, que si responden. */
+    g_dbgbtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    g_dbgbtn.frame = CGRectMake(6.0, 176.0, 272.0, 34.0);
+    g_dbgbtn.layer.cornerRadius = 8.0;
+    g_dbgbtn.layer.borderWidth = 1.0;
+    g_dbgbtn.layer.borderColor =
+        [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:0.55].CGColor;
+    g_dbgbtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
+    [g_dbgbtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [g_dbgbtn addTarget:[MMTargets shared] action:@selector(onDebugToggle:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:g_dbgbtn];
+    mm_refresh_debug_button();
+
+    /* v0.6.1: volcado manual del status, sin depender de ningun toggle. */
+    UIButton *stb = [UIButton buttonWithType:UIButtonTypeCustom];
+    stb.frame = CGRectMake(6.0, 214.0, 272.0, 34.0);
+    stb.backgroundColor = [UIColor colorWithRed:0.10 green:0.30 blue:0.52 alpha:0.95];
+    stb.layer.cornerRadius = 8.0;
+    stb.layer.borderWidth = 1.0;
+    stb.layer.borderColor =
+        [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:0.55].CGColor;
+    [stb setTitle:@"Escribir status TXT ahora" forState:UIControlStateNormal];
+    [stb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    stb.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
+    [stb addTarget:[MMTargets shared] action:@selector(onStatusNow:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [g_p_misc addSubview:stb];
 
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
