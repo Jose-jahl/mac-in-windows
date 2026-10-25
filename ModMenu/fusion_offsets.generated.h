@@ -3,7 +3,7 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-24T22:40:57.560Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-25T02:35:31.302Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
@@ -51,6 +51,15 @@
 #define BR_SET_SHAPE              0x1079D91DCULL  /* set_RadiationZoneShape */
 #define BR_ADD_ZONE               0x107A0B6ECULL  /* AddRadiationZone */
 #endif /* FUSION_BR_ENABLED */
+
+/* --- BR struct (0 = sin offsets verificados; reader OFF) --- */
+#define BR_STRUCT_MGR_VA      0x0ULL
+#define BR_STRUCT_SHAPE_OFF   0x0
+#define BR_STRUCT_RADIUS_OFF  0x0
+#define BR_STRUCT_NEXT_OFF    0x0
+#define BR_STRUCT_END_OFF     0x0
+#define BR_STRUCT_TOTAL_OFF   0x0
+#define BR_STRUCT_ADDZONE_OFF 0x0
 
 /* --- sonda de code registration (0.5: datos, no codigo) --- */
 #define VA_PROBE_TABLE      0x10C33BFA8ULL
