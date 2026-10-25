@@ -308,6 +308,9 @@
 #include <string.h>
 
 #define MODMENU_VERSION     "0.7.0"
+/* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
+   tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
+#define MM_THEME_CUSTOM     5
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -2586,7 +2589,7 @@ static void mm_haptic(int style)
     [ud setFloat:(float)r forKey:@"mm_accent1_r"];
     [ud setFloat:(float)g forKey:@"mm_accent1_g"];
     [ud setFloat:(float)b forKey:@"mm_accent1_b"];
-    [ud setInteger:MM_THEME_COUNT forKey:@"mm_theme_accent"];
+    [ud setInteger:MM_THEME_CUSTOM forKey:@"mm_theme_accent"];
     [ud synchronize];
     if (g_panel != nil) {
         g_panel.layer.borderColor = [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
@@ -4493,6 +4496,8 @@ static const MMTheme g_mm_themes[] = {
     { 0.26f, 1.00f, 0.72f,  0.06f, 0.82f, 0.95f },  /* 4 Aqua     verde / cian    */
 };
 #define MM_THEME_COUNT ((int)(sizeof(g_mm_themes) / sizeof(g_mm_themes[0])))
+_Static_assert(MM_THEME_COUNT == MM_THEME_CUSTOM,
+               "MM_THEME_CUSTOM debe coincidir con g_mm_themes");
 
 /* v0.7.0 (1.16): acento personalizado. El indice MM_THEME_COUNT es el slot
    custom; los temas fijos no cambian. Se lee una vez por uso, no por frame. */
@@ -4513,20 +4518,20 @@ static UIColor *mm_accent_custom(BOOL secundario)
 static int mm_theme_idx(void)
 {
     int i = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"];
-    if (i < 0 || i > MM_THEME_COUNT) i = 0;   /* == COUNT -> custom */
+    if (i < 0 || i > MM_THEME_CUSTOM) i = 0;   /* == CUSTOM -> acento custom */
     return i;
 }
 
 static UIColor *mm_neon_green(void)
 {
-    if (mm_theme_idx() == MM_THEME_COUNT) return mm_accent_custom(NO);
+    if (mm_theme_idx() == MM_THEME_CUSTOM) return mm_accent_custom(NO);
     MMTheme t = g_mm_themes[mm_theme_idx()];
     return [UIColor colorWithRed:t.ar green:t.ag blue:t.ab alpha:1.0];
 }
 
 static UIColor *mm_neon_purple(void)
 {
-    if (mm_theme_idx() == MM_THEME_COUNT) return mm_accent_custom(YES);
+    if (mm_theme_idx() == MM_THEME_CUSTOM) return mm_accent_custom(YES);
     MMTheme t = g_mm_themes[mm_theme_idx()];
     return [UIColor colorWithRed:t.br green:t.bg blue:t.bb alpha:1.0];
 }
