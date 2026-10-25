@@ -12,6 +12,10 @@
  *    - cero archivos nuevos en el paquete.
  *  Es la misma tecnica del modder que sigue vivo (SP3CTERIOS V1.2.0).
  *
+ *  v0.7.2 (25 oct) - QUICK BAR COMPLETA + PULIDO.
+ *    - barra rapida con MASTER / CAJAS / NOMBRES / RADAR / PANIC;
+ *    - kill-switch compartido entre long-press y chip PANIC.
+ *
  *  v0.7.1 (25 oct) - CIERRE DE FASE 1 + REVOCACION OFFLINE.
  *    - lista de objetivos con nombre + HP y toque para resaltar la caja;
  *    - doble toque en el boton = maestro; swipe de 2 dedos en el encabezado =
@@ -316,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.1"
+#define MODMENU_VERSION     "0.7.2"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -370,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.1";
+const char *modmenu_build_id = "modmenu-glass-0.7.2";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -618,6 +622,7 @@ static void mm_refresh_quickbar(void);
 static void mm_layout_quickbar(void);
 static void mm_sync_switches(UIView *root);
 static void mm_apply_safe_mode(void);
+static void mm_toggle_panic(void);
 static void mm_haptic(int style);
 static void mm_self_test(void);
 static NSString *mm_docs_dir(void);
@@ -2456,6 +2461,11 @@ static void mm_haptic(int style)
 {
     NSString *k = b.accessibilityIdentifier;
     if (k.length == 0) return;
+    if ([k isEqualToString:@"__panic"]) {
+        mm_haptic(1);
+        mm_toggle_panic();
+        return;
+    }
     BOOL on = !mm_def_bool(k, NO);
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:k];
     /* Encender cualquier atajo con el maestro apagado no mostraria nada:
@@ -2724,18 +2734,7 @@ static void mm_haptic(int style)
 - (void)onPanic:(UILongPressGestureRecognizer *)g
 {
     if (g.state != UIGestureRecognizerStateBegan) return;
-    g_panic = !g_panic;
-    if (g_panic) {
-        mm_set_panel(NO);
-        if (g_esp != nil) g_esp.hidden = YES;
-        if (g_count_glass != nil) g_count_glass.hidden = YES;
-        if (g_marca != nil) g_marca.hidden = YES;
-    } else {
-        if (g_marca != nil) g_marca.hidden = NO;
-        mm_refresh_count_glass();
-    }
-    mm_refresh_quickbar();
-    mm_write_status(g_panic ? @"panic ON" : @"panic OFF");
+    mm_toggle_panic();
 }
 
 /* v0.4.0 #7 / v0.7.0 (1.8): perfiles de config (5 slots, nombre, presets). */
@@ -6334,7 +6333,8 @@ static void mm_refresh_quickbar(void)
     if (hide) return;
     mm_layout_quickbar();
     for (UIButton *b in g_quick_btns) {
-        BOOL v = mm_def_bool(b.accessibilityIdentifier, NO);
+        BOOL v = [b.accessibilityIdentifier isEqualToString:@"__panic"]
+            ? g_panic : mm_def_bool(b.accessibilityIdentifier, NO);
         b.backgroundColor = v
             ? [UIColor colorWithRed:0.10 green:0.46 blue:0.24 alpha:0.95]
             : [UIColor colorWithRed:0.04 green:0.09 blue:0.07 alpha:0.90];
@@ -6349,15 +6349,16 @@ static void mm_refresh_quickbar(void)
 static void mm_build_quickbar(void)
 {
     if (g_quickbar != nil) return;
-    g_quick_keys = @[@"mm_esp_box", @"mm_esp_name", @"mm_x_radar"];
-    NSArray *titles = @[@"CAJAS", @"NOMBRES", @"RADAR"];
+    g_quick_keys = @[@"mm_esp_master", @"mm_esp_box", @"mm_esp_name",
+                     @"mm_x_radar", @"__panic"];
+    NSArray *titles = @[@"MASTER", @"CAJAS", @"NOMBRES", @"RADAR", @"PANIC"];
     g_quick_btns = [NSMutableArray array];
-    g_quickbar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 176, 30)];
+    g_quickbar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 286, 30)];
     g_quickbar.backgroundColor = [UIColor clearColor];
     g_quickbar.hidden = YES;
     CGFloat x = 0.0;
     for (NSUInteger i = 0; i < g_quick_keys.count; i++) {
-        CGFloat w = (i == 1) ? 66.0 : 52.0;
+        CGFloat w = (i == 0) ? 58.0 : ((i == 2) ? 62.0 : 52.0);
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
         b.frame = CGRectMake(x, 0, w, 30);
         b.layer.cornerRadius = 9.0;
@@ -6406,6 +6407,23 @@ static void mm_apply_safe_mode(void)
     mm_sync_switches(g_panel);
     mm_refresh_count_glass();
     mm_refresh_quickbar();
+}
+
+/* v0.7.1: kill-switch compartido por long-press y chip PANIC. */
+static void mm_toggle_panic(void)
+{
+    g_panic = !g_panic;
+    if (g_panic) {
+        mm_set_panel(NO);
+        if (g_esp != nil) g_esp.hidden = YES;
+        if (g_count_glass != nil) g_count_glass.hidden = YES;
+        if (g_marca != nil) g_marca.hidden = YES;
+    } else {
+        if (g_marca != nil) g_marca.hidden = NO;
+        mm_refresh_count_glass();
+    }
+    mm_refresh_quickbar();
+    mm_write_status(g_panic ? @"panic ON" : @"panic OFF");
 }
 
 /* Auto-test de solo lectura: version, imagen, contrato, ventana, boton y
