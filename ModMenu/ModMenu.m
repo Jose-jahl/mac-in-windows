@@ -620,6 +620,7 @@ static void mm_sync_switches(UIView *root);
 static void mm_apply_safe_mode(void);
 static void mm_haptic(int style);
 static void mm_self_test(void);
+static NSString *mm_docs_dir(void);
 static BOOL mm_def_bool(NSString *k, BOOL d);
 static float mm_def_float(NSString *k, float d);
 static int mm_lang(void);
