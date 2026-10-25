@@ -413,7 +413,7 @@ static NSMutableDictionary *g_cache_name = nil;
 static NSString *mm_cached_dist(int m)
 {
     if (g_cache_dist == nil) g_cache_dist = [NSMutableDictionary dictionary];
-    NSString *k = [NSString stringWithFormat:@"%d", m];
+    NSNumber *k = @(m);
     NSString *s = g_cache_dist[k];
     if (s == nil) {
         s = [NSString stringWithFormat:@"%d m", m];
@@ -425,7 +425,7 @@ static NSString *mm_cached_dist(int m)
 static NSString *mm_cached_hgt(int m)
 {
     if (g_cache_hgt == nil) g_cache_hgt = [NSMutableDictionary dictionary];
-    NSString *k = [NSString stringWithFormat:@"%d", m];
+    NSNumber *k = @(m);
     NSString *s = g_cache_hgt[k];
     if (s == nil) {
         s = [NSString stringWithFormat:(m >= 0 ? @"\u25B2%dm" : @"\u25BC%dm"),
@@ -5351,7 +5351,7 @@ static void mm_apply_safe_mode(void)
     BOOL on = mm_def_bool(@"mm_safe_mode", NO);
     if (on) {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        NSArray *keys = @[ @"mm_esp_master", @"mm_x_cross", @"mm_x_aimring",
+        NSArray *keys = @[ @"mm_esp_master", @"mm_esp_count", @"mm_x_cross", @"mm_x_aimring",
                            @"mm_x_fps", @"mm_x_head", @"mm_x_distcol", @"mm_x_lowhp",
                            @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
                            @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
@@ -5368,10 +5368,12 @@ static void mm_apply_safe_mode(void)
         }
     }
     for (UISwitch *s in g_sub_switches) {
+        if (on) s.on = NO;
         s.enabled = !on;
         s.superview.alpha = on ? 0.35
             : (mm_def_bool(@"mm_esp_master", NO) ? 1.0 : 0.5);
     }
+    mm_sync_switches(g_panel);
     mm_refresh_count_glass();
     mm_refresh_quickbar();
 }
@@ -5459,8 +5461,9 @@ static void mm_self_test(void)
 static void mm_apply_esp_lock(void)
 {
     BOOL on = mm_def_bool(@"mm_esp_master", NO);
+    BOOL safe = mm_def_bool(@"mm_safe_mode", NO);
     for (UISwitch *s in g_sub_switches)
-        s.superview.alpha = on ? 1.0 : 0.5;
+        s.superview.alpha = safe ? 0.35 : (on ? 1.0 : 0.5);
     mm_refresh_count_glass();   /* v0.3.2: el maestro tambien manda */
 }
 
