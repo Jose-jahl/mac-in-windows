@@ -311,6 +311,20 @@
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
+/* Clave publica ES256 del proyecto (65 B, punto sin comprimir 0x04||X||Y).
+   Firma los manifiestos/pack/config y los tokens de licencia. La privada vive
+   fuera del arbol distribuido (server/token.js la carga del keystore). */
+static const uint8_t MM_LIC_PUBKEY[65] = {
+    0x04, 0xfa, 0x3d, 0x37, 0x3f, 0xde, 0x7f, 0x46,
+    0x85, 0x08, 0xa9, 0xce, 0x89, 0x5c, 0x5a, 0xe8,
+    0xe9, 0x6c, 0x08, 0xf3, 0x38, 0x66, 0x4e, 0x49,
+    0x92, 0xf5, 0xa9, 0xd0, 0x8d, 0xa4, 0xe8, 0xa6,
+    0xaa, 0x01, 0xeb, 0xa1, 0x52, 0x82, 0xcc, 0x6b,
+    0xa1, 0x55, 0xe8, 0x6e, 0x9a, 0x31, 0xa6, 0x9e,
+    0x28, 0xd8, 0x33, 0x83, 0x9c, 0xac, 0x35, 0xc2,
+    0x4d, 0xbb, 0xd8, 0xe3, 0x44, 0xa8, 0x59, 0x03,
+    0x7d
+};
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -539,6 +553,12 @@ static UIView   *g_secure_host = nil;      /* 1.15: contenedor seguro (opt-in) *
 static UIView   *g_secure_canvas = nil;
 static int       g_secure_canvas_state = -1; /* -1 sin probar / 0 sin canvas / 1 ok */
 static int       g_cb_mode = 0;            /* 1.16: paleta daltonismo */
+/* 4.1: remote config firmado (archivo local; sin red). */
+static int       g_cfg_loaded = 0;
+static int       g_cfg_valid = 0;
+static NSSet    *g_cfg_disabled = nil;
+static NSString *g_cfg_latest = nil;
+static NSString *g_cfg_error = nil;
 
 /* prototipos */
 static void mm_tick(void);
@@ -2734,9 +2754,93 @@ static NSString *mm_docs_dir(void)
     return (a.count > 0) ? a[0] : nil;
 }
 
+/*---------------------------------------------------------------------------
+ * v0.7.0 (4.1): remote config FIRMADO, leido de Documents.
+ *   fusion_config.json  +  fusion_config.json.sig (ES256, DER hex)
+ * Sin firma valida no se aplica NADA. No hay red: el archivo lo entrega el
+ * operador (Studio/share) y la firma se verifica con la clave del proyecto.
+ * `disabled` apaga claves de feature en toda la flota sin recompilar la IPA.
+ *--------------------------------------------------------------------------*/
+static NSData *mm_hex_to_data(NSString *hex)
+{
+    if (hex.length == 0 || (hex.length & 1)) return nil;
+    NSMutableData *d = [NSMutableData dataWithCapacity:hex.length / 2];
+    for (NSUInteger i = 0; i < hex.length; i += 2) {
+        unsigned int b = 0;
+        NSString *pair = [hex substringWithRange:NSMakeRange(i, 2)];
+        if (![[NSScanner scannerWithString:pair] scanHexInt:&b]) return nil;
+        uint8_t c = (uint8_t)b;
+        [d appendBytes:&c length:1];
+    }
+    return d;
+}
+
+static SecKeyRef mm_project_pubkey(void)
+{
+    NSData *pk = [NSData dataWithBytes:MM_LIC_PUBKEY length:sizeof(MM_LIC_PUBKEY)];
+    NSDictionary *attr = @{ (__bridge id)kSecAttrKeyType:(__bridge id)kSecAttrKeyTypeECSECPrimeRandom,
+                            (__bridge id)kSecAttrKeyClass:(__bridge id)kSecAttrKeyClassPublic,
+                            (__bridge id)kSecAttrKeySizeInBits:@256 };
+    CFErrorRef err = NULL;
+    SecKeyRef key = SecKeyCreateWithData((__bridge CFDataRef)pk,
+                                         (__bridge CFDictionaryRef)attr, &err);
+    if (err) CFRelease(err);
+    return key;
+}
+
+static BOOL mm_verify_bytes_der(NSData *data, NSData *der)
+{
+    if (data == nil || der == nil) return NO;
+    SecKeyRef key = mm_project_pubkey();
+    if (key == NULL) return NO;
+    CFErrorRef err = NULL;
+    BOOL ok = SecKeyVerifySignature(key, kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
+                                    (__bridge CFDataRef)data,
+                                    (__bridge CFDataRef)der, &err);
+    CFRelease(key);
+    if (err) CFRelease(err);
+    return ok;
+}
+
+static void mm_cfg_load(void)
+{
+    g_cfg_loaded = 1;
+    @try {
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) return;
+        NSString *cf = [docs stringByAppendingPathComponent:@"fusion_config.json"];
+        NSString *sf = [cf stringByAppendingString:@".sig"];
+        NSData *raw = [NSData dataWithContentsOfFile:cf];
+        if (raw == nil) return;                        /* sin config: normal */
+        NSData *sigRaw = [NSData dataWithContentsOfFile:sf];
+        if (sigRaw == nil) { g_cfg_error = @"sin .sig"; return; }
+        NSDictionary *sj = [NSJSONSerialization JSONObjectWithData:sigRaw options:0 error:nil];
+        NSString *hex = [sj isKindOfClass:[NSDictionary class]] ? sj[@"sig"] : nil;
+        NSData *der = mm_hex_to_data(hex);
+        if (!mm_verify_bytes_der(raw, der)) { g_cfg_error = @"firma invalida"; return; }
+
+        NSDictionary *c = [NSJSONSerialization JSONObjectWithData:raw options:0 error:nil];
+        if (![c isKindOfClass:[NSDictionary class]]) { g_cfg_error = @"json invalido"; return; }
+        NSArray *dis = c[@"disabled"];
+        if ([dis isKindOfClass:[NSArray class]]) {
+            NSMutableSet *s = [NSMutableSet set];
+            for (id k in dis) if ([k isKindOfClass:[NSString class]] && [k hasPrefix:@"mm_"])
+                [s addObject:k];
+            g_cfg_disabled = s;
+        }
+        NSString *latest = c[@"latest_pack"];
+        if ([latest isKindOfClass:[NSString class]]) g_cfg_latest = latest;
+        g_cfg_valid = 1;
+    } @catch (NSException *e) {
+        g_cfg_error = e.reason ?: @"excepcion";
+    }
+}
+
 /* defaults con valor por defecto (sin el, boolForKey devuelve NO) */
 static BOOL mm_def_bool(NSString *k, BOOL d)
 {
+    /* 4.1: kill switch de flota. Un config firmado puede apagar la clave. */
+    if (g_cfg_disabled != nil && [g_cfg_disabled containsObject:k]) return NO;
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     if ([ud objectForKey:k] == nil) return d;
     return [ud boolForKey:k];
@@ -4408,7 +4512,7 @@ static void mm_write_status(NSString *nota)
             @"esp=%d cajas=%d nombres=%d distancia=%d salud=%d lineas=%d arriba=%d rango=%d contador=%d estilo=%d tema=%d\n"
             @"stream=%d\n"
             @"ui=safe=%d quickbar=%d haptics=%d lang=%d objetivos=%d pint_s=%.0f\n"
-            @"salud=temp=%d captura=%d auto_stream=%d guard=%d boot=%d stream_eff=%d crumb=%s\n"
+            @"salud=temp=%d captura=%d auto_stream=%d guard=%d boot=%d stream_eff=%d cfg=%d crumb=%s\n"
             @"overlay=brujula=%d estelas=%d declutter=%d radar_cam=%d lect_s=%.0f mem_mb=%.0f fov=%.0f\n"
             @"render=%s cajas=%d link=%s\n"
             @"probe=%s\n"
@@ -4443,7 +4547,7 @@ static void mm_write_status(NSString *nota)
             g_thermal_level, g_captured,
             (int)mm_def_bool(@"mm_auto_stream", YES),
             g_secure_canvas_state, g_dirty_boots,
-            (int)mm_stream_effective(), g_last_action,
+            (int)mm_stream_effective(), g_cfg_valid, g_last_action,
             (int)mm_def_bool(@"mm_x_bearings", NO),
             (int)mm_def_bool(@"mm_x_trails", NO),
             (int)mm_def_bool(@"mm_x_declutter", NO),
@@ -6013,6 +6117,8 @@ static void mm_self_test(void)
                                    : @"sin offsets (reader OFF, inerte)"];
     [r appendFormat:@"INFO   %-12s %s · %s · juego %@\n", "pack",
         FUSION_PACK_VERSION, FUSION_EXPERIMENT_ID, gv];
+    [r appendFormat:@"INFO   %-12s valid=%d err=%@ disabled=%d\n", "config",
+        g_cfg_valid, g_cfg_error ?: @"-", (int)g_cfg_disabled.count];
     [r appendFormat:@"INFO   %-12s temp=%d captura=%d boot=%d forzado=%d crumb=%s\n", "salud",
         g_thermal_level, g_captured, g_dirty_boots, g_boot_forced, g_last_action];
     [r appendFormat:@"INFO   %-12s %@\n", "guard",
@@ -6294,6 +6400,12 @@ static void mm_refresh_info(void)
                 [t appendAttributedString:[[NSAttributedString alloc]
                     initWithString:[NSString stringWithFormat:@"ACTUALIZACION: pack %s disponible\n",
                                     FUSION_LATEST_PACK]
+                        attributes:@{ NSFontAttributeName: cf,
+                                      NSForegroundColorAttributeName: ca }]];
+            }
+            if (g_cfg_latest.length && ![g_cfg_latest isEqualToString:@FUSION_PACK_VERSION]) {
+                [t appendAttributedString:[[NSAttributedString alloc]
+                    initWithString:[NSString stringWithFormat:@"CONFIG: pack %@ disponible\n", g_cfg_latest]
                         attributes:@{ NSFontAttributeName: cf,
                                       NSForegroundColorAttributeName: ca }]];
             }
@@ -6592,11 +6704,10 @@ static NSString *g_lic_sku = nil;
 static NSArray  *g_lic_feats = nil;
 static long      g_lic_exp = 0;
 
-/* Clave publica ES256 (punto sin comprimir 0x04 || X(32) || Y(32), 65 B).
-   PLACEHOLDER: reemplazar por la de produccion (imprimela con `fusion license pubkey`).
-   Con el placeholder la verificacion fallara (reason="firma invalida"), que es lo
-   correcto hasta pegar la real. */
-static const uint8_t MM_LIC_PUBKEY[65] = { 0x04 };  /* resto en cero = placeholder */
+/* Clave publica ES256 del proyecto: definida arriba, junto a la version, para
+   que la use tambien el verificador de remote config (4.1).
+   PLACEHOLDER solo si el bloque de arriba se deja en 0x04: la verificacion
+   fallara (reason="firma invalida"), que es lo correcto hasta pegar la real. */
 
 #define MM_LIC_SERVICE @"com.fusion.license"
 
@@ -6789,6 +6900,7 @@ __attribute__((constructor)) static void modmenu_init(void)
 {
     g_t0 = [NSDate date].timeIntervalSinceReferenceDate;
     mm_boot_check();      /* 1.11: crash counter ANTES de tocar la UI */
+    mm_cfg_load();        /* 4.1: remote config firmado (opt-in por archivo) */
     mm_reset_options();   /* v0.2.7: opciones a fabrica en cada arranque */
     g_cb_mode = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_color_mode"];
     if (g_cb_mode != 1 && g_cb_mode != 3) g_cb_mode = 0;
