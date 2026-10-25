@@ -280,7 +280,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.6.1"
+#define MODMENU_VERSION     "0.6.2"
 
 /* v0.4.3 FIX: el contrato de offsets se incluye TEMPRANO (lo usa el version-gate en
    mm_esp_frame). El header tiene include-guard, asi que el 2do include mas abajo es no-op. */
@@ -306,7 +306,7 @@
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.6.1";
+const char *modmenu_build_id = "modmenu-glass-0.6.2";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -604,6 +604,74 @@ static double g_fps = 0.0;
 static UIColor *mm_neon_green(void);
 static UIColor *mm_neon_purple(void);
 
+/*---------------------------------------------------------------------------
+ * v0.6.2: CPU del lienzo. Fuentes, sombra y medidas de texto se reutilizan.
+ * Antes drawRect creaba UIFont/NSShadow y medía cada etiqueta con CoreText en
+ * cada frame (y un NSDictionary por caja en la etiqueta de altura).
+ *--------------------------------------------------------------------------*/
+static UIFont *mm_font_name(void)
+{
+    static UIFont *f = nil;
+    if (f == nil) f = [UIFont systemFontOfSize:10.5 weight:UIFontWeightSemibold]
+                        ?: [UIFont boldSystemFontOfSize:10.5];
+    return f;
+}
+static UIFont *mm_font_dist(void)
+{
+    static UIFont *f = nil;
+    if (f == nil) f = [UIFont monospacedDigitSystemFontOfSize:9.5
+                                                      weight:UIFontWeightMedium]
+                        ?: [UIFont systemFontOfSize:9.5];
+    return f;
+}
+static UIFont *mm_font_ring(void)
+{
+    static UIFont *f = nil;
+    if (f == nil) f = [UIFont monospacedDigitSystemFontOfSize:7.5
+                                                      weight:UIFontWeightMedium]
+                        ?: [UIFont systemFontOfSize:7.5];
+    return f;
+}
+static UIFont *mm_font_fps(void)
+{
+    static UIFont *f = nil;
+    if (f == nil) f = [UIFont monospacedDigitSystemFontOfSize:10.0
+                                                      weight:UIFontWeightSemibold]
+                        ?: [UIFont boldSystemFontOfSize:10.0];
+    return f;
+}
+static NSShadow *mm_txt_shadow(void)
+{
+    static NSShadow *sh = nil;
+    if (sh == nil) {
+        sh = [[NSShadow alloc] init];
+        sh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.82];
+        sh.shadowBlurRadius = 2.0;
+        sh.shadowOffset = CGSizeMake(0.0, 1.0);
+    }
+    return sh;
+}
+
+/* Cache de medidas: 0 = nombre, 1 = distancia/altura, 2 = anillos del radar.
+   Las cadenas cortas se repiten (distancias enteras, nombres, "+12m"), así que
+   el hit rate es alto y CoreText deja de medir en cada frame. */
+static CGSize mm_text_size(NSString *s, NSDictionary *attrs, int slot)
+{
+    static NSMutableDictionary *c0 = nil, *c1 = nil, *c2 = nil;
+    if (s.length == 0) return CGSizeZero;
+    NSMutableDictionary *c = (slot <= 0) ? c0 : (slot == 1 ? c1 : c2);
+    if (c == nil) {
+        c = [NSMutableDictionary dictionary];
+        if (slot <= 0) c0 = c; else if (slot == 1) c1 = c; else c2 = c;
+    }
+    NSValue *v = c[s];
+    if (v != nil) return v.CGSizeValue;
+    CGSize sz = [s sizeWithAttributes:attrs];
+    if (c.count > 512) [c removeAllObjects];   /* techo de memoria */
+    c[s] = [NSValue valueWithCGSize:sz];
+    return sz;
+}
+
 /* v0.4.0 (#1 crosshair) + v0.4.2 estilos: 0 cruz+punto · 1 punto · 2 circulo+punto · 3 todo. */
 static void mm_draw_crosshair(CGContextRef ctx, CGRect bs, int style, CGFloat cr, CGFloat cg, CGFloat cb)
 {
@@ -646,14 +714,10 @@ static void mm_draw_fps(CGRect bs)
 {
     (void)bs;
     NSString *s = [NSString stringWithFormat:@"%d FPS", (int)(g_fps + 0.5)];
-    UIFont *f = [UIFont monospacedDigitSystemFontOfSize:10.0 weight:UIFontWeightSemibold];
-    if (f == nil) f = [UIFont boldSystemFontOfSize:10.0];
-    NSShadow *sh = [[NSShadow alloc] init];
-    sh.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.8];
-    sh.shadowBlurRadius = 2.0; sh.shadowOffset = CGSizeMake(0.0, 1.0);
-    NSDictionary *a = @{ NSFontAttributeName: f,
+    static NSDictionary *a = nil;   /* v0.6.2: atributos una sola vez */
+    if (a == nil) a = @{ NSFontAttributeName: mm_font_fps(),
         NSForegroundColorAttributeName: [UIColor colorWithWhite:0.92 alpha:1.0],
-        NSShadowAttributeName: sh };
+        NSShadowAttributeName: mm_txt_shadow() };
     [s drawAtPoint:CGPointMake(10.0, 44.0) withAttributes:a];
 }
 
@@ -753,24 +817,30 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
         CGContextRestoreGState(ctx);
     }
 
-    /* marcas de 30 grados por fuera del cono, blancas tenues. */
-    for (int a = 0; a < 360; a += 30) {
-        CGFloat rad = (CGFloat)a * (CGFloat)M_PI / 180.0f;
-        CGFloat ux = sinf((float)rad), uy = -cosf((float)rad);
-        CGFloat r0 = (a % 90 == 0) ? R - 7.0 : R - 4.0;
-        CGContextSetLineWidth(ctx, (a % 90 == 0) ? 1.0 : 0.7);
-        CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0,
-                                   (a % 90 == 0) ? 0.22 : 0.11);
-        CGContextMoveToPoint(ctx, cx + ux * r0, cy + uy * r0);
-        CGContextAddLineToPoint(ctx, cx + ux * (R - 1.0), cy + uy * (R - 1.0));
+    /* v0.6.2: las 12 marcas en DOS trazos (mayores y menores), no 12. */
+    for (int pass = 0; pass < 2; pass++) {
+        int step = pass ? 90 : 30;
+        CGContextSetLineWidth(ctx, pass ? 1.0 : 0.7);
+        CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, pass ? 0.22 : 0.11);
+        CGContextBeginPath(ctx);
+        for (int a = 0; a < 360; a += step) {
+            if (!pass && (a % 90) == 0) continue;   /* los mayores van en pass 1 */
+            CGFloat rad = (CGFloat)a * (CGFloat)M_PI / 180.0f;
+            CGFloat ux = sinf((float)rad), uy = -cosf((float)rad);
+            CGFloat r0 = pass ? R - 7.0 : R - 4.0;
+            CGContextMoveToPoint(ctx, cx + ux * r0, cy + uy * r0);
+            CGContextAddLineToPoint(ctx, cx + ux * (R - 1.0), cy + uy * (R - 1.0));
+        }
         CGContextStrokePath(ctx);
     }
 
     /* anillos 50/100/200 m sobre la escala tactica, con etiqueta "50m", "100m",
        "200m" en el borde derecho del anillo (encima de un rectangulito oscuro). */
     static const float ringM[3] = { 50.0f, 100.0f, 200.0f };
-    UIFont *lblF = [UIFont monospacedDigitSystemFontOfSize:7.5 weight:UIFontWeightMedium];
-    if (lblF == nil) lblF = [UIFont systemFontOfSize:7.5];
+    UIFont *lblF = mm_font_ring();
+    static NSDictionary *la = nil;   /* v0.6.2: atributos y medidas cacheadas */
+    if (la == nil) la = @{ NSFontAttributeName: lblF,
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.86 alpha:0.95] };
     for (int k = 0; k < 3; k++) {
         if (ringM[k] > radarRng) continue;
         CGFloat rr = R * (CGFloat)(ringM[k] / radarRng);
@@ -781,9 +851,7 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
 
         /* etiqueta del anillo: "50m"/"100m"/"200m" a la derecha, con pastilla. */
         NSString *lbl = [NSString stringWithFormat:@"%.0fm", ringM[k]];
-        NSDictionary *la = @{ NSFontAttributeName: lblF,
-            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.86 alpha:0.95] };
-        CGSize lsz = [lbl sizeWithAttributes:la];
+        CGSize lsz = mm_text_size(lbl, la, 2);
         CGFloat lx = cx + rr - lsz.width - 1.0;
         CGFloat ly = cy - lsz.height / 2.0 - 0.5;
         CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.55);
@@ -1035,32 +1103,75 @@ static void mm_draw_bearings(CGContextRef ctx, CGRect bs)
     CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.07);
     CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
 
-    for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
-        MMTrack *tk = &g_tracks[i];
-        if (!tk->alive) continue;
-        float dx = tk->wx - g_local_pos[0];
-        float dz = tk->wz - g_local_pos[2];
-        if (fabsf(dx) < 0.05f && fabsf(dz) < 0.05f) continue;
-        /* plano horizontal en espacio de camara: +x derecha, -z adelante. */
-        float vx = g_view_mtx[0] * dx + g_view_mtx[8]  * dz;
-        float vz = g_view_mtx[2] * dx + g_view_mtx[10] * dz;
-        CGFloat beta = atan2f(vx, -vz);
-        CGFloat sx = sinf(beta), sy = -cosf(beta);
-        CGFloat al = 0.90f - 0.55f * (tk->dist / rng);
-        if (al < 0.25f) al = 0.25f;
-        if (al > 0.92f) al = 0.92f;
+    /* v0.6.2: ticks agrupados por robot y nivel de alpha. Antes eran 2 draw
+       calls por track (128 con 64 tracks); ahora 8 trazos + 8 puntos maximo. */
+    #define MM_BEAR_LV 4
+    for (int rb = 0; rb < 2; rb++) {
         CGFloat cr, cg, cb;
-        mm_esp_color(tk->robot, tema, &cr, &cg, &cb);
-        CGContextSetLineWidth(ctx, 1.6);
-        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, al);
-        CGContextMoveToPoint(ctx, cx + sx * (R - 6.0), cy + sy * (R - 6.0));
-        CGContextAddLineToPoint(ctx, cx + sx * (R + 3.0), cy + sy * (R + 3.0));
-        CGContextStrokePath(ctx);
-        CGContextSetRGBFillColor(ctx, cr, cg, cb, al);
-        CGContextFillEllipseInRect(ctx, CGRectMake(cx + sx * (R + 4.0) - 1.8,
-                                                   cy + sy * (R + 4.0) - 1.8,
-                                                   3.6, 3.6));
+        mm_esp_color(rb, tema, &cr, &cg, &cb);
+        for (int lv = 0; lv < MM_BEAR_LV; lv++) {
+            CGFloat al = 0.25f + (CGFloat)lv * (0.67f / (CGFloat)(MM_BEAR_LV - 1));
+            int hay = 0;
+            /* trazos */
+            CGContextBeginPath(ctx);
+            for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
+                MMTrack *tk = &g_tracks[i];
+                if (!tk->alive || tk->robot != rb) continue;
+                float dx = tk->wx - g_local_pos[0];
+                float dz = tk->wz - g_local_pos[2];
+                if (fabsf(dx) < 0.05f && fabsf(dz) < 0.05f) continue;
+                float vx = g_view_mtx[0] * dx + g_view_mtx[8]  * dz;
+                float vz = g_view_mtx[2] * dx + g_view_mtx[10] * dz;
+                CGFloat al0 = 0.90f - 0.55f * (tk->dist / rng);
+                if (al0 < 0.25f) al0 = 0.25f;
+                if (al0 > 0.92f) al0 = 0.92f;
+                int lv0 = (int)(((al0 - 0.25f) / (0.67f / (CGFloat)(MM_BEAR_LV - 1))) + 0.5f);
+                if (lv0 < 0) lv0 = 0;
+                if (lv0 >= MM_BEAR_LV) lv0 = MM_BEAR_LV - 1;
+                if (lv0 != lv) continue;
+                CGFloat beta = atan2f(vx, -vz);
+                CGFloat sx = sinf(beta), sy = -cosf(beta);
+                CGContextMoveToPoint(ctx, cx + sx * (R - 6.0), cy + sy * (R - 6.0));
+                CGContextAddLineToPoint(ctx, cx + sx * (R + 3.0), cy + sy * (R + 3.0));
+                hay = 1;
+            }
+            if (hay) {
+                CGContextSetLineWidth(ctx, 1.6);
+                CGContextSetRGBStrokeColor(ctx, cr, cg, cb, al);
+                CGContextStrokePath(ctx);
+            }
+            /* puntos */
+            hay = 0;
+            CGContextBeginPath(ctx);
+            for (int i = 0; i < g_track_count && i < MM_MAX_TRACKS; i++) {
+                MMTrack *tk = &g_tracks[i];
+                if (!tk->alive || tk->robot != rb) continue;
+                float dx = tk->wx - g_local_pos[0];
+                float dz = tk->wz - g_local_pos[2];
+                if (fabsf(dx) < 0.05f && fabsf(dz) < 0.05f) continue;
+                float vx = g_view_mtx[0] * dx + g_view_mtx[8]  * dz;
+                float vz = g_view_mtx[2] * dx + g_view_mtx[10] * dz;
+                CGFloat al0 = 0.90f - 0.55f * (tk->dist / rng);
+                if (al0 < 0.25f) al0 = 0.25f;
+                if (al0 > 0.92f) al0 = 0.92f;
+                int lv0 = (int)(((al0 - 0.25f) / (0.67f / (CGFloat)(MM_BEAR_LV - 1))) + 0.5f);
+                if (lv0 < 0) lv0 = 0;
+                if (lv0 >= MM_BEAR_LV) lv0 = MM_BEAR_LV - 1;
+                if (lv0 != lv) continue;
+                CGFloat beta = atan2f(vx, -vz);
+                CGFloat sx = sinf(beta), sy = -cosf(beta);
+                CGContextAddEllipseInRect(ctx, CGRectMake(cx + sx * (R + 4.0) - 1.8,
+                                                          cy + sy * (R + 4.0) - 1.8,
+                                                          3.6, 3.6));
+                hay = 1;
+            }
+            if (hay) {
+                CGContextSetRGBFillColor(ctx, cr, cg, cb, al);
+                CGContextFillPath(ctx);
+            }
+        }
     }
+    #undef MM_BEAR_LV
 }
 
 /* Fase 1.5: estelas. Se actualizan en el colector (~15 Hz, muestreo 0.15 s)
@@ -1133,12 +1244,19 @@ static void mm_trails_draw(CGContextRef ctx, CGRect bs)
     double now = CACurrentMediaTime();
     int tema = mm_draw_opts()->theme;
     CGFloat W = bs.size.width, H = bs.size.height;
+
+    /* v0.6.2: los segmentos se proyectan y clasifican una vez; después se
+       agrupan en 6 niveles de alpha x 2 colores = 12 trazos por frame.
+       Antes era un CGContextStrokePath por segmento (hasta ~800). */
+    typedef struct { CGPoint a, b; unsigned char robot, lvl; } MMSeg;
+    static MMSeg segs[MM_MAX_TRAILS * MM_TRAIL_PTS];
+    int ns = 0;
+    int cap = (int)(sizeof(segs) / sizeof(segs[0]));
+
     for (int t = 0; t < MM_MAX_TRAILS; t++) {
         MMTrail *tr = &g_trails[t];
         if (tr->n < 2) continue;
-        CGFloat cr, cg, cb;
-        mm_esp_color(tr->robot, tema, &cr, &cg, &cb);
-        for (int j = 1; j < tr->n; j++) {
+        for (int j = 1; j < tr->n && ns < cap; j++) {
             double age = now - tr->p[j].t;
             if (age < 0.0) age = 0.0;
             if (age > MM_TRAIL_LIFE) continue;
@@ -1149,11 +1267,34 @@ static void mm_trails_draw(CGContextRef ctx, CGRect bs)
             CGPoint a, b;
             if (!mm_w2s(g_view_mtx, g_proj_mtx, pa, NO, W, H, &a, NULL, NULL, NULL)) continue;
             if (!mm_w2s(g_view_mtx, g_proj_mtx, pb, NO, W, H, &b, NULL, NULL, NULL)) continue;
-            CGContextSetLineWidth(ctx, 1.4);
-            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, al);
-            CGContextMoveToPoint(ctx, a.x, a.y);
-            CGContextAddLineToPoint(ctx, b.x, b.y);
-            CGContextStrokePath(ctx);
+            int lvl = (int)((al / 0.55f) * 5.0f + 0.5f);
+            if (lvl < 0) lvl = 0;
+            if (lvl > 5) lvl = 5;
+            segs[ns].a = a; segs[ns].b = b;
+            segs[ns].robot = (unsigned char)(tr->robot ? 1 : 0);
+            segs[ns].lvl = (unsigned char)lvl;
+            ns++;
+        }
+    }
+
+    for (int rb = 0; rb < 2; rb++) {
+        CGFloat cr, cg, cb;
+        mm_esp_color(rb, tema, &cr, &cg, &cb);
+        for (int lv = 0; lv < 6; lv++) {
+            CGFloat al = 0.55f * ((CGFloat)lv + 0.5f) / 6.0f;
+            int hay = 0;
+            CGContextBeginPath(ctx);
+            for (int s = 0; s < ns; s++) {
+                if (segs[s].robot != rb || segs[s].lvl != lv) continue;
+                CGContextMoveToPoint(ctx, segs[s].a.x, segs[s].a.y);
+                CGContextAddLineToPoint(ctx, segs[s].b.x, segs[s].b.y);
+                hay = 1;
+            }
+            if (hay) {
+                CGContextSetLineWidth(ctx, 1.4);
+                CGContextSetRGBStrokeColor(ctx, cr, cg, cb, al);
+                CGContextStrokePath(ctx);
+            }
         }
     }
 }
@@ -1192,11 +1333,9 @@ static int mm_declutter_budget(void)
     if (ctx == NULL) return;
 
     CGRect bs = self.bounds;
-    UIFont *fNombre = [UIFont systemFontOfSize:10.5 weight:UIFontWeightSemibold];
-    if (fNombre == nil) fNombre = [UIFont boldSystemFontOfSize:10.5];
-    UIFont *fDist = [UIFont monospacedDigitSystemFontOfSize:9.5
-                                                   weight:UIFontWeightMedium];
-    if (fDist == nil) fDist = [UIFont systemFontOfSize:9.5];
+    /* v0.6.2: fuentes cacheadas (antes se creaban en cada frame). */
+    UIFont *fNombre = mm_font_name();
+    UIFont *fDist = mm_font_dist();
 
     const MMDrawOpts *o = mm_draw_opts();
     BOOL conCajas  = o->box;          /* v0.2.5 */
@@ -1297,10 +1436,7 @@ static int mm_declutter_budget(void)
     mm_esp_color(0, tema, &crJug, &cgJug, &cbJug);
     mm_esp_color(1, tema, &crBot, &cgBot, &cbBot);
 
-    NSShadow *txtShadow = [[NSShadow alloc] init];
-    txtShadow.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.82];
-    txtShadow.shadowBlurRadius = 2.0;
-    txtShadow.shadowOffset = CGSizeMake(0.0, 1.0);
+    NSShadow *txtShadow = mm_txt_shadow();
 
     NSDictionary *nameJug = @{ NSFontAttributeName: fNombre,
         NSForegroundColorAttributeName:
@@ -1317,6 +1453,16 @@ static int mm_declutter_budget(void)
     NSDictionary *distBot = @{ NSFontAttributeName: fDist,
         NSForegroundColorAttributeName:
             [UIColor colorWithRed:crBot green:cgBot blue:cbBot alpha:0.90],
+        NSShadowAttributeName: txtShadow };
+
+    /* v0.6.2: altura por rol, no un NSDictionary por caja y por frame. */
+    NSDictionary *heightJug = @{ NSFontAttributeName: fDist,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:crJug green:cgJug blue:cbJug alpha:0.92],
+        NSShadowAttributeName: txtShadow };
+    NSDictionary *heightBot = @{ NSFontAttributeName: fDist,
+        NSForegroundColorAttributeName:
+            [UIColor colorWithRed:crBot green:cgBot blue:cbBot alpha:0.92],
         NSShadowAttributeName: txtShadow };
 
     int passes = conDeclutter ? orderN : MIN(g_box_count, MM_MAX_BOXES);
@@ -1415,11 +1561,14 @@ static int mm_declutter_budget(void)
             float dh = b->wy - g_local_pos[1];
             NSString *hhs = [NSString stringWithFormat:@"%@%dm",
                              dh >= 0.0f ? @"▲" : @"▼", (int)(fabsf(dh) + 0.5f)];
-            NSDictionary *hha = @{ NSFontAttributeName: fDist,
-                NSForegroundColorAttributeName: [UIColor colorWithRed:cr green:cg blue:cb alpha:0.92],
-                NSShadowAttributeName: txtShadow };
+            NSDictionary *hha = (conDistCol || conLowHp)
+                ? @{ NSFontAttributeName: fDist,
+                     NSForegroundColorAttributeName:
+                         [UIColor colorWithRed:cr green:cg blue:cb alpha:0.92],
+                     NSShadowAttributeName: txtShadow }
+                : (b->robot ? heightBot : heightJug);
             CGFloat hx = CGRectGetMaxX(r) + 2.0, hy = CGRectGetMidY(r) - 5.0;
-            CGSize hsz = [hhs sizeWithAttributes:hha];
+            CGSize hsz = mm_text_size(hhs, hha, 1);
             CGRect lr = CGRectMake(hx - 1.0, hy - 1.0, hsz.width + 2.0, hsz.height + 2.0);
             BOOL drawH = !conDeclutter ||
                 mm_label_claim(usedLabels, &usedN,
@@ -1470,7 +1619,7 @@ static int mm_declutter_budget(void)
             if (b->hasName) nm = [NSString stringWithUTF8String:b->name];
             if (nm == nil || nm.length == 0)
                 nm = (b->robot ? @"BOT" : @"JUGADOR");
-            CGSize ns = [nm sizeWithAttributes:attr];
+            CGSize ns = mm_text_size(nm, attr, 0);
             CGFloat nx = CGRectGetMidX(r) - ns.width / 2.0;
             nx = MAX(2.0, MIN(bs.size.width - ns.width - 2.0, nx));
             CGFloat ny = r.origin.y - ns.height - 1.0;
@@ -1488,7 +1637,7 @@ static int mm_declutter_budget(void)
             NSDictionary *dattr = b->robot ? distBot : distJug;
             NSString *ds = [NSString stringWithFormat:@"%d m",
                             (int)(b->dist + 0.5f)];
-            CGSize dsz = [ds sizeWithAttributes:dattr];
+            CGSize dsz = mm_text_size(ds, dattr, 1);
             CGFloat dx = CGRectGetMidX(r) - dsz.width / 2.0;
             dx = MAX(2.0, MIN(bs.size.width - dsz.width - 2.0, dx));
             CGFloat dy = CGRectGetMaxY(r) + 2.0;
@@ -2027,16 +2176,45 @@ static BOOL mm_profile_load(int slot)
 
 /*---------------------------------------------------------------------------
  * ESP v0.2.3 - motor de dibujo.
- *  El CADisplayLink llama a mm_esp_frame() ~30 veces por segundo: los datos
- *  del juego se leen a ~15 Hz (mm_esp_collect_real, bloque mas abajo) y el
- *  lienzo se repinta a 30 fps. Sin el maestro ON no se toca NADA del juego.
+ *  El CADisplayLink llama a mm_esp_frame() a 60 Hz: los datos del juego se
+ *  leen a ~30 Hz (mm_esp_collect_real) y el lienzo se repinta solo si cambio
+ *  algo visible (v0.6.2: huella del frame). Sin el maestro ON no se toca NADA.
  *--------------------------------------------------------------------------*/
+/* v0.6.2: huella FNV-1a de todo lo que drawRect puede mostrar. Si no cambia,
+   el frame se salta entero (no setNeedsDisplay, no CoreGraphics). */
+static unsigned long long mm_frame_digest(void)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    const unsigned char *p;
+    size_t n;
+#define MM_FNV(buf, len) do { \
+    p = (const unsigned char *)(buf); n = (size_t)(len); \
+    for (size_t _i = 0; _i < n; _i++) { h ^= p[_i]; h *= 1099511628211ULL; } \
+} while (0)
+    MM_FNV(g_view_mtx, sizeof(g_view_mtx));
+    MM_FNV(g_proj_mtx, sizeof(g_proj_mtx));
+    MM_FNV(&g_have_view, sizeof(g_have_view));
+    MM_FNV(&g_have_local, sizeof(g_have_local));
+    MM_FNV(g_local_pos, sizeof(g_local_pos));
+    int bc = g_box_count; if (bc < 0) bc = 0; if (bc > MM_MAX_BOXES) bc = MM_MAX_BOXES;
+    int tc = g_track_count; if (tc < 0) tc = 0; if (tc > MM_MAX_TRACKS) tc = MM_MAX_TRACKS;
+    MM_FNV(&bc, sizeof(bc));
+    MM_FNV(&tc, sizeof(tc));
+    if (bc > 0) MM_FNV(g_boxes, sizeof(MMEspBox) * (size_t)bc);
+    if (tc > 0) MM_FNV(g_tracks, sizeof(MMTrack) * (size_t)tc);
+    const MMDrawOpts *o = mm_draw_opts();
+    MM_FNV(o, sizeof(*o));
+#undef MM_FNV
+    return h;
+}
+
 static void mm_esp_frame(double t)
 {
     @try {
         if (g_esp == nil) return;
-        /* v0.4.3 (0.1): version gate — no leer offsets de 1.0.57 contra otra version del juego. */
+        /* v0.4.3 (0.1): version gate - no leer offsets de 1.0.57 contra otra version del juego. */
         static int g_ver_ok = -1;
+        static unsigned long long s_digest = 0;
         if (g_ver_ok < 0) {
             NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
             g_ver_ok = (gv != nil && [gv isEqualToString:@FUSION_OFFSETS_VERSION]) ? 1 : 0;
@@ -2057,7 +2235,7 @@ static void mm_esp_frame(double t)
             mm_refresh_count_glass();
             return;
         }
-        if (g_esp.hidden) g_esp.hidden = NO;
+        if (g_esp.hidden) { g_esp.hidden = NO; s_digest = 0; }   /* v0.6.2: fuerza 1er paint */
 
         /* v0.4.0 (#2 FPS): media exponencial del ritmo real del lienzo. */
         static double s_lastT = 0.0;
@@ -2067,12 +2245,20 @@ static void mm_esp_frame(double t)
         }
         s_lastT = t;
 
-        static int s_tick = 0;              /* datos ~15 Hz, pintado a 30 fps */
+        static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
         }
-        [g_esp setNeedsDisplay];
+        /* v0.6.2: repintar solo si algo visible cambio. Parado en el lobby o
+           con el juego en pausa el lienzo no gasta CPU; con movimiento, 60 fps. */
+        const MMDrawOpts *o = mm_draw_opts();
+        BOOL animado = o->fps || o->telem || o->trails || o->warn;
+        unsigned long long dg = mm_frame_digest();
+        if (animado || dg != s_digest) {
+            s_digest = dg;
+            [g_esp setNeedsDisplay];
+        }
     } @catch (NSException *e) {}
 }
 
@@ -2894,10 +3080,23 @@ static void mm_esp_collect_real(void)
        DIBUJAR. Antes se recortaba el escaneo a 24 y se perdia rango real. */
     if (loopn > 200) loopn = 200;
 
+    /* v0.6.2: la lista de pawns se lee en bloques de 32 punteros (una lectura
+       de 256 B) en vez de un vm_read de 8 B por entrada. Con 200 pawns y
+       ~30 Hz eso elimina miles de syscalls por segundo. */
+    enum { MM_PTR_CHUNK = 32 };
+    uint64_t pawns[MM_PTR_CHUNK];
+    int chunkBase = -1, chunkN = 0;
     for (int i = 0; i < loopn; i++) {   /* v0.4.3 (0.6): escanea TODOS; closest-N al insertar */
-        uint64_t pawn = 0;
-        if (!mm_r64((uintptr_t)items + OFF_ARR_DATA + (uintptr_t)i * 8, &pawn) || pawn == 0)
-            continue;
+        if (i - chunkBase >= chunkN) {
+            chunkBase = i;
+            chunkN = MIN(MM_PTR_CHUNK, loopn - i);
+            if (!mm_vm_read((uintptr_t)items + OFF_ARR_DATA + (uintptr_t)i * 8,
+                            pawns, (size_t)chunkN * sizeof(uint64_t)))
+                chunkN = 0;
+        }
+        if (chunkN <= 0) continue;
+        uint64_t pawn = pawns[i - chunkBase];
+        if (pawn == 0) continue;
         if (localPawn != NULL && (void *)(uintptr_t)pawn == localPawn) continue;
 
         uint64_t a = 0, ent = 0, tr = 0;
@@ -3882,13 +4081,11 @@ static void mm_build_ui(void)
     if (g_link == nil) {
         g_link = [CADisplayLink displayLinkWithTarget:[MMTargets shared]
                                              selector:@selector(onFrame:)];
-        /* v0.4.1: ESP mas fluido + FPS REAL. Antes estaba capado a 30, por eso el
-           medidor mostraba 30 fijo. En ProMotion (iPhone 13 Pro+/14 Pro Max) el
-           display corre hasta 120 Hz y la refresca segun el contenido; dejamos que
-           el CADisplayLink llegue a 120 para que mm_esp_frame mida la cadencia REAL
-           del display (hasta 120). Fallback a 60 en equipos sin la API. */
+        /* v0.6.2: tope 60 fps. A 120 el lienzo costaba el doble de CPU por el
+           mismo resultado visual (cajas y texto). 60 es fluido y deja aire al
+           juego. Fallback 60 en equipos sin la API. */
         if (@available(iOS 15.0, *))
-            g_link.preferredFrameRateRange = CAFrameRateRangeMake(30.0, 120.0, 120.0);
+            g_link.preferredFrameRateRange = CAFrameRateRangeMake(30.0, 60.0, 60.0);
         else
             g_link.preferredFramesPerSecond = 60;
         [g_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
