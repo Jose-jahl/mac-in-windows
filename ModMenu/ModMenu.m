@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.4"
+#define MODMENU_VERSION     "0.7.5"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.4";
+const char *modmenu_build_id = "modmenu-glass-0.7.5";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -594,6 +594,8 @@ static CADisplayLink *g_link = nil;   /* latido de dibujo ~30 fps         */
 static NSString    *g_probe = nil;    /* texto de la sonda (fase B)       */
 static int          g_probe_ok = -1;  /* -1 pendiente / 0 revisar / 1 ok  */
 static NSString    *g_br_probe = nil; /* BR probe (prologo decodificado)  */
+static int          g_br_probe_got_inst = 0;   /* 0.7.5: 1 si la ultima pasada capturo instancia != 0 */
+static double       g_br_probe_last_run = 0.0; /* 0.7.5: ts (segundos de uptime) de la ultima pasada */
 
 /* v0.7.0 - Fase 1.11/1.12/1.13/4.5: salud del equipo, arranque sucio y crumbs.
    Todo es estado local; nada de red, nada de llamadas al juego. */
@@ -2479,6 +2481,12 @@ static void mm_haptic(int style)
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_debug"];
     [[NSUserDefaults standardUserDefaults] synchronize];
     mm_refresh_debug_button();
+    /* v0.7.5: fuerza una pasada fresca del probe BR antes de escribir
+       status. Asi si el operador toca el boton durante el shrink, el
+       status.txt y el br_probe.txt reflejan el BRMgr vivo (la instancia
+       resuelta). Si el singleton sigue en 0, el intento es barato (lee
+       bytes del binario, nunca llama al juego). */
+    mm_br_probe_run();
     mm_write_status(@"manual: escribir status");
     [b setTitle:mm_tr(@"Escrito: Documents/modmenu_status.txt")
         forState:UIControlStateNormal];
@@ -3882,13 +3890,18 @@ static void mm_br_probe_run(void)
         /* v0.7.4 (br probe v3): resolver el singleton y dumpear 64 words
            (256 B) desde la instancia. Dos candidatos (set_Radius y
            set_Shape cargan globales distintos): dumpeamos ambos si existen
-           y son no-nulos tras la deref. */
+           y son no-nulos tras la deref.
+           v0.7.5: trackea `g_br_probe_got_inst` para que el watchdog sepa si
+           tiene que reintentar. 0 = static slot sigue vacio (BRMgr aun no
+           instanciado por el juego); 1 = al menos una instancia resuelta. */
+        int got_inst = 0;
         if (rt_radius) {
             uint64_t inst = mm_br_resolve_singleton(rt_radius);
             if (inst) {
                 NSString *dh = mm_br_hex_dump_at((uintptr_t)inst, 64);
                 [s appendFormat:@" | inst_from_Radius=0x%llX %@",
                      (unsigned long long)inst, dh];
+                got_inst = 1;
             } else {
                 [s appendString:@" | inst_from_Radius=0x0"];
             }
@@ -3899,10 +3912,13 @@ static void mm_br_probe_run(void)
                 NSString *dh = mm_br_hex_dump_at((uintptr_t)inst, 64);
                 [s appendFormat:@" | inst_from_Shape=0x%llX %@",
                      (unsigned long long)inst, dh];
+                got_inst = 1;
             } else {
                 [s appendString:@" | inst_from_Shape=0x0"];
             }
         }
+        g_br_probe_got_inst = got_inst;
+        g_br_probe_last_run = mm_uptime();
         g_br_probe = s;
         mm_write_br_file(s);
         mm_write_status(@"br_probe listo");
@@ -7230,7 +7246,21 @@ static void mm_tick(void)
                           mm_tr(@"Dos arranques sin cierre limpio seguidos. El overlay quedo apagado; revisa MISC."));
         }
         if (g_probe == nil && mm_uptime() > 2.0) mm_probe_run();
-        if (g_br_probe == nil && mm_uptime() > 2.0) mm_br_probe_run();
+        /* v0.7.5: el probe BR corre a los 2 s (menu/splash) para capturar
+           los prologos y chases; pero si en ese momento el singleton del
+           BRMgr aun no esta instanciado (slot estatico = 0), reintentamos
+           cada 15 s hasta capturar la instancia. Asi el jugador puede
+           entrar a BR, esperar al shrink, y el probe engancha solo. */
+        {
+            double now = mm_uptime();
+            if (now > 2.0) {
+                int should_run = 0;
+                if (g_br_probe == nil) should_run = 1;
+                else if (!g_br_probe_got_inst && (now - g_br_probe_last_run) >= 15.0)
+                    should_run = 1;
+                if (should_run) mm_br_probe_run();
+            }
+        }
         mm_refresh_info();
 
         if (fast) {
