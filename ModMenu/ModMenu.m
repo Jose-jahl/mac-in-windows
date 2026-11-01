@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.10"
+#define MODMENU_VERSION     "0.7.11"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.10";
+const char *modmenu_build_id = "modmenu-glass-0.7.11";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -598,6 +598,12 @@ static int          g_br_probe_got_inst = 0;   /* 0.7.5: 1 si la ultima pasada c
 static int          g_br_probe_saw_diff = 0;   /* 0.7.8: 1 si alguna pasada vio diff != none (shrink activo) */
 static int          g_br_probe_found_vec3 = 0; /* 0.7.8: 1 si el scan de Vec3 encontro al menos un candidato valido */
 static double       g_br_probe_last_run = 0.0; /* 0.7.5: ts (segundos de uptime) de la ultima pasada */
+/* v0.7.11: fn del pawn local. El colector ESP lo setea cuando resuelve
+   el fieldOfView/WorldToScreen table (via el bootstrap de probe). El
+   probe BR lo lee para dumpear el pawn + walk de sus punteros, buscando
+   la referencia a GameMode/Match -> SafeZone. Cero riesgo nuevo: la fn
+   ya se llama desde el colector en gameplay. */
+static void       *(*g_br_pawn_fn)(void) = NULL;
 
 /* v0.7.0 - Fase 1.11/1.12/1.13/4.5: salud del equipo, arranque sucio y crumbs.
    Todo es estado local; nada de red, nada de llamadas al juego. */
@@ -3784,29 +3790,31 @@ static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
     return mm_br_resolve_singleton_ex(va_rt, NULL);
 }
 
-/* v0.7.8 (br probe v5) + v0.7.9: scan Vec3 permissive. Antes exigia los
-   tres ejes en [0.5, 5000]: eso rechazaba vectores con un eje cerca de
-   cero (ej. un spawn a y=0.0 justo). Ahora: al menos UN eje con magnitud
-   > 1.0, y ninguno > 10000 (seguridad: cualquier valor mayor es basura).
-   Si r (float siguiente) esta en [1, 5000] se emite tambien, candidato
-   de radio. */
+/* v0.7.8 (br probe v5) + v0.7.9 + v0.7.11: scan Vec3 estricto.
+   v0.7.10 trajo muchos falsos positivos (metadata il2cpp con bytes que
+   interpretan a floats: "mDOC"=207.3, strings de nombres de clase).
+   v0.7.11 endurece: (a) al menos DOS ejes con mag >= 1 (filtra float
+   aislado con dos ceros alrededor como el "mDOC"), (b) radio candidato
+   finito, positivo, en [10, 5000] (BR radii tipicos 50-2500m): eso
+   descarta "r=nan", "r=huge", "r=0" que delataban falsos. */
 static int mm_br_scan_vec3(NSMutableString *s, const char *tag,
                            const uint32_t *buf, int nwords, uintptr_t src)
 {
     int hits = 0;
-    for (int i = 0; i <= nwords - 3; i++) {
-        float x, y, z;
+    for (int i = 0; i <= nwords - 4; i++) {   /* -4: tambien leemos radio */
+        float x, y, z, r;
         memcpy(&x, buf + i,     sizeof(float));
         memcpy(&y, buf + i + 1, sizeof(float));
         memcpy(&z, buf + i + 2, sizeof(float));
-        if (!isfinite(x) || !isfinite(y) || !isfinite(z)) continue;
+        memcpy(&r, buf + i + 3, sizeof(float));
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(r)) continue;
         float ax = fabsf(x), ay = fabsf(y), az = fabsf(z);
         if (ax > 10000.f || ay > 10000.f || az > 10000.f) continue;
-        float max_mag = (ax > ay) ? ax : ay;
-        if (az > max_mag) max_mag = az;
-        if (max_mag < 1.0f) continue;    /* al menos un eje con magnitud >= 1 */
-        float r = 0.0f;
-        if (i + 3 < nwords) memcpy(&r, buf + i + 3, sizeof(float));
+        /* al menos DOS ejes con magnitud >= 1 (filtra float aislado) */
+        int nz = (ax >= 1.0f) + (ay >= 1.0f) + (az >= 1.0f);
+        if (nz < 2) continue;
+        /* radio: finito, positivo, 10..5000 (BR map scale) */
+        if (r < 10.0f || r > 5000.0f) continue;
         [s appendFormat:@" | vec3@%s+0x%X=(%.1f,%.1f,%.1f) r=%.1f src=0x%llX",
              tag, i * 4, (double)x, (double)y, (double)z, (double)r,
              (unsigned long long)src];
@@ -3952,6 +3960,45 @@ static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
         }
         n++;
     }
+}
+
+/* v0.7.11: dump del pawn local y walk de sus punteros. Los dumps v0.7.5-10
+   revelaron que `R:slot_file_va=0x10D91A0C0` apunta a TYPE METADATA
+   (`Il2CppClass*` o similar) y no a la SafeZone. La SafeZone real pasa
+   como `x0` al set_Radius desde codigo del juego, nunca por un static.
+   Pero el pawn SI es alcanzable via `g_br_pawn_fn` (ya se llama desde
+   el colector ESP, sin ACE adicional); el pawn tiene referencias a su
+   match/gamemode -> SafeZone list. Dumpeamos 128 words del pawn + walk
+   de 32 slots (16 hijos) con scan Vec3. */
+static void mm_br_dump_pawn(NSMutableString *s, NSMutableString *vec3_out)
+{
+    if (!g_br_pawn_fn) {
+        [s appendString:@" | pawn=unresolved"];
+        return;
+    }
+    void *p = NULL;
+    @try { p = g_br_pawn_fn(); } @catch (NSException *e) { p = NULL; }
+    if (!p) {
+        [s appendString:@" | pawn=null"];
+        return;
+    }
+    uint32_t pbuf[128];
+    vm_size_t got = 0;
+    g_vm_reads++;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)p,
+                          sizeof(pbuf), (vm_address_t)pbuf, &got) != KERN_SUCCESS ||
+        got != sizeof(pbuf)) {
+        [s appendFormat:@" | pawn=0x%llX unreadable", (unsigned long long)(uintptr_t)p];
+        return;
+    }
+    [s appendFormat:@" | pawn=0x%llX hex=", (unsigned long long)(uintptr_t)p];
+    for (int i = 0; i < 128; i++) {
+        if (i > 0) [s appendString:@","];
+        [s appendFormat:@"%08x", (unsigned)pbuf[i]];
+    }
+    if (vec3_out)
+        g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, "P", pbuf, 128, (uintptr_t)p);
+    mm_br_walk_pointers(s, vec3_out, "P", (uintptr_t)p);
 }
 
 /* v0.7.4 (br probe v3): dump de N palabras de 32 bits desde una direccion
@@ -4107,6 +4154,11 @@ static void mm_br_probe_run(void)
                 mm_br_walk_pointers(s, vec3_out, "S", (uintptr_t)inst);
             }
         }
+        /* v0.7.11: ademas del R/S que resuelven a metadata, dumpea el
+           pawn local (via g_br_pawn_fn) y walk sus punteros. El pawn
+           tiene referencias a su gamemode/match -> SafeZone list, que
+           ningun static expone. */
+        mm_br_dump_pawn(s, vec3_out);
         /* v0.7.8: pego los candidatos Vec3 al final de la linea. */
         if (vec3_out.length > 0) [s appendString:vec3_out];
         g_br_probe_got_inst = got_inst;
@@ -4609,6 +4661,7 @@ static void mm_game_resolve(void)
             g_game_base    = b;
             g_fp_gameplay  = fp0;
             g_fp_localpawn = fp1;
+            g_br_pawn_fn   = (void *(*)(void))fp1;   /* v0.7.11: espejo para el probe BR */
             g_fp_maincam   = fp2;
             g_fp_w2c       = fp3;
             g_fp_proj      = fp4;
