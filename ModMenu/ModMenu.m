@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.5"
+#define MODMENU_VERSION     "0.7.6"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.5";
+const char *modmenu_build_id = "modmenu-glass-0.7.6";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -736,7 +736,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->theme     = (int)mm_def_float(@"mm_esp_theme", 0.0f);
     o->crossStyle= (int)mm_def_float(@"mm_x_cross_style", 0.0f);
     o->maxN      = (int)mm_def_float(@"mm_x_maxn", 0.0f);
-    o->range     = mm_def_float(@"mm_esp_range", 300.0f);
+    o->range     = mm_def_float(@"mm_esp_range", 500.0f);
     if (o->boxStyle != 1) o->boxStyle = 0;
     if (o->theme < 0 || o->theme > 2) o->theme = 0;
     if (o->crossStyle < 0 || o->crossStyle > 3) o->crossStyle = 0;
@@ -4681,7 +4681,24 @@ static void mm_esp_collect_real(void)
             }
             continue;
         }
-        if (bstate < 0) continue;   /* v0.2.4: 4 px dejaba fuera a los lejanos */
+        if (bstate < 0) {
+            /* v0.7.6: a distancias largas (~>=430m) el pawn visto HEAD-ON
+               proyecta a <3 px: la pinhole divide por local_z y ese es ~=
+               world_dist cuando el pawn esta en el eje optico. Mirado desde
+               un lado, local_z = world_dist * cos(angulo) < world_dist y la
+               caja proyecta mas grande, por eso el pawn "aparece de lado y
+               desaparece de frente" al jugador. Antes mm_math_box devolvia
+               -1 y se descartaba: ahora clamp a 3 px para que el pawn siga
+               siendo un pip visible (sigue descartando bh > 2*h, que son
+               proyecciones basura por pawn invertido o fuera del frustum). */
+            float pre_bh = (float)(pies.y - cab.y);
+            if (pre_bh > 0.0f && pre_bh < 3.0f) {
+                bh  = 3.0f;
+                bcx = (float)((cab.x + pies.x) * 0.5);
+            } else {
+                continue;
+            }
+        }
 
         CGFloat bw = (CGFloat)bh * 0.45;
         CGFloat cx = (CGFloat)bcx;
@@ -4999,7 +5016,7 @@ static void mm_write_status(NSString *nota)
             (int)mm_def_bool(@"mm_esp_health", NO),
             (int)mm_def_bool(@"mm_esp_lines", NO),
             (int)mm_def_bool(@"mm_esp_lines_top", NO),
-            (int)mm_def_float(@"mm_esp_range", 300.0f),
+            (int)mm_def_float(@"mm_esp_range", 500.0f),
             (int)mm_def_bool(@"mm_esp_count", NO),
             (int)mm_def_float(@"mm_esp_box_style", 0.0f),
             (int)mm_def_float(@"mm_esp_theme", 0.0f),
@@ -5834,7 +5851,7 @@ static void mm_build_ui(void)
         if (i > 0) [g_sub_switches addObject:sw];
     }
 
-    float rng = mm_def_float(@"mm_esp_range", 300.0f);
+    float rng = mm_def_float(@"mm_esp_range", 500.0f);
 
     UILabel *rt = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 298.0, 190.0, 18.0)];
     rt.text = mm_tr(@"Rango ESP (m)");
