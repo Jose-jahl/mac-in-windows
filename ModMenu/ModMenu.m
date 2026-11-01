@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.9"
+#define MODMENU_VERSION     "0.7.10"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.9";
+const char *modmenu_build_id = "modmenu-glass-0.7.10";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -3816,15 +3816,34 @@ static int mm_br_scan_vec3(NSMutableString *s, const char *tag,
     return hits;
 }
 
-/* v0.7.7 (br probe v4) + v0.7.8: dos snapshots de 128 words (512 B) de una
-   direccion, espaciados por 500 ms (usleep). Emite:
-     inst=0xADDR hex=<128 words> diff=+0xOFF:oldval->newval,...
-   v0.7.8 ademas corre el scan Vec3 sobre snap B y actualiza
-   g_br_probe_saw_diff / g_br_probe_found_vec3. */
+/* v0.7.10: estado de la app al momento del probe. Si durante el usleep
+   de 500 ms la app pasa a background, iOS pausa las writes de memoria
+   del juego y el snapshot B queda IDENTICO al A -> diff=none falso.
+   Retorna: 0=Active, 1=Inactive, 2=Background, -1=na, -2=error. */
+static int mm_br_app_state(void)
+{
+    @try {
+        UIApplication *app = [UIApplication sharedApplication];
+        if (!app) return -1;
+        return (int)app.applicationState;
+    } @catch (NSException *e) {
+        return -2;
+    }
+}
+
+/* v0.7.7 (br probe v4) + v0.7.8 + v0.7.10: dos snapshots de 128 words
+   (512 B), espaciados por 500 ms. Emite:
+     inst=0xADDR app=A>B hex=<128 words> diff=+0xOFF:oldval->newval,...
+   v0.7.10: `app=A>B` = applicationState de iOS antes/despues del
+   snapshot (0=Active, 1=Inactive, 2=Background, -1=na). Si cualquiera
+   no es Active, el diff se marca `skip_bg` (iOS paus las writes del
+   juego -> diff falso) y g_br_probe_saw_diff NO se setea (seguimos
+   reintentando hasta capturar una pasada con la app en foreground). */
 static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
                                     const char *tag, uintptr_t inst)
 {
     if (inst == 0) return @"inst=0x0";
+    int app_a = mm_br_app_state();
     uint32_t snap_a[128], snap_b[128];
     vm_size_t got = 0;
     g_vm_reads++;
@@ -3836,6 +3855,7 @@ static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
                 (unsigned long long)inst];
     }
     usleep(500000);   /* 0.5 s: tiempo tipico para ver cambio durante shrink */
+    int app_b = mm_br_app_state();
     g_vm_reads++;
     if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst,
                           sizeof(snap_b), (vm_address_t)snap_b,
@@ -3844,8 +3864,10 @@ static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
         return [NSString stringWithFormat:@"inst=0x%llX unreadable2",
                 (unsigned long long)inst];
     }
+    int bg = (app_a != 0 || app_b != 0);
     NSMutableString *h = [NSMutableString stringWithCapacity:128 * 10 + 512];
-    [h appendFormat:@"inst=0x%llX hex=", (unsigned long long)inst];
+    [h appendFormat:@"inst=0x%llX app=%d>%d hex=",
+         (unsigned long long)inst, app_a, app_b];
     for (int i = 0; i < 128; i++) {
         if (i > 0) [h appendString:@","];
         [h appendFormat:@"%08x", (unsigned)snap_b[i]];
@@ -3861,22 +3883,26 @@ static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
             if (ndiff >= 24) { [h appendString:@",..."]; break; }
         }
     }
-    if (ndiff == 0) [h appendString:@"none"];
-    else            g_br_probe_saw_diff = 1;
+    if (ndiff == 0) {
+        [h appendString:bg ? @"none(skip_bg)" : @"none"];
+    } else {
+        if (!bg) g_br_probe_saw_diff = 1;
+        else     [h appendString:@" (skip_bg)"];
+    }
     /* v0.7.8: scan Vec3 sobre snap B (ya reflejado en inst) */
     if (vec3_out)
         g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, tag, snap_b, 128, inst);
     return h;
 }
 
-/* v0.7.7 (br probe v4) + v0.7.8 + v0.7.9: walk de 32 pointer-slots en
-   [0..0xF8] de la instancia. v0.7.9 agranda limite de hijos de 8 a 16
-   para alcanzar slots altos (ej. slot 20 = offset 0xA0 donde la Shape
-   list guarda el zone-ptr de la Entry 1). Alineacion a 4-byte (antes
-   8-byte): algunos ptrs del Shape (como 0x123C90E4E con low=0x4E) estan
-   2-aligned y los perdiamos. vm_read_overwrite igual rechaza el deref
-   si la pagina no es legible, asi que relajar la alineacion no agrega
-   crashes. Hasta 16 ptrs validos, dump 64 words (256 B) + Vec3 scan. */
+/* v0.7.10: walk de 32 pointer-slots en [0..0xF8] de la instancia.
+   - Hijos: 16 (como v0.7.9). Dump 128 words (512 B) por hijo (antes 64,
+     256 B) - alcanza mas profundo donde pueda estar el Vec3.
+   - Alineacion: 2-byte (`p & 0x1`). Mono/il2cpp usa a veces low-bit tags;
+     v0.7.8 (8-byte) y v0.7.9 (4-byte) rechazaban 0x123C90E4E (low 0x4E).
+   - Deref: si el deref del ptr exacto falla, retry con bits 2-0 limpios
+     (0x123C90E4E -> 0x123C90E48) por si es tagged pointer. Emito
+     `tag=0xN` cuando la deref untagged tuvo exito. */
 static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
                                 const char *tag, uintptr_t inst)
 {
@@ -3892,24 +3918,37 @@ static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
     for (int i = 0; i < 32 && n < 16; i++) {
         uint64_t p = ptrs[i];
         if (p < 0x100000000ULL || p > 0x300000000ULL) continue; /* heuristico */
-        if (p & 0x3ULL) continue;                               /* alineado 4 */
+        if (p & 0x1ULL) continue;                               /* alineado 2 */
         if (p == (uint64_t)inst) continue;                      /* auto-ptr */
-        uint32_t sub[64];
+        uint32_t sub[128];
         g_vm_reads++;
-        if (vm_read_overwrite(mach_task_self(), (vm_address_t)p, sizeof(sub),
-                              (vm_address_t)sub, &got) != KERN_SUCCESS ||
-            got != sizeof(sub)) continue;
-        [s appendFormat:@" | %s_child_%d@+0x%X=0x%llX hex=",
+        uint64_t deref_at = p;
+        int tag_bits = 0;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                                             (vm_address_t)p, sizeof(sub),
+                                             (vm_address_t)sub, &got);
+        if ((kr != KERN_SUCCESS || got != sizeof(sub)) && (p & 0x7ULL)) {
+            /* Retry con low 3 bits limpios: posible tagged pointer. */
+            deref_at = p & ~0x7ULL;
+            tag_bits = (int)(p & 0x7ULL);
+            g_vm_reads++;
+            kr = vm_read_overwrite(mach_task_self(), (vm_address_t)deref_at,
+                                   sizeof(sub), (vm_address_t)sub, &got);
+        }
+        if (kr != KERN_SUCCESS || got != sizeof(sub)) continue;
+        [s appendFormat:@" | %s_child_%d@+0x%X=0x%llX",
              tag, n, i * 8, (unsigned long long)p];
-        for (int j = 0; j < 64; j++) {
+        if (tag_bits) [s appendFormat:@" tag=0x%x", tag_bits];
+        [s appendString:@" hex="];
+        for (int j = 0; j < 128; j++) {
             if (j > 0) [s appendString:@","];
             [s appendFormat:@"%08x", (unsigned)sub[j]];
         }
-        /* v0.7.8: scan Vec3 sobre el hijo (256 B cubren el chase +0xB8). */
+        /* v0.7.8: scan Vec3 sobre el hijo. v0.7.10: 128 words (512 B). */
         if (vec3_out) {
             char subtag[32];
             snprintf(subtag, sizeof(subtag), "%s_c%d", tag, n);
-            g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, subtag, sub, 64, (uintptr_t)p);
+            g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, subtag, sub, 128, (uintptr_t)deref_at);
         }
         n++;
     }
