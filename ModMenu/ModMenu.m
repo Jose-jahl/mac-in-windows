@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.11"
+#define MODMENU_VERSION     "0.7.12"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.11";
+const char *modmenu_build_id = "modmenu-glass-0.7.12";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -6225,111 +6225,9 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:gr];
 
-    /* v0.7.0 (1.8): perfiles de configuracion, 5 slots con nombre y presets. */
-    UILabel *pfl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 78.0, 272.0, 16.0)];
-    pfl.text = mm_tr(@"Perfiles (5 slots)");
-    pfl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
-    pfl.font = [UIFont boldSystemFontOfSize:12.0];
-    [g_p_misc addSubview:pfl];
-
-    UISegmentedControl *pfseg = [[UISegmentedControl alloc]
-        initWithItems:@[@"P1", @"P2", @"P3", @"P4", @"P5"]];
-    pfseg.frame = CGRectMake(6.0, 100.0, 272.0, 28.0);
-    pfseg.selectedSegmentIndex = 0;
-    if ([pfseg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        pfseg.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
-    [pfseg setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor colorWithWhite:0.88 alpha:1.0],
-        NSFontAttributeName:[UIFont boldSystemFontOfSize:11.0] } forState:UIControlStateNormal];
-    [pfseg addTarget:[MMTargets shared] action:@selector(onProfileSlot:)
-        forControlEvents:UIControlEventValueChanged];
-    g_profile_seg = pfseg;
-    [g_p_misc addSubview:pfseg];
-
-    g_profile_name_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 132.0, 272.0, 14.0)];
-    g_profile_name_label.text = mm_profile_name(0);
-    g_profile_name_label.textColor = [mm_neon_green() colorWithAlphaComponent:0.95];
-    g_profile_name_label.font = [UIFont fontWithName:@"Menlo-Bold" size:10.5] ?:
-                                [UIFont boldSystemFontOfSize:10.5];
-    g_profile_name_label.textAlignment = NSTextAlignmentCenter;
-    [g_p_misc addSubview:g_profile_name_label];
-
-    UIButton *pfsave = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfsave.frame = CGRectMake(6.0, 152.0, 132.0, 32.0);
-    pfsave.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
-    pfsave.layer.cornerRadius = 7.0;
-    [pfsave setTitle:mm_tr(@"Guardar") forState:UIControlStateNormal];
-    [pfsave setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    pfsave.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    [pfsave addTarget:[MMTargets shared] action:@selector(onProfileSave)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:pfsave];
-
-    UIButton *pfload = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfload.frame = CGRectMake(146.0, 152.0, 132.0, 32.0);
-    pfload.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
-    pfload.layer.cornerRadius = 7.0;
-    [pfload setTitle:mm_tr(@"Cargar") forState:UIControlStateNormal];
-    [pfload setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    pfload.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    [pfload addTarget:[MMTargets shared] action:@selector(onProfileLoad)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:pfload];
-
-    UIButton *pfname = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfname.frame = CGRectMake(6.0, 190.0, 88.0, 30.0);
-    pfname.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    pfname.layer.cornerRadius = 7.0;
-    [pfname setTitle:mm_tr(@"Nombre") forState:UIControlStateNormal];
-    [pfname setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    pfname.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [pfname addTarget:[MMTargets shared] action:@selector(onProfileName)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:pfname];
-
-    UIButton *pfex = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfex.frame = CGRectMake(98.0, 190.0, 88.0, 30.0);
-    pfex.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    pfex.layer.cornerRadius = 7.0;
-    [pfex setTitle:mm_tr(@"Exportar") forState:UIControlStateNormal];
-    [pfex setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    pfex.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [pfex addTarget:[MMTargets shared] action:@selector(onProfileExport)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:pfex];
-
-    UIButton *pfim = [UIButton buttonWithType:UIButtonTypeCustom];
-    pfim.frame = CGRectMake(190.0, 190.0, 88.0, 30.0);
-    pfim.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    pfim.layer.cornerRadius = 7.0;
-    [pfim setTitle:mm_tr(@"Importar") forState:UIControlStateNormal];
-    [pfim setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    pfim.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [pfim addTarget:[MMTargets shared] action:@selector(onProfileImport)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:pfim];
-
-    UILabel *psh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 228.0, 272.0, 16.0)];
-    psh.text = mm_tr(@"Presets contextuales");
-    psh.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    psh.font = [UIFont systemFontOfSize:11.0];
-    [g_p_misc addSubview:psh];
-
-    NSArray *psn = @[@"MP", @"BR", @"Stream", @"Bajo"];
-    for (NSUInteger i = 0; i < psn.count; i++) {
-        UIButton *pb = [UIButton buttonWithType:UIButtonTypeCustom];
-        pb.frame = CGRectMake(6.0 + (CGFloat)i * 69.0, 246.0, 65.0, 30.0);
-        pb.tag = (NSInteger)i;
-        pb.backgroundColor = [UIColor colorWithRed:0.14 green:0.14 blue:0.30 alpha:0.95];
-        pb.layer.cornerRadius = 7.0;
-        pb.layer.borderWidth = 0.7;
-        pb.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
-        [pb setTitle:psn[i] forState:UIControlStateNormal];
-        [pb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        pb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-        [pb addTarget:[MMTargets shared] action:@selector(onPreset:)
-            forControlEvents:UIControlEventTouchUpInside];
-        [g_p_misc addSubview:pb];
-    }
+    /* v0.7.12: perfiles / presets removidos del panel (callbacks siguen
+       vivos para el swipe de 2 dedos y la deserializacion del slot default,
+       pero sin UI el usuario no ve los 5 slots ni los 4 preset buttons). */
 
     /* v0.4.3 (0.8): debug — prende el status file (modmenu_status.txt) para diagnosticar.
        Default OFF: sin esto no se escribe evidencia forense. */
@@ -6337,7 +6235,7 @@ static void mm_build_ui(void)
        junto al borde no recibia el toque en algunos equipos; este boton
        comparte pagina con Guardar/Cargar, que si responden. */
     g_dbgbtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    g_dbgbtn.frame = CGRectMake(6.0, 286.0, 272.0, 34.0);
+    g_dbgbtn.frame = CGRectMake(6.0, 78.0, 272.0, 34.0);
     g_dbgbtn.layer.cornerRadius = 8.0;
     g_dbgbtn.layer.borderWidth = 1.0;
     g_dbgbtn.layer.borderColor =
@@ -6351,7 +6249,7 @@ static void mm_build_ui(void)
 
     /* v0.6.1: volcado manual del status, sin depender de ningun toggle. */
     UIButton *stb = [UIButton buttonWithType:UIButtonTypeCustom];
-    stb.frame = CGRectMake(6.0, 324.0, 272.0, 34.0);
+    stb.frame = CGRectMake(6.0, 116.0, 272.0, 34.0);
     stb.backgroundColor = [UIColor colorWithRed:0.10 green:0.30 blue:0.52 alpha:0.95];
     stb.layer.cornerRadius = 8.0;
     stb.layer.borderWidth = 1.0;
@@ -6364,36 +6262,25 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:stb];
 
-    /* v0.6.4: MISC paso a scroll (348 pt ya estaban llenos). */
-    UIView *smr = mm_switch_row(@"Modo seguro (apaga overlay)", @"mm_safe_mode", NO);
-    smr.frame = CGRectMake(0, 362.0, 284.0, 34.0);
-    [g_p_misc addSubview:smr];
-
-    UIView *qbr = mm_switch_row(@"Barra rapida (3 toggles)", @"mm_quickbar", NO);
-    qbr.frame = CGRectMake(0, 396.0, 284.0, 34.0);
-    [g_p_misc addSubview:qbr];
+    /* v0.7.12: modo seguro, barra rapida y guard captura removidos del panel. */
 
     UIView *hpr = mm_switch_row(@"Vibracion al tocar", @"mm_haptics", YES);
-    hpr.frame = CGRectMake(0, 430.0, 284.0, 34.0);
+    hpr.frame = CGRectMake(0, 154.0, 284.0, 34.0);
     [g_p_misc addSubview:hpr];
 
-    /* v0.7.0 (1.13/1.15): stream automatico y guard de captura. */
+    /* v0.7.0 (1.13): stream automatico. */
     UIView *asr = mm_switch_row(@"Stream auto al grabar", @"mm_auto_stream", YES);
-    asr.frame = CGRectMake(0, 464.0, 284.0, 34.0);
+    asr.frame = CGRectMake(0, 188.0, 284.0, 34.0);
     [g_p_misc addSubview:asr];
 
-    UIView *gcr = mm_switch_row(@"Guard de captura (experimental)", @"mm_guard_capture", NO);
-    gcr.frame = CGRectMake(0, 498.0, 284.0, 34.0);
-    [g_p_misc addSubview:gcr];
-
-    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 536.0, 272.0, 16.0)];
+    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 226.0, 272.0, 16.0)];
     lgl.text = mm_tr(@"Idioma (reiniciar)");
     lgl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
     lgl.font = [UIFont systemFontOfSize:11.0];
     [g_p_misc addSubview:lgl];
 
     UISegmentedControl *lgs = [[UISegmentedControl alloc] initWithItems:@[@"ES", @"EN"]];
-    lgs.frame = CGRectMake(6.0, 554.0, 272.0, 28.0);
+    lgs.frame = CGRectMake(6.0, 244.0, 272.0, 28.0);
     lgs.selectedSegmentIndex = (mm_lang() == 1) ? 1 : 0;
     if ([lgs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
         lgs.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
@@ -6409,7 +6296,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:lgs];
 
     UIButton *stf = [UIButton buttonWithType:UIButtonTypeCustom];
-    stf.frame = CGRectMake(6.0, 592.0, 272.0, 34.0);
+    stf.frame = CGRectMake(6.0, 282.0, 272.0, 34.0);
     stf.backgroundColor = [UIColor colorWithRed:0.12 green:0.34 blue:0.30 alpha:0.95];
     stf.layer.cornerRadius = 8.0;
     stf.layer.borderWidth = 1.0;
@@ -6423,13 +6310,13 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:stf];
 
     /* v0.7.0 (4.2): licencia in-menu sin red. */
-    UILabel *licl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 634.0, 272.0, 16.0)];
+    UILabel *licl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 324.0, 272.0, 16.0)];
     licl.text = mm_tr(@"Licencia (observacion)");
     licl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
     licl.font = [UIFont boldSystemFontOfSize:12.0];
     [g_p_misc addSubview:licl];
 
-    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 652.0, 272.0, 30.0)];
+    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 342.0, 272.0, 30.0)];
     g_lic_label.numberOfLines = 2;
     g_lic_label.textColor = [UIColor colorWithWhite:0.86 alpha:1.0];
     g_lic_label.font = [UIFont fontWithName:@"Menlo" size:9.0] ?:
@@ -6438,7 +6325,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:g_lic_label];
 
     UIButton *licp = [UIButton buttonWithType:UIButtonTypeCustom];
-    licp.frame = CGRectMake(6.0, 686.0, 132.0, 30.0);
+    licp.frame = CGRectMake(6.0, 376.0, 132.0, 30.0);
     licp.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
     licp.layer.cornerRadius = 7.0;
     [licp setTitle:mm_tr(@"Pegar token") forState:UIControlStateNormal];
@@ -6449,7 +6336,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:licp];
 
     UIButton *licr = [UIButton buttonWithType:UIButtonTypeCustom];
-    licr.frame = CGRectMake(146.0, 686.0, 132.0, 30.0);
+    licr.frame = CGRectMake(146.0, 376.0, 132.0, 30.0);
     licr.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
     licr.layer.cornerRadius = 7.0;
     [licr setTitle:mm_tr(@"Revalidar") forState:UIControlStateNormal];
@@ -6459,18 +6346,10 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:licr];
 
-    /* 4.8: telemetria local, opt-in y sin red. */
-    UIView *usr = mm_switch_row(@"Telemetria local (opt-in)", @"mm_usage_optin", NO);
-    usr.frame = CGRectMake(0, 722.0, 284.0, 34.0);
-    [g_p_misc addSubview:usr];
-
-    /* 1.19: marca de build derivada del HWID (opt-in). */
-    UIView *bmr = mm_switch_row(@"Marca HWID en INFO (opt-in)", @"mm_build_mark", NO);
-    bmr.frame = CGRectMake(0, 760.0, 284.0, 34.0);
-    [g_p_misc addSubview:bmr];
+    /* v0.7.12: telemetria local y marca HWID removidas del panel. */
 
     UIButton *cst = [UIButton buttonWithType:UIButtonTypeCustom];
-    cst.frame = CGRectMake(6.0, 798.0, 272.0, 34.0);
+    cst.frame = CGRectMake(6.0, 412.0, 272.0, 34.0);
     cst.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
     cst.layer.cornerRadius = 8.0;
     cst.layer.borderWidth = 0.7;
@@ -6483,7 +6362,7 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventTouchUpInside];
     [g_p_misc addSubview:cst];
 
-    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 846.0);
+    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 460.0);
 
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
@@ -6492,20 +6371,20 @@ static void mm_build_ui(void)
     xh.font = [UIFont boldSystemFontOfSize:11.0];
     [g_p_more addSubview:xh];
 
+    /* v0.7.12: removidos mm_x_distcol, mm_x_lowhp, mm_x_fps, mm_x_height,
+       mm_x_telem y mm_x_targetlist (sus defaults quedan en NO al no haber
+       UI; los backends siguen vivos pero inactivos). */
     NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
-                        @"mm_x_distcol", @"mm_x_lowhp", @"mm_x_fps",
                         @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
-                        @"mm_x_radar", @"mm_x_height", @"mm_x_telem",
+                        @"mm_x_radar",
                         @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
-                        @"mm_x_radar_cam", @"mm_x_targetlist" ];
+                        @"mm_x_radar_cam" ];
     NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
-                        @"Color por distancia", @"Resaltar vida baja", @"Medidor de FPS",
                         @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
                         @"Flecha fuera de pantalla (detras)",
-                        @"Radar 2D", @"Indicador de altura", @"Telemetria",
+                        @"Radar 2D",
                         @"Brujula de bearings", @"Estelas (ultimos 2 s)",
-                        @"Anti-solape de etiquetas", @"Radar: arriba = mi vista",
-                        @"Lista de objetivos" ];
+                        @"Anti-solape de etiquetas", @"Radar: arriba = mi vista" ];
     for (NSUInteger i = 0; i < xkeys.count; i++) {
         BOOL xdef = [xkeys[i] isEqualToString:@"mm_x_radar_cam"];   /* default ON */
         UIView *xrow = mm_switch_row(xtit[i], xkeys[i], xdef);
@@ -6569,25 +6448,8 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_more addSubview:tac]; ry += 38.0;
 
-    /* v0.7.0 (1.16): paleta para daltonismo. */
-    UILabel *cbl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    cbl.text = mm_tr(@"Paleta daltonismo");
-    cbl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    cbl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:cbl]; ry += 20.0;
-    UISegmentedControl *cbs = [[UISegmentedControl alloc]
-        initWithItems:@[mm_tr(@"Normal"), @"Protan/Deutan", @"Tritan"]];
-    cbs.frame = CGRectMake(6.0, ry, 272.0, 28.0);
-    cbs.selectedSegmentIndex = (g_cb_mode == 1) ? 1 : ((g_cb_mode == 3) ? 2 : 0);
-    if ([cbs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        cbs.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
-    [cbs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.88 alpha:1.0],
-            NSFontAttributeName: [UIFont systemFontOfSize:10.0] }
-                        forState:UIControlStateNormal];
-    [cbs addTarget:[MMTargets shared] action:@selector(onColorMode:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:cbs]; ry += 38.0;
+    /* v0.7.12: paleta daltonismo removida del panel (g_cb_mode queda en 0,
+       la paleta normal). */
 
     /* v0.7.0 (1.16): dos acentos personalizados (UIColorPickerViewController). */
     UIButton *acb = [UIButton buttonWithType:UIButtonTypeCustom];
