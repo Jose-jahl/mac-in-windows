@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.6"
+#define MODMENU_VERSION     "0.7.7"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.6";
+const char *modmenu_build_id = "modmenu-glass-0.7.7";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -3724,8 +3724,11 @@ static int mm_br_find_tail_target(uint64_t va_rt, uint64_t *target_rt)
 /* v0.7.4 (br probe v3): busca el PRIMER slot estatico 64-bit cargado por un
    patron `adrp Rd,page [; add Rd,Rd,#imm12] ; ldr Xt,[Rd,#imm12*8]` dentro
    de la ventana. Deref: devuelve el VALOR almacenado en ese slot (puntero a
-   la instancia singleton del game-mode). 0 si no hay match o la deref falla. */
-static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
+   la instancia singleton del game-mode). 0 si no hay match o la deref falla.
+   v0.7.7: ademas devuelve en *slot_rt la direccion runtime del slot (para
+   que el probe emita la file-space VA que fusion br promote necesita como
+   mgr_va). Pasa NULL si no te interesa. */
+static uint64_t mm_br_resolve_singleton_ex(uint64_t va_rt, uint64_t *slot_rt_out)
 {
     const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
     for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
@@ -3760,6 +3763,7 @@ static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
                 uint32_t imm12 = (w2 >> 10) & 0xFFF;
                 if (Rn2 == Rd) {
                     uint64_t slot = (has_add ? base : page) + (uint64_t)imm12 * 8;
+                    if (slot_rt_out) *slot_rt_out = slot;
                     BOOL ok = NO;
                     uint64_t ptr = mm_safe_read64((uintptr_t)slot, &ok);
                     if (ok && ptr != 0) return ptr;
@@ -3768,7 +3772,99 @@ static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
             }
         }
     }
+    if (slot_rt_out) *slot_rt_out = 0;
     return 0;
+}
+
+/* v0.7.4: wrapper original (sin slot_rt) para que compile el camino viejo. */
+static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
+{
+    return mm_br_resolve_singleton_ex(va_rt, NULL);
+}
+
+/* v0.7.7 (br probe v4): dos snapshots de 128 words (512 B) de una
+   direccion, espaciados por 500 ms (usleep). Emite:
+     inst=0xADDR hex=<128 words> diff=+0xOFF:oldval->newval,...
+   El diff solo incluye las palabras que cambiaron entre A y B. Si la
+   instancia no es legible emite "unreadable". Max 24 entradas en el diff
+   para no inflar la linea (si hay mas, cae un ",..." al final). */
+static NSString *mm_br_dump_dynamic(uintptr_t inst)
+{
+    if (inst == 0) return @"inst=0x0";
+    uint32_t snap_a[128], snap_b[128];
+    vm_size_t got = 0;
+    g_vm_reads++;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst,
+                          sizeof(snap_a), (vm_address_t)snap_a,
+                          &got) != KERN_SUCCESS ||
+        got != sizeof(snap_a)) {
+        return [NSString stringWithFormat:@"inst=0x%llX unreadable",
+                (unsigned long long)inst];
+    }
+    usleep(500000);   /* 0.5 s: tiempo tipico para ver cambio durante shrink */
+    g_vm_reads++;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst,
+                          sizeof(snap_b), (vm_address_t)snap_b,
+                          &got) != KERN_SUCCESS ||
+        got != sizeof(snap_b)) {
+        return [NSString stringWithFormat:@"inst=0x%llX unreadable2",
+                (unsigned long long)inst];
+    }
+    NSMutableString *h = [NSMutableString stringWithCapacity:128 * 10 + 512];
+    [h appendFormat:@"inst=0x%llX hex=", (unsigned long long)inst];
+    for (int i = 0; i < 128; i++) {
+        if (i > 0) [h appendString:@","];
+        [h appendFormat:@"%08x", (unsigned)snap_b[i]];
+    }
+    [h appendString:@" diff="];
+    int ndiff = 0;
+    for (int i = 0; i < 128; i++) {
+        if (snap_a[i] != snap_b[i]) {
+            if (ndiff > 0) [h appendString:@","];
+            [h appendFormat:@"+0x%X:%08x>%08x", i * 4,
+                 (unsigned)snap_a[i], (unsigned)snap_b[i]];
+            ndiff++;
+            if (ndiff >= 24) { [h appendString:@",..."]; break; }
+        }
+    }
+    if (ndiff == 0) [h appendString:@"none"];
+    return h;
+}
+
+/* v0.7.7 (br probe v4): walk de hasta 16 pointer-slots en [0..0x80] de la
+   instancia. Para cada ptr que luzca a imagen cargada del juego (bits altos
+   en [0x1,0x3], alineado 8), deref y dump 32 words. Emite:
+     tag_child_N@+0xOFF=0xADDR hex=<32 words>
+   Max 8 hijos por instancia (bounded ~2.5 KB por instancia). */
+static void mm_br_walk_pointers(NSMutableString *s, const char *tag, uintptr_t inst)
+{
+    if (inst == 0) return;
+    uint64_t ptrs[16];
+    vm_size_t got = 0;
+    g_vm_reads++;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst, sizeof(ptrs),
+                          (vm_address_t)ptrs, &got) != KERN_SUCCESS ||
+        got != sizeof(ptrs))
+        return;
+    int n = 0;
+    for (int i = 0; i < 16 && n < 8; i++) {
+        uint64_t p = ptrs[i];
+        if (p < 0x100000000ULL || p > 0x300000000ULL) continue; /* heuristico */
+        if (p & 0x7ULL) continue;                               /* alineado 8 */
+        if (p == (uint64_t)inst) continue;                      /* auto-ptr */
+        uint32_t sub[32];
+        g_vm_reads++;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)p, sizeof(sub),
+                              (vm_address_t)sub, &got) != KERN_SUCCESS ||
+            got != sizeof(sub)) continue;
+        [s appendFormat:@" | %s_child_%d@+0x%X=0x%llX hex=",
+             tag, n, i * 8, (unsigned long long)p];
+        for (int j = 0; j < 32; j++) {
+            if (j > 0) [s appendString:@","];
+            [s appendFormat:@"%08x", (unsigned)sub[j]];
+        }
+        n++;
+    }
 }
 
 /* v0.7.4 (br probe v3): dump de N palabras de 32 bits desde una direccion
@@ -3842,8 +3938,10 @@ static void mm_br_probe_run(void)
         int N = (int)(sizeof(setters) / sizeof(setters[0]));
 
         NSMutableString *s = [NSMutableString stringWithFormat:@"base=0x%lX", (unsigned long)base];
-        /* v0.7.4 (br probe v3): guardamos las VAs runtime de set_Radius y
-           set_Shape para resolver el singleton al final. */
+        /* v0.7.7 (br probe v4): los prologos de los 8 setters ya los tengo del
+           volcado de v0.7.4; aqui solo listo nombre+VA para que la linea
+           quede autodescriptiva. El decoder de v0.7.3 queda vivo solo por si
+           alguno llegara a matchear como setter directo (set_X=off=...). */
         uint64_t rt_radius = 0, rt_shape = 0;
         for (int i = 0; i < N; i++) {
             uint64_t rt = base + (uintptr_t)(setters[i].va - FUSION_IMAGE_BASE);
@@ -3851,25 +3949,10 @@ static void mm_br_probe_run(void)
             if (strcmp(setters[i].name, "set_Shape")  == 0) rt_shape  = rt;
             mm_br_decode_t d;
             if (!mm_br_decode_setter(rt, &d) || !d.found) {
-                /* v0.7.3 (br probe v2): sin match -> volcamos 32 ins en hex
-                   para parsear a mano. Agrega ~290 chars por setter. */
-                NSString *hex = mm_br_hex_dump32(rt);
-                [s appendFormat:@" | %s=? va=0x%llX %@",
-                     setters[i].name,
-                     (unsigned long long)setters[i].va,
-                     hex];
-                /* v0.7.4 (br probe v3): si la ventana termina en `b imm26`
-                   (forwarder tail-call), seguimos 1 hop y dumpeamos 32 ins
-                   mas desde el target. En iOS 1.0.57 un solo hop basta para
-                   caer en el setter real con el `str s0/w1, [xN, #OFFSET]`. */
-                uint64_t chase_rt = 0;
-                if (mm_br_find_tail_target(rt, &chase_rt)) {
-                    uint64_t chase_va = (uint64_t)FUSION_IMAGE_BASE +
-                                        (chase_rt - (uint64_t)base);
-                    NSString *chex = mm_br_hex_dump_at((uintptr_t)chase_rt, 32);
-                    [s appendFormat:@" chase_va=0x%llX %@",
-                         (unsigned long long)chase_va, chex];
-                }
+                /* Solo nombre+VA, sin los 32 words de hex (ya los tenemos del
+                   dump v0.7.4; ahorramos ~2 KB de linea por iteracion). */
+                [s appendFormat:@" | %s=? va=0x%llX",
+                     setters[i].name, (unsigned long long)setters[i].va];
                 continue;
             }
             if (d.src == 's') {
@@ -3887,34 +3970,44 @@ static void mm_br_probe_run(void)
                 }
             }
         }
-        /* v0.7.4 (br probe v3): resolver el singleton y dumpear 64 words
-           (256 B) desde la instancia. Dos candidatos (set_Radius y
-           set_Shape cargan globales distintos): dumpeamos ambos si existen
-           y son no-nulos tras la deref.
-           v0.7.5: trackea `g_br_probe_got_inst` para que el watchdog sepa si
-           tiene que reintentar. 0 = static slot sigue vacio (BRMgr aun no
-           instanciado por el juego); 1 = al menos una instancia resuelta. */
+        /* v0.7.7 (br probe v4): captura exhaustiva. Para cada setter con
+           singleton:
+             (1) resolve_singleton_ex: puntero a la instancia + runtime slot;
+             (2) emite slot_file_va (lo que mgr_va del contrato espera);
+             (3) dump dinamico 128 words + diff de las palabras que cambiaron
+                 entre dos snapshots a 500 ms (deberia revelar los floats del
+                 centro + radio durante shrink activo);
+             (4) walk de 16 pointer-slots en [0..0x80], deref + 32 words por
+                 hijo (hasta 8 hijos) -> encuentra la SafeZone hija donde
+                 vive el Vec3 (chase de set_Radius escribe `stur q0,[x19,+0xB8]`,
+                 x19 = SafeZone pasado por el llamador, no por el static). */
         int got_inst = 0;
         if (rt_radius) {
-            uint64_t inst = mm_br_resolve_singleton(rt_radius);
+            uint64_t slot_rt = 0;
+            uint64_t inst = mm_br_resolve_singleton_ex(rt_radius, &slot_rt);
+            uint64_t slot_file_va = (slot_rt && slot_rt >= (uint64_t)base)
+                ? ((uint64_t)FUSION_IMAGE_BASE + (slot_rt - (uint64_t)base)) : 0;
+            [s appendFormat:@" | R:slot_file_va=0x%llX slot_rt=0x%llX %@",
+                 (unsigned long long)slot_file_va,
+                 (unsigned long long)slot_rt,
+                 mm_br_dump_dynamic((uintptr_t)inst)];
             if (inst) {
-                NSString *dh = mm_br_hex_dump_at((uintptr_t)inst, 64);
-                [s appendFormat:@" | inst_from_Radius=0x%llX %@",
-                     (unsigned long long)inst, dh];
                 got_inst = 1;
-            } else {
-                [s appendString:@" | inst_from_Radius=0x0"];
+                mm_br_walk_pointers(s, "R", (uintptr_t)inst);
             }
         }
         if (rt_shape) {
-            uint64_t inst = mm_br_resolve_singleton(rt_shape);
+            uint64_t slot_rt = 0;
+            uint64_t inst = mm_br_resolve_singleton_ex(rt_shape, &slot_rt);
+            uint64_t slot_file_va = (slot_rt && slot_rt >= (uint64_t)base)
+                ? ((uint64_t)FUSION_IMAGE_BASE + (slot_rt - (uint64_t)base)) : 0;
+            [s appendFormat:@" | S:slot_file_va=0x%llX slot_rt=0x%llX %@",
+                 (unsigned long long)slot_file_va,
+                 (unsigned long long)slot_rt,
+                 mm_br_dump_dynamic((uintptr_t)inst)];
             if (inst) {
-                NSString *dh = mm_br_hex_dump_at((uintptr_t)inst, 64);
-                [s appendFormat:@" | inst_from_Shape=0x%llX %@",
-                     (unsigned long long)inst, dh];
                 got_inst = 1;
-            } else {
-                [s appendString:@" | inst_from_Shape=0x0"];
+                mm_br_walk_pointers(s, "S", (uintptr_t)inst);
             }
         }
         g_br_probe_got_inst = got_inst;
