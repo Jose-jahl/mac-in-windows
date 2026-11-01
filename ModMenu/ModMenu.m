@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.8"
+#define MODMENU_VERSION     "0.7.9"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.8";
+const char *modmenu_build_id = "modmenu-glass-0.7.9";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -3784,10 +3784,12 @@ static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
     return mm_br_resolve_singleton_ex(va_rt, NULL);
 }
 
-/* v0.7.8 (br probe v5): escanea una region de memoria buscando patrones
-   Vec3 (3 floats contiguos en [-5000, 5000], no cero, finitos). Emite
-   `vec3@tag+0xOFF=(X.X,Y.Y,Z.Z) r=W.W` por cada match (r = valor justo
-   despues del Vec3, interpretado como float, para candidato de radio). */
+/* v0.7.8 (br probe v5) + v0.7.9: scan Vec3 permissive. Antes exigia los
+   tres ejes en [0.5, 5000]: eso rechazaba vectores con un eje cerca de
+   cero (ej. un spawn a y=0.0 justo). Ahora: al menos UN eje con magnitud
+   > 1.0, y ninguno > 10000 (seguridad: cualquier valor mayor es basura).
+   Si r (float siguiente) esta en [1, 5000] se emite tambien, candidato
+   de radio. */
 static int mm_br_scan_vec3(NSMutableString *s, const char *tag,
                            const uint32_t *buf, int nwords, uintptr_t src)
 {
@@ -3798,8 +3800,11 @@ static int mm_br_scan_vec3(NSMutableString *s, const char *tag,
         memcpy(&y, buf + i + 1, sizeof(float));
         memcpy(&z, buf + i + 2, sizeof(float));
         if (!isfinite(x) || !isfinite(y) || !isfinite(z)) continue;
-        if (fabsf(x) < 0.5f  || fabsf(y) < 0.5f  || fabsf(z) < 0.5f)  continue;
-        if (fabsf(x) > 5000.f || fabsf(y) > 5000.f || fabsf(z) > 5000.f) continue;
+        float ax = fabsf(x), ay = fabsf(y), az = fabsf(z);
+        if (ax > 10000.f || ay > 10000.f || az > 10000.f) continue;
+        float max_mag = (ax > ay) ? ax : ay;
+        if (az > max_mag) max_mag = az;
+        if (max_mag < 1.0f) continue;    /* al menos un eje con magnitud >= 1 */
         float r = 0.0f;
         if (i + 3 < nwords) memcpy(&r, buf + i + 3, sizeof(float));
         [s appendFormat:@" | vec3@%s+0x%X=(%.1f,%.1f,%.1f) r=%.1f src=0x%llX",
@@ -3864,12 +3869,14 @@ static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
     return h;
 }
 
-/* v0.7.7 (br probe v4) + v0.7.8: walk de 32 pointer-slots en [0..0xF8] de la
-   instancia (antes 16 - se perdia los que estan en offsets > 0x80, como
-   los `22af4exx` de la Shape list en offset 0xA0). Hasta 8 ptrs validos,
-   deref + dump 64 words (256 B) por hijo (antes 32 words - no llegaba al
-   +0xB8 donde el chase de set_Radius escribe el Vec3). Scan Vec3 en cada
-   hijo tambien, con los resultados concatenados a vec3_out. */
+/* v0.7.7 (br probe v4) + v0.7.8 + v0.7.9: walk de 32 pointer-slots en
+   [0..0xF8] de la instancia. v0.7.9 agranda limite de hijos de 8 a 16
+   para alcanzar slots altos (ej. slot 20 = offset 0xA0 donde la Shape
+   list guarda el zone-ptr de la Entry 1). Alineacion a 4-byte (antes
+   8-byte): algunos ptrs del Shape (como 0x123C90E4E con low=0x4E) estan
+   2-aligned y los perdiamos. vm_read_overwrite igual rechaza el deref
+   si la pagina no es legible, asi que relajar la alineacion no agrega
+   crashes. Hasta 16 ptrs validos, dump 64 words (256 B) + Vec3 scan. */
 static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
                                 const char *tag, uintptr_t inst)
 {
@@ -3882,10 +3889,10 @@ static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
         got != sizeof(ptrs))
         return;
     int n = 0;
-    for (int i = 0; i < 32 && n < 8; i++) {
+    for (int i = 0; i < 32 && n < 16; i++) {
         uint64_t p = ptrs[i];
         if (p < 0x100000000ULL || p > 0x300000000ULL) continue; /* heuristico */
-        if (p & 0x7ULL) continue;                               /* alineado 8 */
+        if (p & 0x3ULL) continue;                               /* alineado 4 */
         if (p == (uint64_t)inst) continue;                      /* auto-ptr */
         uint32_t sub[64];
         g_vm_reads++;
@@ -3978,7 +3985,14 @@ static void mm_br_probe_run(void)
         };
         int N = (int)(sizeof(setters) / sizeof(setters[0]));
 
-        NSMutableString *s = [NSMutableString stringWithFormat:@"base=0x%lX", (unsigned long)base];
+        /* v0.7.9: estado de match embebido en la primera palabra - al leer
+           br_probe.txt veo al toque si la pasada se hizo en menu/lobby
+           (trk=0 have_local=0) o en gameplay con enemigos cerca. Si todo
+           esta en 0 la geometria del zone no va a aparecer: hay que entrar
+           a BR y repetir. */
+        NSMutableString *s = [NSMutableString stringWithFormat:
+            @"base=0x%lX trk=%d have_local=%d",
+            (unsigned long)base, g_track_count, g_have_local];
         /* v0.7.7 (br probe v4): los prologos de los 8 setters ya los tengo del
            volcado de v0.7.4; aqui solo listo nombre+VA para que la linea
            quede autodescriptiva. El decoder de v0.7.3 queda vivo solo por si
