@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.3"
+#define MODMENU_VERSION     "0.7.4"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.3";
+const char *modmenu_build_id = "modmenu-glass-0.7.4";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -3683,6 +3683,113 @@ static NSString *mm_br_hex_dump32(uint64_t va_rt)
     return h;
 }
 
+/* v0.7.4 (br probe v3): decodifica `b imm26` (branch unconditional, sin
+   link) y devuelve el target absoluto en el espacio runtime. Retorna 1 si
+   la instruccion es un b imm26, 0 si no. */
+static int mm_br_decode_b_imm26(uint32_t ins, uint64_t pc, uint64_t *target)
+{
+    if ((ins & 0xFC000000u) != 0x14000000u) return 0;
+    int64_t imm26 = (int64_t)(ins & 0x03FFFFFFu);
+    if (imm26 & (1LL << 25)) imm26 |= ~((1LL << 26) - 1);
+    *target = pc + imm26 * 4;
+    return 1;
+}
+
+/* v0.7.4 (br probe v3): busca el ULTIMO `b imm26` dentro de la ventana del
+   setter (tail-call de forwarders tipo set_Radius / set_TotalSpr). Retorna
+   1 si lo encontro, con *target_rt listo para dumpear 32 words mas. */
+static int mm_br_find_tail_target(uint64_t va_rt, uint64_t *target_rt)
+{
+    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
+    int found = 0; uint64_t last_tgt = 0;
+    for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
+        uint64_t pc = va_rt + (uint64_t)i * 4;
+        uint64_t t;
+        if (mm_br_decode_b_imm26(ins[i], pc, &t)) { found = 1; last_tgt = t; }
+        if (ins[i] == 0xD65F03C0) break; /* RET corta el escaneo */
+    }
+    if (!found) return 0;
+    *target_rt = last_tgt;
+    return 1;
+}
+
+/* v0.7.4 (br probe v3): busca el PRIMER slot estatico 64-bit cargado por un
+   patron `adrp Rd,page [; add Rd,Rd,#imm12] ; ldr Xt,[Rd,#imm12*8]` dentro
+   de la ventana. Deref: devuelve el VALOR almacenado en ese slot (puntero a
+   la instancia singleton del game-mode). 0 si no hay match o la deref falla. */
+static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
+{
+    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
+    for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
+        uint32_t w = ins[i];
+        if ((w & 0x9F000000u) != 0x90000000u) continue;    /* ADRP */
+        uint32_t Rd = w & 0x1F;
+        int64_t immlo = (w >> 29) & 3;
+        int64_t immhi = (w >> 5) & 0x7FFFF;
+        int64_t imm = (immhi << 2) | immlo;
+        if (imm & (1LL << 20)) imm |= ~((1LL << 21) - 1);
+        imm <<= 12;
+        uint64_t pc = va_rt + (uint64_t)i * 4;
+        uint64_t page = (pc & ~0xFFFULL) + (uint64_t)imm;
+        uint64_t base = page; int has_add = 0;
+        for (int j = i + 1; j < i + 5 && j < MM_BR_DECODE_WINDOW; j++) {
+            uint32_t w2 = ins[j];
+            /* ADD Xd, Xn, #imm12 (64-bit, con sh opcional) */
+            if ((w2 & 0xFF800000u) == 0x91000000u) {
+                uint32_t Rn2 = (w2 >> 5) & 0x1F;
+                uint32_t Rd2 = w2 & 0x1F;
+                uint32_t imm12 = (w2 >> 10) & 0xFFF;
+                uint32_t sh = (w2 >> 22) & 1;
+                if (Rn2 == Rd && Rd2 == Rd) {
+                    base = page + ((uint64_t)imm12 << (sh ? 12 : 0));
+                    has_add = 1;
+                }
+                continue;
+            }
+            /* LDR Xt, [Xn, #imm12*8] 64-bit unsigned offset */
+            if ((w2 & 0xFFC00000u) == 0xF9400000u) {
+                uint32_t Rn2 = (w2 >> 5) & 0x1F;
+                uint32_t imm12 = (w2 >> 10) & 0xFFF;
+                if (Rn2 == Rd) {
+                    uint64_t slot = (has_add ? base : page) + (uint64_t)imm12 * 8;
+                    BOOL ok = NO;
+                    uint64_t ptr = mm_safe_read64((uintptr_t)slot, &ok);
+                    if (ok && ptr != 0) return ptr;
+                    return 0;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* v0.7.4 (br probe v3): dump de N palabras de 32 bits desde una direccion
+   arbitraria usando vm_read_overwrite. Si la pagina no es legible devuelve
+   "hex=unreadable" en vez de crashear. N <= 64 (256 B). */
+static NSString *mm_br_hex_dump_at(uintptr_t addr, int words)
+{
+    if (words > 64) words = 64;
+    if (words <= 0) return @"hex=empty";
+    uint32_t buf[64];
+    vm_size_t got = 0;
+    g_vm_reads++;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                                         (vm_address_t)addr,
+                                         (vm_size_t)(words * 4),
+                                         (vm_address_t)buf,
+                                         &got);
+    if (kr != KERN_SUCCESS || got != (vm_size_t)(words * 4)) {
+        return @"hex=unreadable";
+    }
+    NSMutableString *h = [NSMutableString stringWithCapacity:(NSUInteger)words * 9 + 8];
+    [h appendString:@"hex="];
+    for (int i = 0; i < words; i++) {
+        if (i > 0) [h appendString:@","];
+        [h appendFormat:@"%08x", (unsigned)buf[i]];
+    }
+    return h;
+}
+
 /* v0.6.1: el resultado del probe BR se escribe SIEMPRE en
    Documents/br_probe.txt, sin depender del toggle Debug. Es el dato que el
    operador necesita extraer: si el toggle no responde, este archivo sigue
@@ -3727,8 +3834,13 @@ static void mm_br_probe_run(void)
         int N = (int)(sizeof(setters) / sizeof(setters[0]));
 
         NSMutableString *s = [NSMutableString stringWithFormat:@"base=0x%lX", (unsigned long)base];
+        /* v0.7.4 (br probe v3): guardamos las VAs runtime de set_Radius y
+           set_Shape para resolver el singleton al final. */
+        uint64_t rt_radius = 0, rt_shape = 0;
         for (int i = 0; i < N; i++) {
             uint64_t rt = base + (uintptr_t)(setters[i].va - FUSION_IMAGE_BASE);
+            if (strcmp(setters[i].name, "set_Radius") == 0) rt_radius = rt;
+            if (strcmp(setters[i].name, "set_Shape")  == 0) rt_shape  = rt;
             mm_br_decode_t d;
             if (!mm_br_decode_setter(rt, &d) || !d.found) {
                 /* v0.7.3 (br probe v2): sin match -> volcamos 32 ins en hex
@@ -3738,6 +3850,18 @@ static void mm_br_probe_run(void)
                      setters[i].name,
                      (unsigned long long)setters[i].va,
                      hex];
+                /* v0.7.4 (br probe v3): si la ventana termina en `b imm26`
+                   (forwarder tail-call), seguimos 1 hop y dumpeamos 32 ins
+                   mas desde el target. En iOS 1.0.57 un solo hop basta para
+                   caer en el setter real con el `str s0/w1, [xN, #OFFSET]`. */
+                uint64_t chase_rt = 0;
+                if (mm_br_find_tail_target(rt, &chase_rt)) {
+                    uint64_t chase_va = (uint64_t)FUSION_IMAGE_BASE +
+                                        (chase_rt - (uint64_t)base);
+                    NSString *chex = mm_br_hex_dump_at((uintptr_t)chase_rt, 32);
+                    [s appendFormat:@" chase_va=0x%llX %@",
+                         (unsigned long long)chase_va, chex];
+                }
                 continue;
             }
             if (d.src == 's') {
@@ -3753,6 +3877,30 @@ static void mm_br_probe_run(void)
                     [s appendFormat:@",+0x%X(%u,%c)",
                          d.extra_off[k], d.extra_sz[k], d.extra_kind[k]];
                 }
+            }
+        }
+        /* v0.7.4 (br probe v3): resolver el singleton y dumpear 64 words
+           (256 B) desde la instancia. Dos candidatos (set_Radius y
+           set_Shape cargan globales distintos): dumpeamos ambos si existen
+           y son no-nulos tras la deref. */
+        if (rt_radius) {
+            uint64_t inst = mm_br_resolve_singleton(rt_radius);
+            if (inst) {
+                NSString *dh = mm_br_hex_dump_at((uintptr_t)inst, 64);
+                [s appendFormat:@" | inst_from_Radius=0x%llX %@",
+                     (unsigned long long)inst, dh];
+            } else {
+                [s appendString:@" | inst_from_Radius=0x0"];
+            }
+        }
+        if (rt_shape) {
+            uint64_t inst = mm_br_resolve_singleton(rt_shape);
+            if (inst) {
+                NSString *dh = mm_br_hex_dump_at((uintptr_t)inst, 64);
+                [s appendFormat:@" | inst_from_Shape=0x%llX %@",
+                     (unsigned long long)inst, dh];
+            } else {
+                [s appendString:@" | inst_from_Shape=0x0"];
             }
         }
         g_br_probe = s;
