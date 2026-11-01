@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.7"
+#define MODMENU_VERSION     "0.7.8"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.7";
+const char *modmenu_build_id = "modmenu-glass-0.7.8";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -595,6 +595,8 @@ static NSString    *g_probe = nil;    /* texto de la sonda (fase B)       */
 static int          g_probe_ok = -1;  /* -1 pendiente / 0 revisar / 1 ok  */
 static NSString    *g_br_probe = nil; /* BR probe (prologo decodificado)  */
 static int          g_br_probe_got_inst = 0;   /* 0.7.5: 1 si la ultima pasada capturo instancia != 0 */
+static int          g_br_probe_saw_diff = 0;   /* 0.7.8: 1 si alguna pasada vio diff != none (shrink activo) */
+static int          g_br_probe_found_vec3 = 0; /* 0.7.8: 1 si el scan de Vec3 encontro al menos un candidato valido */
 static double       g_br_probe_last_run = 0.0; /* 0.7.5: ts (segundos de uptime) de la ultima pasada */
 
 /* v0.7.0 - Fase 1.11/1.12/1.13/4.5: salud del equipo, arranque sucio y crumbs.
@@ -3782,13 +3784,40 @@ static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
     return mm_br_resolve_singleton_ex(va_rt, NULL);
 }
 
-/* v0.7.7 (br probe v4): dos snapshots de 128 words (512 B) de una
+/* v0.7.8 (br probe v5): escanea una region de memoria buscando patrones
+   Vec3 (3 floats contiguos en [-5000, 5000], no cero, finitos). Emite
+   `vec3@tag+0xOFF=(X.X,Y.Y,Z.Z) r=W.W` por cada match (r = valor justo
+   despues del Vec3, interpretado como float, para candidato de radio). */
+static int mm_br_scan_vec3(NSMutableString *s, const char *tag,
+                           const uint32_t *buf, int nwords, uintptr_t src)
+{
+    int hits = 0;
+    for (int i = 0; i <= nwords - 3; i++) {
+        float x, y, z;
+        memcpy(&x, buf + i,     sizeof(float));
+        memcpy(&y, buf + i + 1, sizeof(float));
+        memcpy(&z, buf + i + 2, sizeof(float));
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z)) continue;
+        if (fabsf(x) < 0.5f  || fabsf(y) < 0.5f  || fabsf(z) < 0.5f)  continue;
+        if (fabsf(x) > 5000.f || fabsf(y) > 5000.f || fabsf(z) > 5000.f) continue;
+        float r = 0.0f;
+        if (i + 3 < nwords) memcpy(&r, buf + i + 3, sizeof(float));
+        [s appendFormat:@" | vec3@%s+0x%X=(%.1f,%.1f,%.1f) r=%.1f src=0x%llX",
+             tag, i * 4, (double)x, (double)y, (double)z, (double)r,
+             (unsigned long long)src];
+        hits++;
+        if (hits >= 4) break;    /* capeo por region para no inflar la linea */
+    }
+    return hits;
+}
+
+/* v0.7.7 (br probe v4) + v0.7.8: dos snapshots de 128 words (512 B) de una
    direccion, espaciados por 500 ms (usleep). Emite:
      inst=0xADDR hex=<128 words> diff=+0xOFF:oldval->newval,...
-   El diff solo incluye las palabras que cambiaron entre A y B. Si la
-   instancia no es legible emite "unreadable". Max 24 entradas en el diff
-   para no inflar la linea (si hay mas, cae un ",..." al final). */
-static NSString *mm_br_dump_dynamic(uintptr_t inst)
+   v0.7.8 ademas corre el scan Vec3 sobre snap B y actualiza
+   g_br_probe_saw_diff / g_br_probe_found_vec3. */
+static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
+                                    const char *tag, uintptr_t inst)
 {
     if (inst == 0) return @"inst=0x0";
     uint32_t snap_a[128], snap_b[128];
@@ -3828,18 +3857,24 @@ static NSString *mm_br_dump_dynamic(uintptr_t inst)
         }
     }
     if (ndiff == 0) [h appendString:@"none"];
+    else            g_br_probe_saw_diff = 1;
+    /* v0.7.8: scan Vec3 sobre snap B (ya reflejado en inst) */
+    if (vec3_out)
+        g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, tag, snap_b, 128, inst);
     return h;
 }
 
-/* v0.7.7 (br probe v4): walk de hasta 16 pointer-slots en [0..0x80] de la
-   instancia. Para cada ptr que luzca a imagen cargada del juego (bits altos
-   en [0x1,0x3], alineado 8), deref y dump 32 words. Emite:
-     tag_child_N@+0xOFF=0xADDR hex=<32 words>
-   Max 8 hijos por instancia (bounded ~2.5 KB por instancia). */
-static void mm_br_walk_pointers(NSMutableString *s, const char *tag, uintptr_t inst)
+/* v0.7.7 (br probe v4) + v0.7.8: walk de 32 pointer-slots en [0..0xF8] de la
+   instancia (antes 16 - se perdia los que estan en offsets > 0x80, como
+   los `22af4exx` de la Shape list en offset 0xA0). Hasta 8 ptrs validos,
+   deref + dump 64 words (256 B) por hijo (antes 32 words - no llegaba al
+   +0xB8 donde el chase de set_Radius escribe el Vec3). Scan Vec3 en cada
+   hijo tambien, con los resultados concatenados a vec3_out. */
+static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
+                                const char *tag, uintptr_t inst)
 {
     if (inst == 0) return;
-    uint64_t ptrs[16];
+    uint64_t ptrs[32];
     vm_size_t got = 0;
     g_vm_reads++;
     if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst, sizeof(ptrs),
@@ -3847,21 +3882,27 @@ static void mm_br_walk_pointers(NSMutableString *s, const char *tag, uintptr_t i
         got != sizeof(ptrs))
         return;
     int n = 0;
-    for (int i = 0; i < 16 && n < 8; i++) {
+    for (int i = 0; i < 32 && n < 8; i++) {
         uint64_t p = ptrs[i];
         if (p < 0x100000000ULL || p > 0x300000000ULL) continue; /* heuristico */
         if (p & 0x7ULL) continue;                               /* alineado 8 */
         if (p == (uint64_t)inst) continue;                      /* auto-ptr */
-        uint32_t sub[32];
+        uint32_t sub[64];
         g_vm_reads++;
         if (vm_read_overwrite(mach_task_self(), (vm_address_t)p, sizeof(sub),
                               (vm_address_t)sub, &got) != KERN_SUCCESS ||
             got != sizeof(sub)) continue;
         [s appendFormat:@" | %s_child_%d@+0x%X=0x%llX hex=",
              tag, n, i * 8, (unsigned long long)p];
-        for (int j = 0; j < 32; j++) {
+        for (int j = 0; j < 64; j++) {
             if (j > 0) [s appendString:@","];
             [s appendFormat:@"%08x", (unsigned)sub[j]];
+        }
+        /* v0.7.8: scan Vec3 sobre el hijo (256 B cubren el chase +0xB8). */
+        if (vec3_out) {
+            char subtag[32];
+            snprintf(subtag, sizeof(subtag), "%s_c%d", tag, n);
+            g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, subtag, sub, 64, (uintptr_t)p);
         }
         n++;
     }
@@ -3981,6 +4022,9 @@ static void mm_br_probe_run(void)
                  hijo (hasta 8 hijos) -> encuentra la SafeZone hija donde
                  vive el Vec3 (chase de set_Radius escribe `stur q0,[x19,+0xB8]`,
                  x19 = SafeZone pasado por el llamador, no por el static). */
+        /* v0.7.8: acumulador de candidatos Vec3; se adjunta al final para
+           que todos los `vec3@...` queden juntos y faciles de leer. */
+        NSMutableString *vec3_out = [NSMutableString stringWithCapacity:1024];
         int got_inst = 0;
         if (rt_radius) {
             uint64_t slot_rt = 0;
@@ -3990,10 +4034,10 @@ static void mm_br_probe_run(void)
             [s appendFormat:@" | R:slot_file_va=0x%llX slot_rt=0x%llX %@",
                  (unsigned long long)slot_file_va,
                  (unsigned long long)slot_rt,
-                 mm_br_dump_dynamic((uintptr_t)inst)];
+                 mm_br_dump_dynamic(vec3_out, "R", (uintptr_t)inst)];
             if (inst) {
                 got_inst = 1;
-                mm_br_walk_pointers(s, "R", (uintptr_t)inst);
+                mm_br_walk_pointers(s, vec3_out, "R", (uintptr_t)inst);
             }
         }
         if (rt_shape) {
@@ -4004,12 +4048,14 @@ static void mm_br_probe_run(void)
             [s appendFormat:@" | S:slot_file_va=0x%llX slot_rt=0x%llX %@",
                  (unsigned long long)slot_file_va,
                  (unsigned long long)slot_rt,
-                 mm_br_dump_dynamic((uintptr_t)inst)];
+                 mm_br_dump_dynamic(vec3_out, "S", (uintptr_t)inst)];
             if (inst) {
                 got_inst = 1;
-                mm_br_walk_pointers(s, "S", (uintptr_t)inst);
+                mm_br_walk_pointers(s, vec3_out, "S", (uintptr_t)inst);
             }
         }
+        /* v0.7.8: pego los candidatos Vec3 al final de la linea. */
+        if (vec3_out.length > 0) [s appendString:vec3_out];
         g_br_probe_got_inst = got_inst;
         g_br_probe_last_run = mm_uptime();
         g_br_probe = s;
@@ -7358,15 +7404,19 @@ static void mm_tick(void)
         if (g_probe == nil && mm_uptime() > 2.0) mm_probe_run();
         /* v0.7.5: el probe BR corre a los 2 s (menu/splash) para capturar
            los prologos y chases; pero si en ese momento el singleton del
-           BRMgr aun no esta instanciado (slot estatico = 0), reintentamos
-           cada 15 s hasta capturar la instancia. Asi el jugador puede
-           entrar a BR, esperar al shrink, y el probe engancha solo. */
+           BRMgr aun no esta instanciado (slot estatico = 0), reintentabamos.
+           v0.7.8: cambio la gate de "got_inst" a "saw_diff"
+           (shrink activo capturado) para seguir reintentando hasta
+           enganchar el shrink. Cadencia 30 s (antes 15) para bajar el
+           hitch de 500 ms del dump dinamico; en gameplay el usuario entra
+           a BR, cae, llega al shrink en 3-5 min: con 30 s hay ventana
+           suficiente. Despues del primer shrink, saw_diff=1 y stop. */
         {
             double now = mm_uptime();
             if (now > 2.0) {
                 int should_run = 0;
                 if (g_br_probe == nil) should_run = 1;
-                else if (!g_br_probe_got_inst && (now - g_br_probe_last_run) >= 15.0)
+                else if (!g_br_probe_saw_diff && (now - g_br_probe_last_run) >= 30.0)
                     should_run = 1;
                 if (should_run) mm_br_probe_run();
             }
