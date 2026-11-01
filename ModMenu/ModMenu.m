@@ -460,6 +460,15 @@ typedef struct {
 static MMTrack      g_tracks[MM_MAX_TRACKS];
 static int          g_track_count = 0;
 
+/* v0.7.3 (perf): contador de version de escena. Lo bumpean los productores
+   (colector, lector BR, invalidador de opts, panic/safe/thermal). Reemplaza al
+   hash FNV sobre arrays enteros en el skip de pintado: en gameplay la view
+   matrix cambia cada frame del juego y el hash NUNCA ahorraba repintados;
+   peor, hashear g_boxes/g_tracks por frame era trabajo gratis. Con este
+   contador el skip es O(1) y la decision de repintar sigue siendo correcta. */
+static volatile unsigned long long g_scene_ver = 1ULL;
+static inline void mm_scene_bump(void) { g_scene_ver++; }
+
 /* v0.7.0 (1.2): lista de objetivos interactiva. La fila tocada resalta la
    caja del pawn; el area de toque es SOLO el rectangulo de la lista y solo
    cuando la lista esta visible (el resto del overlay sigue dejando pasar). */
@@ -689,7 +698,7 @@ typedef struct {
 } MMDrawOpts;
 static MMDrawOpts g_draw_opts;
 static BOOL g_draw_opts_ok = NO;
-static void mm_opts_invalidate(void) { g_draw_opts_ok = NO; }
+static void mm_opts_invalidate(void) { g_draw_opts_ok = NO; mm_scene_bump(); }
 static const MMDrawOpts *mm_draw_opts(void)
 {
     if (g_draw_opts_ok) return &g_draw_opts;
@@ -1791,6 +1800,23 @@ static int mm_declutter_budget(void)
     int  crossStyle  = o->crossStyle;
     int  maxN        = o->maxN;
 
+    /* v0.7.3 (perf): auto-cap de maxN cuando el operador acumula muchas
+       capas por caja. Cada feature per-pawn (cajas/nombre/dist/head/distcol/
+       lowhp/salud/lineas/altura) stackea CGContext ops y texto; con 20+
+       pawns y 7+ features ON el gasto crece lineal. Si el operador no eligio
+       closest-N explicito, se recorta a 24 (sigue siendo mas que suficiente
+       para competitivo). Thermal serio aprieta mas. No toca prefs. */
+    {
+        int feats = (int)conCajas + (int)conNombre + (int)conDist + (int)conHead
+                  + (int)conDistCol + (int)conLowHp + (int)conSalud + (int)conLineas
+                  + (int)o->height;
+        int cap = 0;
+        if (g_thermal_level >= 3)      cap = 10;
+        else if (g_thermal_level >= 2) cap = 16;
+        else if (feats >= 7)           cap = 24;
+        if (cap > 0 && (maxN <= 0 || maxN > cap)) maxN = cap;
+    }
+
     /* v0.4.4 (Fase 1): overlay de informacion — radar 2D, altura, telemetria.
        Solo lectura; reusan el world-pos que el colector ya calculo. */
     BOOL conRadar   = o->radar;
@@ -1896,6 +1922,16 @@ static int mm_declutter_budget(void)
         MMEspBox *b = &g_boxes[i];
         if (!b->alive) continue;
         if (maxN > 0 && b->dist > distThresh + 0.01f) continue;   /* v0.4.2: closest-N */
+        /* v0.7.3 (perf): culling off-screen con margen. El colector proyecta
+           incluso lo que cae fuera (para la flecha de borde); aqui lo saltamos
+           cuando la caja no tiene nada que pintar. Margen de 200 px para no
+           cortar nombres/salud/head que cuelgan afuera de la caja. Si el
+           operador tiene la flecha fuera-de-pantalla ON, NO cull: la flecha
+           tiene que poder apuntar al pawn aunque este muy afuera. */
+        if (!conArrow) {
+            if (b->x + b->w < -200.0f || b->x > bs.size.width + 200.0f ||
+                b->y + b->h < -200.0f || b->y > bs.size.height + 200.0f) continue;
+        }
         CGRect r = CGRectMake(b->x, b->y, b->w, b->h);
 
         CGFloat cr = b->robot ? crBot : crJug;
@@ -3356,38 +3392,17 @@ static BOOL mm_profile_load(int slot)
  *  leen a ~30 Hz (mm_esp_collect_real) y el lienzo se repinta solo si cambio
  *  algo visible (v0.6.2: huella del frame). Sin el maestro ON no se toca NADA.
  *--------------------------------------------------------------------------*/
-/* v0.6.2: huella FNV-1a de todo lo que drawRect puede mostrar. Si no cambia,
-   el frame se salta entero (no setNeedsDisplay, no CoreGraphics). */
+/* v0.7.3 (perf): skip O(1) por contador de version de escena.
+   Antes (v0.6.2) se hasheaba view/proj/boxes/tracks/opts por frame (FNV-1a
+   sobre arrays enteros). En gameplay el view mat cambia cada frame -> el
+   hash siempre difiere -> nunca ahorraba repintados pero igual costaba.
+   Ahora los productores (colector, lector BR, invalidador de opts, panic/
+   safe/thermal) bumpean g_scene_ver. En reposo (lobby) nadie bumpea y el
+   frame se salta sin tocar CoreGraphics; en movimiento el bump cae al
+   compas real del colector (~30 Hz). */
 static unsigned long long mm_frame_digest(void)
 {
-    unsigned long long h = 1469598103934665603ULL;
-    const unsigned char *p;
-    size_t n;
-#define MM_FNV(buf, len) do { \
-    p = (const unsigned char *)(buf); n = (size_t)(len); \
-    for (size_t _i = 0; _i < n; _i++) { h ^= p[_i]; h *= 1099511628211ULL; } \
-} while (0)
-    MM_FNV(g_view_mtx, sizeof(g_view_mtx));
-    MM_FNV(g_proj_mtx, sizeof(g_proj_mtx));
-    MM_FNV(&g_have_view, sizeof(g_have_view));
-    MM_FNV(&g_have_local, sizeof(g_have_local));
-    MM_FNV(g_local_pos, sizeof(g_local_pos));
-    int bc = g_box_count; if (bc < 0) bc = 0; if (bc > MM_MAX_BOXES) bc = MM_MAX_BOXES;
-    int tc = g_track_count; if (tc < 0) tc = 0; if (tc > MM_MAX_TRACKS) tc = MM_MAX_TRACKS;
-    MM_FNV(&bc, sizeof(bc));
-    MM_FNV(&tc, sizeof(tc));
-    if (bc > 0) MM_FNV(g_boxes, sizeof(MMEspBox) * (size_t)bc);
-    if (tc > 0) MM_FNV(g_tracks, sizeof(MMTrack) * (size_t)tc);
-    /* v0.6.3: la zona BR tambien manda (sin el timestamp de lectura). */
-    MM_FNV(&g_br_zone.ok, sizeof(g_br_zone.ok));
-    MM_FNV(&g_br_zone.x, sizeof(g_br_zone.x));
-    MM_FNV(&g_br_zone.y, sizeof(g_br_zone.y));
-    MM_FNV(&g_br_zone.z, sizeof(g_br_zone.z));
-    MM_FNV(&g_br_zone.r, sizeof(g_br_zone.r));
-    const MMDrawOpts *o = mm_draw_opts();
-    MM_FNV(o, sizeof(*o));
-#undef MM_FNV
-    return h;
+    return g_scene_ver;
 }
 
 static void mm_esp_frame(double t)
@@ -3593,11 +3608,18 @@ static int mm_br_match_str_x0(uint32_t ins, mm_br_decode_t *d, int is_extra)
     return 1;
 }
 
+/* v0.7.3 (br probe v2): ventana 16 -> 32 instrucciones. il2cpp a menudo
+   inserta antes del store real una comprobacion de init de metadata que
+   puede ocupar 4-8 ins (adrp + ldr + cbnz/tbnz + bl _il2cpp_init). El
+   escaneo lineal sigue siendo seguro: solo recoge STR [X0,#imm] cuando
+   Rt es w1/x1/s1/d1 (arg1 del setter); cualquier otra ins se ignora. Si
+   no se encuentra nada, el probe vuelca los 32 words en hex (ver abajo). */
+#define MM_BR_DECODE_WINDOW 32
 static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
 {
     memset(d, 0, sizeof(*d));
     const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
         uint32_t w = ins[i];
         /* RET temprano: fin del cuerpo */
         if (w == 0xD65F03C0) break;
@@ -3612,7 +3634,7 @@ static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
             imm <<= 12;
             uint64_t pc = va_rt + (uint64_t)i * 4;
             uint64_t target_page = (pc & ~0xFFFULL) + (uint64_t)imm;
-            for (int j = i + 1; j < i + 6 && j < 16; j++) {
+            for (int j = i + 1; j < i + 8 && j < MM_BR_DECODE_WINDOW; j++) {
                 uint32_t w2 = ins[j];
                 if ((w2 & 0xFFC00000) == 0xF9000000) {
                     uint32_t Rn2 = (w2 >> 5) & 0x1F;
@@ -3632,7 +3654,7 @@ static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
         if (!d->found && mm_br_match_str_x0(w, d, 0)) {
             d->found = 1;
             /* buscar hasta 6 stores adicionales (struct arg) */
-            for (int j = i + 1; j < 16; j++) {
+            for (int j = i + 1; j < MM_BR_DECODE_WINDOW; j++) {
                 uint32_t w2 = ins[j];
                 if (w2 == 0xD65F03C0) break;
                 mm_br_match_str_x0(w2, d, 1);
@@ -3642,6 +3664,23 @@ static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
         }
     }
     return 0;
+}
+
+/* v0.7.3 (br probe v2): fallback hex dump de 32 instrucciones (128 B) desde
+   el VA del setter. Se usa cuando el decoder lineal NO reconoce el patron,
+   para parsear a mano el prologo real (ej. il2cpp con init de metadata).
+   Devuelve "hex=aabbccdd,..." con 32 words little-endian. Sin saltos de
+   linea: todo cabe en la misma linea del setter en br_probe.txt. */
+static NSString *mm_br_hex_dump32(uint64_t va_rt)
+{
+    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
+    NSMutableString *h = [NSMutableString stringWithCapacity:32 * 9 + 8];
+    [h appendString:@"hex="];
+    for (int i = 0; i < 32; i++) {
+        if (i > 0) [h appendString:@","];
+        [h appendFormat:@"%08x", (unsigned)ins[i]];
+    }
+    return h;
 }
 
 /* v0.6.1: el resultado del probe BR se escribe SIEMPRE en
@@ -3692,8 +3731,13 @@ static void mm_br_probe_run(void)
             uint64_t rt = base + (uintptr_t)(setters[i].va - FUSION_IMAGE_BASE);
             mm_br_decode_t d;
             if (!mm_br_decode_setter(rt, &d) || !d.found) {
-                [s appendFormat:@" | %s=? va=0x%llX",
-                     setters[i].name, (unsigned long long)setters[i].va];
+                /* v0.7.3 (br probe v2): sin match -> volcamos 32 ins en hex
+                   para parsear a mano. Agrega ~290 chars por setter. */
+                NSString *hex = mm_br_hex_dump32(rt);
+                [s appendFormat:@" | %s=? va=0x%llX %@",
+                     setters[i].name,
+                     (unsigned long long)setters[i].va,
+                     hex];
                 continue;
             }
             if (d.src == 's') {
@@ -4126,6 +4170,10 @@ static void mm_br_zone_read(void)
             g_br_zone_info = @"valores fuera de rango";
             return;
         }
+        /* v0.7.3 (perf): solo bump si algo visible cambio */
+        BOOL changed = (g_br_zone.ok == 0) ||
+                       (g_br_zone.x != shp[0]) || (g_br_zone.z != shp[2]) ||
+                       (g_br_zone.r != rad);
         g_br_zone.x = shp[0];
         g_br_zone.y = shp[1];
         g_br_zone.z = shp[2];
@@ -4134,6 +4182,7 @@ static void mm_br_zone_read(void)
         g_br_zone.ok = 1;
         g_br_zone_info = [NSString stringWithFormat:@"r=%.0f c=(%.0f,%.0f)",
                           rad, shp[0], shp[2]];
+        if (changed) mm_scene_bump();
     } @catch (NSException *e) {
         g_br_zone.ok = 0;
         g_br_zone_info = @"excepcion";
@@ -4596,6 +4645,7 @@ static void mm_esp_collect_real(void)
     if (opts->trails) mm_trails_update(g_boxes, g_box_count);
     else              mm_trails_clear();
     g_collect_ms = (CACurrentMediaTime() - _col_t0) * 1000.0;   /* v0.4.4: telemetria */
+    mm_scene_bump();   /* v0.7.3 (perf): la escena cambio para el skip O(1) */
     g_esp_diag = [NSString stringWithFormat:
                   @"cam=ok lista=%d cajas=%d trk=%d jug=%d bot=%d hp=%s%@",
                   total, drawn, g_track_count, g_count_players, g_count_bots,
