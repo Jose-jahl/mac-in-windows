@@ -386,6 +386,55 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
    binario (el constructor es static y no sirve como prueba de presencia). */
 const char *modmenu_build_id = "modmenu-glass-0.8.1";
 
+/* --- objetos de UI (globales, creados una sola vez) --- */
+static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
+static UIButton *g_btn   = nil;   /* boton flotante                           */
+@class MMBtnGlyph;                /* v0.5.0: emblema dibujado del boton       */
+static MMBtnGlyph *g_btn_glyph = nil;
+static UIView   *g_panel = nil;   /* panel desplegable                        */
+static CAGradientLayer *g_panel_neon = nil; /* v0.3.1: fondo glass neon       */
+static UIVisualEffectView *g_panel_blur = nil;
+static UIView   *g_panel_shade = nil;
+static CAGradientLayer *g_btn_neon = nil;   /* v0.3.1: boton glass neon       */
+static UIView   *g_count_glass = nil; /* v0.3.2: contador JUG/BOT glass   */
+static UIVisualEffectView *g_count_blur = nil;
+static UIView   *g_count_shade = nil;
+static CAGradientLayer *g_count_neon = nil;
+static UILabel  *g_count_label = nil;
+static int       g_count_last_players = -1;
+static int       g_count_last_bots = -1;
+static UISegmentedControl *g_seg = nil;  /* v0.8.0: backing oculto de la nav */
+static NSMutableArray *g_nav_btns = nil; /* v0.8.0: botones horizontales */
+static UILabel  *g_status_strip = nil;  /* v0.8.0: HUD vivo del encabezado */
+static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
+static UIView   *g_p_esp  = nil;
+static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
+static UIView   *g_p_misc = nil;
+static UIButton *g_dbgbtn = nil;  /* v0.6.1: Debug como boton de fila completa */
+static UIView   *g_p_info = nil;
+static UIView   *g_p_more = nil;  /* v0.4.0: pagina EXTRA (features nuevas)    */
+static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
+static UIScrollView *g_info_scroll = nil; /* v0.8.0: INFO en tarjeta scrolleable */
+static UILabel  *g_range_val = nil;
+static UILabel  *g_maxn_val  = nil;
+static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
+/* v0.6.4: barra rapida flotante (3 toggles) junto al boton. */
+static UIView   *g_quickbar = nil;
+static NSMutableArray *g_quick_btns = nil;
+static NSArray  *g_quick_keys = nil;
+
+static const char *g_via   = "-";     /* donde quedo colgada la UI        */
+static BOOL  g_panel_open  = NO;
+static BOOL  g_panic       = NO;  /* v0.4.0 #8: kill-switch (long-press boton)  */
+static int   g_profile_slot = 0;  /* v0.4.0 #7: slot de perfil seleccionado     */
+static UISegmentedControl *g_profile_seg = nil;  /* v0.7.0: sincroniza swipe */
+static int   g_theme_slot = 0;    /* v0.7.0: slot de tema guardado              */
+static int   g_accent_slot = 0;   /* v0.7.0: 0 = acento 1, 1 = acento 2        */
+static CGPoint g_panel_drag0;         /* v0.2.4: inicio de arrastre panel */
+static int   g_tries       = 0;
+static NSTimeInterval g_t0 = 0;
+static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
+
 /* =========================================================================
    v0.8.1 — HARDENING (Fase A)
    -------------------------------------------------------------------------
@@ -396,6 +445,7 @@ const char *modmenu_build_id = "modmenu-glass-0.8.1";
 
    NO cambia la arquitectura carrier (sigue siendo swap de MSDKPolicy),
    NO agrega load commands, NO toca NSUserDefaults existentes.
+   Posicion: DESPUES de los globales de UI porque referencia g_panel/g_btn.
    ========================================================================= */
 
 /* A.1 — anti-debug. Direct syscall arm64 de ptrace(PT_DENY_ATTACH, 0, 0, 0)
@@ -478,7 +528,6 @@ static void mm_register_hardening_observers(void)
      static const uint8_t K_HELLO[] = { 0x32, 0x3f, 0x36, 0x36, 0x35 }; // "hello"^0x5A
      char buf[sizeof(K_HELLO)+1];
      mm_xor_decrypt(0x5A, K_HELLO, sizeof(K_HELLO), buf);
-     // usar buf, luego memset_s(buf, sizeof(buf), 0, sizeof(buf)) si es sensible
 */
 #define MM_XOR_DEFAULT_KEY 0x5A
 static inline void mm_xor_decrypt(uint8_t key, const uint8_t *src, size_t n, char *dst)
@@ -490,55 +539,6 @@ static inline void mm_xor_decrypt(uint8_t key, const uint8_t *src, size_t n, cha
 /* =========================================================================
    FIN v0.8.1 HARDENING
    ========================================================================= */
-
-/* --- objetos de UI (globales, creados una sola vez) --- */
-static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
-static UIButton *g_btn   = nil;   /* boton flotante                           */
-@class MMBtnGlyph;                /* v0.5.0: emblema dibujado del boton       */
-static MMBtnGlyph *g_btn_glyph = nil;
-static UIView   *g_panel = nil;   /* panel desplegable                        */
-static CAGradientLayer *g_panel_neon = nil; /* v0.3.1: fondo glass neon       */
-static UIVisualEffectView *g_panel_blur = nil;
-static UIView   *g_panel_shade = nil;
-static CAGradientLayer *g_btn_neon = nil;   /* v0.3.1: boton glass neon       */
-static UIView   *g_count_glass = nil; /* v0.3.2: contador JUG/BOT glass   */
-static UIVisualEffectView *g_count_blur = nil;
-static UIView   *g_count_shade = nil;
-static CAGradientLayer *g_count_neon = nil;
-static UILabel  *g_count_label = nil;
-static int       g_count_last_players = -1;
-static int       g_count_last_bots = -1;
-static UISegmentedControl *g_seg = nil;  /* v0.8.0: backing oculto de la nav */
-static NSMutableArray *g_nav_btns = nil; /* v0.8.0: botones horizontales */
-static UILabel  *g_status_strip = nil;  /* v0.8.0: HUD vivo del encabezado */
-static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
-static UIView   *g_p_esp  = nil;
-static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
-static UIView   *g_p_misc = nil;
-static UIButton *g_dbgbtn = nil;  /* v0.6.1: Debug como boton de fila completa */
-static UIView   *g_p_info = nil;
-static UIView   *g_p_more = nil;  /* v0.4.0: pagina EXTRA (features nuevas)    */
-static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
-static UIScrollView *g_info_scroll = nil; /* v0.8.0: INFO en tarjeta scrolleable */
-static UILabel  *g_range_val = nil;
-static UILabel  *g_maxn_val  = nil;
-static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
-/* v0.6.4: barra rapida flotante (3 toggles) junto al boton. */
-static UIView   *g_quickbar = nil;
-static NSMutableArray *g_quick_btns = nil;
-static NSArray  *g_quick_keys = nil;
-
-static const char *g_via   = "-";     /* donde quedo colgada la UI        */
-static BOOL  g_panel_open  = NO;
-static BOOL  g_panic       = NO;  /* v0.4.0 #8: kill-switch (long-press boton)  */
-static int   g_profile_slot = 0;  /* v0.4.0 #7: slot de perfil seleccionado     */
-static UISegmentedControl *g_profile_seg = nil;  /* v0.7.0: sincroniza swipe */
-static int   g_theme_slot = 0;    /* v0.7.0: slot de tema guardado              */
-static int   g_accent_slot = 0;   /* v0.7.0: 0 = acento 1, 1 = acento 2        */
-static CGPoint g_panel_drag0;         /* v0.2.4: inicio de arrastre panel */
-static int   g_tries       = 0;
-static NSTimeInterval g_t0 = 0;
-static BOOL  g_ui_ok       = NO;      /* UIApplication ya es segura       */
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 32
