@@ -567,6 +567,18 @@ static inline void mm_xor_decrypt(uint8_t key, const uint8_t *src, size_t n, cha
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 32
+#define MM_SK_N 21   /* C-5: huesos del biped que se proyectan por caja */
+/* C-5: Transform.Find / Transform.get_position (dump 1.0.57, verificados) */
+#ifndef VA_TRFIND
+#define VA_TRFIND 0x108C65B98ULL
+#endif
+#ifndef VA_TRPOS
+#define VA_TRPOS  0x108C3C41CULL
+#endif
+/* C-5: Pawn.m_ModelRoot (Transform del modelo) — dump 1.0.57 */
+#ifndef OFF_PAWN_MODELROOT
+#define OFF_PAWN_MODELROOT 0x630ULL
+#endif
 /* 0.7: ventana contigua del pawn que cubre alive/transform/entity. Se lee de
    una sola pasada (con fallback a lecturas individuales si el rango falla). */
 #define MM_PAWN_BLOCK_BASE (OFF_PAWN_TRANSFORM & ~0xFFULL)
@@ -582,9 +594,41 @@ typedef struct {
     int     alive;
     int     hasName;            /* v0.2.4: 1 si name trae nombre real   */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
+    CGPoint sk[MM_SK_N];        /* C-5: huesos proyectados (skeleton)   */
+    uint32_t skMask;            /* bit i = hueso i proyectado           */
 } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
+
+/* --- C-5: skeleton ESP. Huesos del biped 3ds Max (Bip001*) que usa CODM.
+   Se resuelven una vez por pawn con Transform.Find y se cachean; cada frame
+   solo se pide la posicion mundial de cada Transform cacheado. --- */
+static const char *mm_sk_path[MM_SK_N] = {
+    "Bip001 Pelvis", "Bip001 Spine", "Bip001 Spine1", "Bip001 Spine2", "Bip001 Spine3",
+    "Bip001 Neck", "Bip001 Head",
+    "Bip001 L Clavicle", "Bip001 L UpperArm", "Bip001 L Forearm", "Bip001 L Hand",
+    "Bip001 R Clavicle", "Bip001 R UpperArm", "Bip001 R Forearm", "Bip001 R Hand",
+    "Bip001 L Thigh", "Bip001 L Calf", "Bip001 L Foot",
+    "Bip001 R Thigh", "Bip001 R Calf", "Bip001 R Foot"
+};
+static const int mm_sk_link[][2] = {
+    {0,1},{1,2},{2,3},{3,4},{4,5},{5,6},        /* pelvis -> spine -> cabeza */
+    {4,7},{7,8},{8,9},{9,10},                   /* pecho -> brazo izq        */
+    {4,11},{11,12},{12,13},{13,14},             /* pecho -> brazo der        */
+    {0,15},{15,16},{16,17},                     /* pelvis -> pierna izq      */
+    {0,18},{18,19},{19,20}                      /* pelvis -> pierna der      */
+};
+#define MM_SK_LINKS ((int)(sizeof(mm_sk_link) / sizeof(mm_sk_link[0])))
+typedef struct {
+    uint64_t pawn;
+    uint64_t root;
+    void    *bn[MM_SK_N];
+    int      ok;
+} MMSkelCache;
+static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
+typedef void *(*MMFindFn)(void *transform, void *nsstring);
+static MMFindFn     g_fp_find  = NULL;
+static MMVec3Fn     g_fp_trpos = NULL;
 /* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
    de la camara no se puede proyectar (no hay caja), pero SI esta en el mundo:
    el radar, el contador JUG/BOT y la flecha "detras de ti" salen de aca. */
@@ -849,6 +893,7 @@ typedef struct {
     BOOL targetList;                    /* v0.6.4: lista de objetivos por distancia */
     BOOL players, bots;
     BOOL master, safe_mode;             /* perf: snapshot de los gates por-frame */
+    BOOL skeleton;                      /* C-5: esqueleto del biped */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -886,6 +931,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->targetList= mm_def_bool(@"mm_x_targetlist", NO);
     o->players   = mm_def_bool(@"mm_esp_players", NO);
     o->master    = mm_def_bool(@"mm_esp_master", NO);
+    o->skeleton  = mm_def_bool(@"mm_x_skel", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
@@ -2148,6 +2194,19 @@ static int mm_declutter_budget(void)
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.84);
             mm_esp_box_path(ctx, r, estiloCaja);
             CGContextStrokePath(ctx);
+        }
+
+        /* C-5: esqueleto (lineas entre huesos proyectados). */
+        if (o->skeleton && b->skMask != 0) {
+            CGContextSetLineWidth(ctx, 1.3);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.80);
+            for (int l = 0; l < MM_SK_LINKS; l++) {
+                int i0 = mm_sk_link[l][0], i1 = mm_sk_link[l][1];
+                if (!(b->skMask & (1u << i0)) || !(b->skMask & (1u << i1))) continue;
+                CGContextMoveToPoint(ctx, b->sk[i0].x, b->sk[i0].y);
+                CGContextAddLineToPoint(ctx, b->sk[i1].x, b->sk[i1].y);
+                CGContextStrokePath(ctx);
+            }
         }
 
         /* v0.7.0 (1.2): objetivo elegido en la lista -> aro blanco en la caja. */
@@ -4924,6 +4983,8 @@ static void mm_game_resolve(void)
             MMMatFn    fp4 = (MMMatFn)(b + MM_GAME_DELTA(VA_PROJ_INJ));
             MMVec3Fn   fp5 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
             MMGetIntFn fp6 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_HEALTH));
+            MMFindFn   fp7 = (MMFindFn)(b + MM_GAME_DELTA(VA_TRFIND));   /* C-5 */
+            MMVec3Fn   fp8 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRPOS));    /* C-5 */
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
@@ -4946,6 +5007,8 @@ static void mm_game_resolve(void)
             g_fp_transpos  = fp5;
             g_fp_health    = hpOk ? fp6 : NULL;
             g_fp_health_f  = hpOk ? (MMGetFltFn)fp6 : NULL;   /* v0.2.6 */
+            g_fp_find      = mm_ptr_en_imagen((const void *)fp7, b) ? fp7 : NULL;
+            g_fp_trpos     = mm_ptr_en_imagen((const void *)fp8, b) ? fp8 : NULL;
             g_fp_state     = 1;
             MM_LOG(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
@@ -4994,6 +5057,56 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 }
 
 /* Una pasada de ESP real (~15 Hz). Deja el motivo en g_esp_diag. */
+/* C-5: proyecta el esqueleto del pawn en su caja. Los Transform se resuelven
+   UNA vez por pawn con Transform.Find y se cachean; si el model root cambia
+   (pawn reciclado) se vuelven a resolver. Todo falla en silencio. */
+static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
+                         CGFloat W, CGFloat H)
+{
+    nb->skMask = 0;
+    if (!g_fp_find || !g_fp_trpos) return;
+    uint64_t pawn = nb->pawn;
+    uint64_t root = 0;
+    if (!mm_r64((uintptr_t)pawn + OFF_PAWN_MODELROOT, &root) || root == 0) return;
+
+    MMSkelCache *c = NULL;
+    for (int i = 0; i < MM_MAX_BOXES; i++)
+        if (g_skel_cache[i].pawn == pawn) { c = &g_skel_cache[i]; break; }
+    if (c == NULL) {
+        c = &g_skel_cache[0];
+        for (int i = 0; i < MM_MAX_BOXES; i++)
+            if (g_skel_cache[i].pawn == 0) { c = &g_skel_cache[i]; break; }
+    }
+    if (c->pawn != pawn || c->root != root) {
+        memset(c, 0, sizeof(*c));
+        c->pawn = pawn;
+        c->root = root;
+        int found = 0;
+        for (int i = 0; i < MM_SK_N; i++) {
+            NSString *p = [NSString stringWithUTF8String:mm_sk_path[i]];
+            void *t = g_fp_find((void *)(uintptr_t)root, (__bridge void *)p);
+            if (t != NULL) { c->bn[i] = t; found++; }
+        }
+        c->ok = (found >= 6) ? 1 : 0;
+        if (!c->ok) return;
+    }
+    uint32_t mask = 0;
+    for (int i = 0; i < MM_SK_N; i++) {
+        if (c->bn[i] == NULL) continue;
+        float bp[3] = { 0.0f, 0.0f, 0.0f };
+        g_fp_trpos(c->bn[i], bp);
+        if (!isfinite(bp[0]) || !isfinite(bp[1]) || !isfinite(bp[2])) continue;
+        CGPoint p;
+        int det = 0;
+        float vx = 0.0f, vy = 0.0f;
+        if (mm_w2s(view, proj, bp, NO, W, H, &p, &det, &vx, &vy)) {
+            nb->sk[i] = p;
+            mask |= (1u << i);
+        }
+    }
+    nb->skMask = mask;
+}
+
 static void mm_esp_collect_real(void)
 {
     g_box_count = 0;
@@ -5310,6 +5423,7 @@ static void mm_esp_collect_real(void)
         nb.alive = 1;
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
+        if (opts->skeleton) mm_skel_fill(&nb, view, proj, W, H);   /* C-5 */
 
         /* v0.2.4: estabilidad por pawn. La lista cambia de orden y las cajas
            saltaban; cada pawn conserva su caja y se interpola suavemente. */
@@ -6263,6 +6377,7 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
+    mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
     [page addSubview:c];
 }
 
