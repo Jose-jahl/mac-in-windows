@@ -627,8 +627,9 @@ typedef struct {
 } MMSkelCache;
 static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
 typedef void *(*MMFindFn)(void *transform, void *nsstring);
+typedef void  (*MMPosFn)(void *transform, float out[3]);
 static MMFindFn     g_fp_find  = NULL;
-static MMVec3Fn     g_fp_trpos = NULL;
+static MMPosFn      g_fp_trpos = NULL;
 /* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
    de la camara no se puede proyectar (no hay caja), pero SI esta en el mundo:
    el radar, el contador JUG/BOT y la flecha "detras de ti" salen de aca. */
@@ -4984,7 +4985,7 @@ static void mm_game_resolve(void)
             MMVec3Fn   fp5 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRANSPOS));
             MMGetIntFn fp6 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_HEALTH));
             MMFindFn   fp7 = (MMFindFn)(b + MM_GAME_DELTA(VA_TRFIND));   /* C-5 */
-            MMVec3Fn   fp8 = (MMVec3Fn)(b + MM_GAME_DELTA(VA_TRPOS));    /* C-5 */
+            MMPosFn    fp8 = (MMPosFn)(b + MM_GAME_DELTA(VA_TRPOS));    /* C-5 */
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
