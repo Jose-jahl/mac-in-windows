@@ -6076,6 +6076,23 @@ static void mm_cloud_row(UIView *card, NSString *title, NSString *key,
     mm_cloud_put(card, row, y);
 }
 
+/* Fila informativa (sin toggle): feature fija que el cliente ve como ACTIVA. */
+static void mm_cloud_static_row(UIView *card, NSString *title, NSString *value,
+                                CGFloat y)
+{
+    CGFloat w = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, w, MM_CLOUD_ROW_H)];
+    UILabel *l = mm_cloud_label(mm_tr(title), 10.8, UIFontWeightMedium,
+                                [UIColor colorWithWhite:0.91 alpha:1.0]);
+    l.frame = CGRectMake(0.0, 0.0, w - 64.0, MM_CLOUD_ROW_H);
+    [row addSubview:l];
+    UILabel *v = mm_cloud_label(value, 9.6, UIFontWeightSemibold, mm_neon_green());
+    v.textAlignment = NSTextAlignmentRight;
+    v.frame = CGRectMake(w - 64.0, 0.0, 64.0, MM_CLOUD_ROW_H);
+    [row addSubview:v];
+    mm_cloud_put(card, row, y);
+}
+
 static void mm_cloud_card_caption(UIView *card, NSString *text, CGFloat y)
 {
     CGFloat w = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
@@ -6146,6 +6163,8 @@ static void mm_cloud_build_combat(UIView *page)
     ms.frame = CGRectMake(MM_CLOUD_CARD_INNER, 104.0, iw, 24.0);
     [c addSubview:ms];
 
+    mm_cloud_static_row(c, @"No recoil", @"ACTIVO", 150.0);
+    mm_cloud_static_row(c, @"No spread", @"ACTIVO", 178.0);
     [page addSubview:c];
 }
 
