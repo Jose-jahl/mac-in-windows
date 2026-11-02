@@ -686,6 +686,7 @@ typedef struct {
     void    *bn[MM_SK_N];
     CGPoint  pts[MM_SK_N];   /* C-5c: puntos cacheados (throttle ~10 Hz) */
     uint32_t mask;
+    double   lastTry;    /* C-5d: throttle de reintento     */
     int      ok;
 } MMSkelCache;
 static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
@@ -4968,12 +4969,28 @@ static uint64_t g_br_info = 0;
 /* C-6: busca la instancia de DMZGameInfo escaneando los punteros del Gameplay
    y validando la firma del struct (radio 30..30000, centro en el mundo,
    total de cierres 0..30, shape -1..4). Se cachea hasta que falle la lectura. */
+static uint64_t mm_br_dmz_probe(uint64_t q)
+{
+    if (q == 0 || (q & 7) != 0) return 0;
+    float rad = 0.0f, c[3] = { 0.0f, 0.0f, 0.0f };
+    int total = 0, shape = 0;
+    if (!mm_vm_read(q + BR_DMZ_RADIUS, &rad, sizeof(rad))) return 0;
+    if (!isfinite(rad) || rad < 30.0f || rad > 30000.0f) return 0;
+    if (!mm_vm_read(q + BR_DMZ_CENTER, c, sizeof(c))) return 0;
+    if (!isfinite(c[0]) || !isfinite(c[2])) return 0;
+    if (fabsf(c[0]) > 20000.0f || fabsf(c[2]) > 20000.0f) return 0;
+    if (!mm_vm_read(q + BR_DMZ_TOTAL, &total, sizeof(total))) return 0;
+    if (total < 0 || total > 30) return 0;
+    if (!mm_vm_read(q + BR_DMZ_SHAPE, &shape, sizeof(shape))) return 0;
+    if (shape < -1 || shape > 4) return 0;
+    return q;
+}
+
 static uint64_t mm_br_dmz_find(void)
 {
     if (g_br_info != 0) return g_br_info;
-    /* PERF: el escaneo es caro (vm_read por puntero). Si no aparece, se
-       reintenta cada 5 s, no cada latido: antes eran ~1500 lecturas por
-       medio segundo y eso congelaba la pantalla a ratos. */
+    /* PERF: escaneo caro. Un fallo se reintenta cada 5 s (antes era cada
+       0.5 s y congelaba la pantalla a ratos). */
     static double s_scan = 0.0;
     double now = CACurrentMediaTime();
     if (s_scan > 0.0 && now - s_scan < 5.0) return 0;
@@ -4981,23 +4998,19 @@ static uint64_t mm_br_dmz_find(void)
     if (g_fp_gameplay == NULL) return 0;
     void *gp = g_fp_gameplay();
     if (gp == NULL) return 0;
+    /* Nivel 1: punteros directos del Gameplay. Nivel 2: un salto mas (el
+       GameInfo suele colgar del Game/GameMode, no del Gameplay). */
     for (uintptr_t off = 0x100; off < 0x600; off += 8) {
         uint64_t q = 0;
         if (!mm_r64((uintptr_t)gp + off, &q) || q == 0) continue;
-        if ((q & 7) != 0) continue;
-        float rad = 0.0f, c[3] = { 0.0f, 0.0f, 0.0f };
-        int total = 0, shape = 0;
-        if (!mm_vm_read(q + BR_DMZ_RADIUS, &rad, sizeof(rad))) continue;
-        if (!isfinite(rad) || rad < 30.0f || rad > 30000.0f) continue;
-        if (!mm_vm_read(q + BR_DMZ_CENTER, c, sizeof(c))) continue;
-        if (!isfinite(c[0]) || !isfinite(c[2])) continue;
-        if (fabsf(c[0]) > 20000.0f || fabsf(c[2]) > 20000.0f) continue;
-        if (!mm_vm_read(q + BR_DMZ_TOTAL, &total, sizeof(total))) continue;
-        if (total < 0 || total > 30) continue;
-        if (!mm_vm_read(q + BR_DMZ_SHAPE, &shape, sizeof(shape))) continue;
-        if (shape < -1 || shape > 4) continue;
-        g_br_info = q;
-        return q;
+        uint64_t hit = mm_br_dmz_probe(q);
+        if (hit != 0) { g_br_info = hit; return hit; }
+        for (uintptr_t o2 = 0; o2 < 0x80; o2 += 8) {
+            uint64_t r = 0;
+            if (!mm_r64(q + o2, &r) || r == 0) continue;
+            hit = mm_br_dmz_probe(r);
+            if (hit != 0) { g_br_info = hit; return hit; }
+        }
     }
     return 0;
 }
@@ -5201,20 +5214,38 @@ static void *mm_skel_find(void *root, const char *name)
 
 /* C-5b: resuelve los 21 huesos probando las raices y las formas de ruta que
    usa CODM (root = Bip001, root encima de Bip001, o ruta con prefijo). */
+static NSString *s_sk_bare[MM_SK_N];
+static NSString *s_sk_pref[MM_SK_N];
+static void mm_skel_strings(void)
+{
+    static BOOL once = NO;
+    if (once) return;
+    once = YES;
+    for (int i = 0; i < MM_SK_N; i++) {
+        NSString *b = [NSString stringWithUTF8String:mm_sk_path[i]];
+        s_sk_bare[i] = b;
+        NSString *sub = (b.length > 7) ? [b substringFromIndex:7] : b;
+        s_sk_pref[i] = [NSString stringWithFormat:@"Bip001/%@", sub];
+    }
+}
+
 static int mm_skel_resolve(uint64_t root, MMSkelCache *c)
 {
+    if (g_fp_find == NULL) return 0;
+    mm_skel_strings();
     void *r = (void *)(uintptr_t)root;
-    void *bip = mm_skel_find(r, "Bip001");
+    void *bip = g_fp_find(r, (__bridge void *)s_sk_bare[0]);
+    /* s_sk_bare[0] es "Bip001 Pelvis"; probamos el nodo Bip001 aparte */
+    NSString *bipName = [NSString stringWithUTF8String:"Bip001"];
+    if (bipName != nil) {
+        void *b = g_fp_find(r, (__bridge void *)bipName);
+        if (b != NULL) bip = b;
+    }
     int found = 0;
     for (int i = 0; i < MM_SK_N; i++) {
-        const char *bare = mm_sk_path[i];          /* "Bip001 Head" */
-        void *t = mm_skel_find(r, bare);
-        if (t == NULL && bip != NULL) t = mm_skel_find(bip, bare);
-        if (t == NULL) {
-            NSString *sub = [[NSString stringWithUTF8String:bare] substringFromIndex:7];
-            NSString *pth = [NSString stringWithFormat:@"Bip001/%@", sub];
-            t = g_fp_find(r, (__bridge void *)pth);
-        }
+        void *t = g_fp_find(r, (__bridge void *)s_sk_bare[i]);
+        if (t == NULL && bip != NULL) t = g_fp_find(bip, (__bridge void *)s_sk_bare[i]);
+        if (t == NULL) t = g_fp_find(r, (__bridge void *)s_sk_pref[i]);
         if (t != NULL) { c->bn[i] = t; found++; }
     }
     return found;
@@ -5240,10 +5271,18 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
         for (int i = 0; i < MM_MAX_BOXES; i++)
             if (g_skel_cache[i].pawn == 0) { c = &g_skel_cache[i]; break; }
     }
-    if (c->pawn != pawn || c->root != root || !c->ok) {
+    /* C-5d: sin el "|| !c->ok" esto reintentaba Find 63 veces POR PAWN Y POR
+       FRAME cuando no encontraba huesos (de ahi el congelamiento). Ahora un
+       fallo se reintenta como mucho cada 5 s. */
+    BOOL need = (c->pawn != pawn) || (c->root != root) || (!c->ok);
+    if (need) {
+        double tnow = CACurrentMediaTime();
+        if (!c->ok && c->pawn == pawn && c->root == root &&
+            c->lastTry > 0.0 && tnow - c->lastTry < 5.0) return;
         memset(c, 0, sizeof(*c));
         c->pawn = pawn;
         c->root = root;
+        c->lastTry = tnow;
         int found = mm_skel_resolve(root, c);
         c->ok = (found >= 4) ? 1 : 0;
         if (!c->ok) return;
