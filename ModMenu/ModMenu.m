@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.12"
+#define MODMENU_VERSION     "0.7.13"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.12";
+const char *modmenu_build_id = "modmenu-glass-0.7.13";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -394,6 +394,7 @@ static UILabel  *g_count_label = nil;
 static int       g_count_last_players = -1;
 static int       g_count_last_bots = -1;
 static UISegmentedControl *g_seg = nil;
+static UILabel  *g_status_strip = nil;  /* v0.7.13: HUD terminal arriba del panel */
 static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
 static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
@@ -5445,7 +5446,7 @@ static void mm_layout_panel_glass(void)
     if (g_panel_blur != nil)  g_panel_blur.frame = b;
     if (g_panel_shade != nil) g_panel_shade.frame = b;
     g_panel.layer.shadowPath =
-        [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:18.0].CGPath;
+        [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:6.0].CGPath;
 }
 
 /*---------------------------------------------------------------------------
@@ -5649,14 +5650,25 @@ static void mm_refresh_count_glass(void)
 static UIView *mm_row(NSString *titulo, UIView *ctrl)
 {
     UIView *r = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 284.0, 34.0)];
+    /* v0.7.13: prefix terminal `>_ ` + fuente Menlo + color discreto. */
     UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8.0, 0, 196.0, 34.0)];
-    l.text = mm_tr(titulo);
-    l.textColor = [UIColor colorWithWhite:0.97 alpha:1.0];
-    l.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+    UIFont *rowFont = [UIFont fontWithName:@"Menlo" size:11.5] ?:
+                      [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+    NSMutableAttributedString *rt = [[NSMutableAttributedString alloc]
+        initWithString:@">_ "
+            attributes:@{ NSFontAttributeName: rowFont,
+                          NSForegroundColorAttributeName:
+                              [mm_neon_green() colorWithAlphaComponent:0.60] }];
+    [rt appendAttributedString:[[NSAttributedString alloc]
+        initWithString:mm_tr(titulo)
+            attributes:@{ NSFontAttributeName: rowFont,
+                          NSForegroundColorAttributeName:
+                              [UIColor colorWithWhite:0.93 alpha:1.0] }]];
+    l.attributedText = rt;
     [r addSubview:l];
-    /* v0.4.0: hairline inferior tenue con el acento del tema (fila "premium"). */
+    /* v0.4.0: hairline inferior tenue. v0.7.13: cyan en vez de purple. */
     UIView *hair = [[UIView alloc] initWithFrame:CGRectMake(6.0, 33.0, 272.0, 0.5)];
-    hair.backgroundColor = [mm_neon_purple() colorWithAlphaComponent:0.14];
+    hair.backgroundColor = [mm_neon_green() colorWithAlphaComponent:0.18];
     hair.userInteractionEnabled = NO;
     [r addSubview:hair];
     CGRect cf = ctrl.frame;
@@ -5888,55 +5900,55 @@ static void mm_build_ui(void)
 
     if (g_panel != nil) return;
 
-    /* --- panel (v0.3.1: vidrio oscuro + gradiente neon animado) --- */
+    /* --- panel (v0.7.13: HACK TERMINAL - negro mate, angular, borde cyan) --- */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MM_PANEL_W, MM_PANEL_H)];
-    g_panel.backgroundColor = [UIColor colorWithRed:0.01 green:0.02 blue:0.03 alpha:0.42];
-    g_panel.layer.cornerRadius = 18.0;
-    g_panel.layer.borderWidth = 1.1;
+    g_panel.backgroundColor = [UIColor colorWithRed:0.015 green:0.02 blue:0.03 alpha:0.95];
+    g_panel.layer.cornerRadius = 6.0;        /* angular, no soft */
+    g_panel.layer.borderWidth = 1.4;
     g_panel.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.78].CGColor;
+        [mm_neon_green() colorWithAlphaComponent:0.92].CGColor;
     g_panel.layer.shadowColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.90].CGColor;
-    g_panel.layer.shadowOpacity = 0.55;
-    g_panel.layer.shadowRadius = 18.0;
-    g_panel.layer.shadowOffset = CGSizeMake(0.0, 8.0);
+        [mm_neon_green() colorWithAlphaComponent:1.0].CGColor;
+    g_panel.layer.shadowOpacity = 0.75;
+    g_panel.layer.shadowRadius = 24.0;        /* glow mas marcado */
+    g_panel.layer.shadowOffset = CGSizeMake(0.0, 4.0);
     g_panel.clipsToBounds = NO;
     g_panel.hidden = YES;
     g_panel.alpha = 0.0;
 
+    /* v0.7.13: gradient aurora sutil (cyan -> purple en diagonal) solo como
+       tinte de fondo. Mantiene el "pulso" existente del neon-border. */
     g_panel_neon = [CAGradientLayer layer];
     g_panel_neon.frame = g_panel.bounds;
-    g_panel_neon.cornerRadius = 18.0;
+    g_panel_neon.cornerRadius = 6.0;
     g_panel_neon.masksToBounds = YES;
     g_panel_neon.startPoint = CGPointMake(0.0, 0.0);
     g_panel_neon.endPoint = CGPointMake(1.0, 1.0);
-    g_panel_neon.locations = @[@0.0, @0.35, @0.68, @1.0];
-    CGColorRef p1 = [UIColor colorWithRed:0.08 green:0.88 blue:0.45 alpha:0.72].CGColor;
-    CGColorRef p2 = [UIColor colorWithRed:0.00 green:0.62 blue:0.72 alpha:0.42].CGColor;
-    CGColorRef p3 = [UIColor colorWithRed:0.58 green:0.18 blue:1.00 alpha:0.68].CGColor;
-    CGColorRef p4 = [UIColor colorWithRed:0.22 green:0.03 blue:0.52 alpha:0.58].CGColor;
-    g_panel_neon.colors = @[(__bridge id)p1, (__bridge id)p2,
-                            (__bridge id)p3, (__bridge id)p4];
+    g_panel_neon.locations = @[@0.0, @0.5, @1.0];
+    CGColorRef p1 = [UIColor colorWithRed:0.0 green:0.95 blue:0.75 alpha:0.20].CGColor;
+    CGColorRef p2 = [UIColor colorWithRed:0.0 green:0.0 blue:0.0 alpha:0.0].CGColor;
+    CGColorRef p3 = [UIColor colorWithRed:0.80 green:0.00 blue:0.40 alpha:0.18].CGColor;
+    g_panel_neon.colors = @[(__bridge id)p1, (__bridge id)p2, (__bridge id)p3];
     [g_panel.layer insertSublayer:g_panel_neon atIndex:0];
 
     g_panel_blur = [[UIVisualEffectView alloc] initWithEffect:
-                    [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
+                    [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
     g_panel_blur.frame = g_panel.bounds;
     g_panel_blur.userInteractionEnabled = NO;
-    g_panel_blur.alpha = 0.85;
-    g_panel_blur.layer.cornerRadius = 18.0;
+    g_panel_blur.alpha = 0.65;
+    g_panel_blur.layer.cornerRadius = 6.0;
     g_panel_blur.clipsToBounds = YES;
     [g_panel addSubview:g_panel_blur];
 
     g_panel_shade = [[UIView alloc] initWithFrame:g_panel.bounds];
     g_panel_shade.backgroundColor =
-        [UIColor colorWithRed:0.01 green:0.015 blue:0.025 alpha:0.54];
+        [UIColor colorWithRed:0.0 green:0.01 blue:0.015 alpha:0.75];
     g_panel_shade.userInteractionEnabled = NO;
-    g_panel_shade.layer.cornerRadius = 18.0;
+    g_panel_shade.layer.cornerRadius = 6.0;
     g_panel_shade.clipsToBounds = YES;
-    g_panel_shade.layer.borderWidth = 0.8;
+    g_panel_shade.layer.borderWidth = 0.6;
     g_panel_shade.layer.borderColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.30].CGColor;
+        [mm_neon_green() colorWithAlphaComponent:0.22].CGColor;
     [g_panel addSubview:g_panel_shade];
 
     mm_layout_panel_glass();
@@ -5972,67 +5984,98 @@ static void mm_build_ui(void)
     [dz addGestureRecognizer:psr];
     [g_panel addSubview:dz];
 
-    UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 8.0, 222.0, 20.0)];
-    UIFont *hf = [UIFont fontWithName:@"Menlo-Bold" size:13.5];
-    if (hf == nil) hf = [UIFont boldSystemFontOfSize:13.5];
-    UIFont *vf = [UIFont fontWithName:@"Menlo-Bold" size:9.5];
-    if (vf == nil) vf = [UIFont boldSystemFontOfSize:9.5];
+    /* v0.7.13: header con prompt terminal y version en kernel */
+    UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 6.0, 222.0, 22.0)];
+    UIFont *hf = [UIFont fontWithName:@"Menlo-Bold" size:14.0];
+    if (hf == nil) hf = [UIFont boldSystemFontOfSize:14.0];
+    UIFont *vf = [UIFont fontWithName:@"Menlo" size:9.5];
+    if (vf == nil) vf = [UIFont systemFontOfSize:9.5];
     NSMutableAttributedString *ht = [[NSMutableAttributedString alloc]
+        initWithString:@">_ "
+            attributes:@{ NSFontAttributeName: hf,
+                          NSForegroundColorAttributeName:
+                              [mm_neon_green() colorWithAlphaComponent:0.95],
+                          NSKernAttributeName: @0.5 }];
+    [ht appendAttributedString:[[NSAttributedString alloc]
         initWithString:@"FUSION"
             attributes:@{ NSFontAttributeName: hf,
-                          NSForegroundColorAttributeName: mm_neon_green(),
-                          NSKernAttributeName: @1.2 }];
+                          NSForegroundColorAttributeName:
+                              [UIColor colorWithRed:0.0 green:1.0 blue:0.75 alpha:1.0],
+                          NSKernAttributeName: @1.5 }]];
     [ht appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"  "
-            attributes:@{ NSFontAttributeName: hf }]];
-    [ht appendAttributedString:[[NSAttributedString alloc]
-        initWithString:[NSString stringWithFormat:@"%s", MODMENU_VERSION]
+        initWithString:[NSString stringWithFormat:@" // v%s", MODMENU_VERSION]
             attributes:@{ NSFontAttributeName: vf,
                           NSForegroundColorAttributeName:
-                              [mm_neon_purple() colorWithAlphaComponent:0.95],
+                              [UIColor colorWithWhite:0.55 alpha:1.0],
                           NSKernAttributeName: @0.3 }]];
     h.attributedText = ht;
     h.adjustsFontSizeToFitWidth = YES;
-    h.minimumScaleFactor = 0.8;
+    h.minimumScaleFactor = 0.75;
     [g_panel addSubview:h];
 
+    /* v0.7.13: boton X angular estilo terminal [X] */
     UIButton *x = [UIButton buttonWithType:UIButtonTypeCustom];
-    x.frame = CGRectMake(MM_PANEL_W - 46.0, 5.0, 40.0, 28.0);
-    x.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.55];
-    x.layer.cornerRadius = 14.0;
-    x.layer.borderWidth = 0.7;
+    x.frame = CGRectMake(MM_PANEL_W - 42.0, 5.0, 36.0, 24.0);
+    x.backgroundColor = [UIColor colorWithRed:0.08 green:0.0 blue:0.02 alpha:0.85];
+    x.layer.cornerRadius = 3.0;        /* angular */
+    x.layer.borderWidth = 1.0;
     x.layer.borderColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.55].CGColor;
+        [UIColor colorWithRed:1.0 green:0.25 blue:0.35 alpha:0.80].CGColor;
     x.clipsToBounds = YES;
-    [x setTitle:@"X" forState:UIControlStateNormal];
-    [x setTitleColor:[UIColor colorWithWhite:0.94 alpha:1.0]
+    UIFont *xf = [UIFont fontWithName:@"Menlo-Bold" size:12.0];
+    if (xf == nil) xf = [UIFont boldSystemFontOfSize:12.0];
+    [x setTitle:@"[X]" forState:UIControlStateNormal];
+    [x setTitleColor:[UIColor colorWithRed:1.0 green:0.45 blue:0.50 alpha:1.0]
              forState:UIControlStateNormal];
-    x.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+    x.titleLabel.font = xf;
     [x addTarget:[MMTargets shared] action:@selector(onClose)
         forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:x];
 
+    /* v0.7.13: status strip estilo HUD terminal. Fijo en el prolog del panel
+       (no live-update por ahora - lo refresca el latido via mm_refresh_info).
+       Formato: `[●] AIM  [●] ESP  [●] NOJB  TARGETS: N` en Menlo. */
+    g_status_strip = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 30.0, MM_PANEL_W - 20.0, 18.0)];
+    g_status_strip.backgroundColor = [UIColor colorWithRed:0.0 green:0.02 blue:0.03 alpha:0.60];
+    g_status_strip.layer.cornerRadius = 3.0;
+    g_status_strip.layer.masksToBounds = YES;
+    g_status_strip.layer.borderWidth = 0.6;
+    g_status_strip.layer.borderColor =
+        [mm_neon_green() colorWithAlphaComponent:0.30].CGColor;
+    g_status_strip.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
+    g_status_strip.font = [UIFont fontWithName:@"Menlo-Bold" size:9.5] ?:
+                          [UIFont boldSystemFontOfSize:9.5];
+    g_status_strip.textAlignment = NSTextAlignmentCenter;
+    g_status_strip.text = @"[*] AIM  [*] ESP  [*] NOJB  TARGETS: --";
+    [g_panel addSubview:g_status_strip];
+
+    /* v0.7.13: tabs con fuente Menlo + angular + tint cyan oscuro. Las paginas
+       (g_p_esp..) viven a y=74, asi que tabs ocupan 50-72 (22 pt). */
     g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"VIS", @"MISC", @"EXTRA", @"INFO"]];
-    g_seg.frame = CGRectMake(10.0, 36.0, MM_PANEL_W - 20.0, 30.0);
+    g_seg.frame = CGRectMake(8.0, 50.0, MM_PANEL_W - 16.0, 22.0);
     g_seg.selectedSegmentIndex = 0;
-    g_seg.backgroundColor = [UIColor colorWithWhite:0.02 alpha:0.50];
-    g_seg.layer.cornerRadius = 9.0;
+    g_seg.backgroundColor = [UIColor colorWithRed:0.0 green:0.015 blue:0.025 alpha:0.90];
+    g_seg.layer.cornerRadius = 3.0;        /* angular */
     g_seg.layer.masksToBounds = YES;
-    g_seg.layer.borderWidth = 0.6;
+    g_seg.layer.borderWidth = 1.0;
     g_seg.layer.borderColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.35].CGColor;
+        [mm_neon_green() colorWithAlphaComponent:0.55].CGColor;
     if ([g_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
         g_seg.selectedSegmentTintColor =
-            [UIColor colorWithRed:0.42 green:0.15 blue:0.78 alpha:0.92];
+            [UIColor colorWithRed:0.0 green:0.42 blue:0.35 alpha:0.95];
     else
-        g_seg.tintColor = mm_neon_purple();
+        g_seg.tintColor = mm_neon_green();
+    UIFont *tabf = [UIFont fontWithName:@"Menlo-Bold" size:10.5];
+    if (tabf == nil) tabf = [UIFont boldSystemFontOfSize:10.5];
     [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.86 alpha:1.0],
-            NSFontAttributeName: [UIFont boldSystemFontOfSize:11.0] }
+            [UIColor colorWithWhite:0.65 alpha:1.0],
+            NSFontAttributeName: tabf,
+            NSKernAttributeName: @1.0 }
                           forState:UIControlStateNormal];
     [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor whiteColor],
-            NSFontAttributeName: [UIFont boldSystemFontOfSize:11.0] }
+            [UIColor colorWithRed:0.4 green:1.0 blue:0.9 alpha:1.0],
+            NSFontAttributeName: tabf,
+            NSKernAttributeName: @1.0 }
                           forState:UIControlStateSelected];
     [g_seg addTarget:[MMTargets shared] action:@selector(onSeg:)
         forControlEvents:UIControlEventValueChanged];
@@ -7055,6 +7098,21 @@ static void mm_set_panel(BOOL open)
    sigue en Documents/modmenu_status.txt y en el syslog. */
 static void mm_refresh_info(void)
 {
+    /* v0.7.13: status strip (HUD arriba del panel) - refresca cada latido con
+       estado real. Formato: `[●] AIM  [●] ESP  [●] NOJB  TARGETS: N`.
+       Cero costo si el panel esta cerrado (label hidden). */
+    if (g_status_strip != nil) {
+        int sAim  = 1;  /* aim es parche estatico, siempre activo si la IPA se instalo */
+        int sEsp  = (g_fp_state == 1) ? 1 : 0;
+        int sNojb = (g_nojb_passes > 0) ? 1 : 0;
+        int targets = g_track_count;
+        NSString *dAim  = sAim  ? @"●" : @"○";
+        NSString *dEsp  = sEsp  ? @"●" : @"○";
+        NSString *dNojb = sNojb ? @"●" : @"○";
+        g_status_strip.text = [NSString stringWithFormat:
+            @"[%@] AIM  [%@] ESP  [%@] NOJB  TARGETS: %d",
+            dAim, dEsp, dNojb, targets];
+    }
     if (g_info == nil) return;
     if (g_info.attributedText.length > 0) return;
     @try {
