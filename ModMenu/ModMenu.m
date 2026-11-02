@@ -816,6 +816,9 @@ typedef struct {
     float  x, y, z;      /* centro actual (mundo)   */
     float  r;            /* radio actual (m)        */
     double t;            /* ultima lectura          */
+    float  nextS;      /* C-6: segundos para el proximo cierre */
+    float  progress;   /* C-6: 0..1 avance del cierre actual  */
+    int    cur, total; /* C-6: cierre actual / total          */
 } MMBrZone;
 static MMBrZone     g_br_zone;
 static NSString    *g_br_zone_info = nil;
@@ -4936,55 +4939,103 @@ static BOOL mm_r64(uintptr_t addr, uint64_t *out)
    - BR_STRUCT_SHAPE_OFF: 3 floats (x,y,z) del centro
    - BR_STRUCT_RADIUS_OFF: float del radio
    Si falta cualquiera, la funcion sale sin tocar nada. Lectura a 2 Hz. */
+#define BR_DMZ_SHAPE   0x3F4
+#define BR_DMZ_CENTER  0x3F8
+#define BR_DMZ_RADIUS  0x404
+#define BR_DMZ_NEXT    0x40C
+#define BR_DMZ_END     0x414
+#define BR_DMZ_CUR     0x418
+#define BR_DMZ_TOTAL   0x41C
+#define BR_DMZ_PROG    0x420
+
+static uint64_t g_br_info = 0;
+
+/* C-6: busca la instancia de DMZGameInfo escaneando los punteros del Gameplay
+   y validando la firma del struct (radio 30..30000, centro en el mundo,
+   total de cierres 0..30, shape -1..4). Se cachea hasta que falle la lectura. */
+static uint64_t mm_br_dmz_find(void)
+{
+    if (g_br_info != 0) return g_br_info;
+    if (g_fp_gameplay == NULL) return 0;
+    void *gp = g_fp_gameplay();
+    if (gp == NULL) return 0;
+    for (uintptr_t off = 0x100; off < 0x1000; off += 8) {
+        uint64_t q = 0;
+        if (!mm_r64((uintptr_t)gp + off, &q) || q == 0) continue;
+        if ((q & 7) != 0) continue;
+        float rad = 0.0f, c[3] = { 0.0f, 0.0f, 0.0f };
+        int total = 0, shape = 0;
+        if (!mm_vm_read(q + BR_DMZ_RADIUS, &rad, sizeof(rad))) continue;
+        if (!isfinite(rad) || rad < 30.0f || rad > 30000.0f) continue;
+        if (!mm_vm_read(q + BR_DMZ_CENTER, c, sizeof(c))) continue;
+        if (!isfinite(c[0]) || !isfinite(c[2])) continue;
+        if (fabsf(c[0]) > 20000.0f || fabsf(c[2]) > 20000.0f) continue;
+        if (!mm_vm_read(q + BR_DMZ_TOTAL, &total, sizeof(total))) continue;
+        if (total < 0 || total > 30) continue;
+        if (!mm_vm_read(q + BR_DMZ_SHAPE, &shape, sizeof(shape))) continue;
+        if (shape < -1 || shape > 4) continue;
+        g_br_info = q;
+        return q;
+    }
+    return 0;
+}
+
 static void mm_br_zone_read(void)
 {
-    if (BR_STRUCT_MGR_VA == 0ULL || BR_STRUCT_SHAPE_OFF == 0 ||
-        BR_STRUCT_RADIUS_OFF == 0) return;
     static double s_last = 0.0;
     double now = CACurrentMediaTime();
     if (s_last > 0.0 && now - s_last < 0.5) return;
     s_last = now;
     @try {
-        const struct mach_header *hdr = _dyld_get_image_header(0);
-        if (hdr == NULL) return;
-        uintptr_t base = (uintptr_t)hdr;
-        uintptr_t slot = base + (uintptr_t)(BR_STRUCT_MGR_VA - FUSION_IMAGE_BASE);
-        uint64_t mgr = 0;
-        if (!mm_r64(slot, &mgr) || mgr == 0) {
+        uint64_t info = mm_br_dmz_find();
+        if (info == 0) {
             g_br_zone.ok = 0;
-            g_br_zone_info = @"sin manager";
+            g_br_zone_info = @"sin DMZGameInfo";
             return;
         }
-        float shp[3] = { 0.0f, 0.0f, 0.0f };
-        if (!mm_vm_read((uintptr_t)mgr + BR_STRUCT_SHAPE_OFF, shp, sizeof(shp))) {
+        float c[3] = { 0.0f, 0.0f, 0.0f }, rad = 0.0f;
+        if (!mm_vm_read(info + BR_DMZ_CENTER, c, sizeof(c)) ||
+            !mm_vm_read(info + BR_DMZ_RADIUS, &rad, sizeof(rad))) {
             g_br_zone.ok = 0;
-            g_br_zone_info = @"shape ilegible";
+            g_br_zone_info = @"zona ilegible";
+            g_br_info = 0;
             return;
         }
-        float rad = 0.0f;
-        if (!mm_vm_read((uintptr_t)mgr + BR_STRUCT_RADIUS_OFF, &rad, sizeof(rad))) {
+        if (!isfinite(rad) || rad < 1.0f || rad > 50000.0f) {
             g_br_zone.ok = 0;
-            g_br_zone_info = @"radius ilegible";
+            g_br_zone_info = @"radio fuera de rango";
             return;
         }
-        if (!isfinite(shp[0]) || !isfinite(shp[1]) || !isfinite(shp[2]) ||
-            !isfinite(rad) || rad < 1.0f || rad > 50000.0f) {
-            g_br_zone.ok = 0;
-            g_br_zone_info = @"valores fuera de rango";
-            return;
+        float nextT = 0.0f, prog = 0.0f;
+        int cur = 0, total = 0;
+        mm_vm_read(info + BR_DMZ_NEXT,  &nextT, sizeof(nextT));
+        mm_vm_read(info + BR_DMZ_PROG,  &prog,  sizeof(prog));
+        mm_vm_read(info + BR_DMZ_CUR,   &cur,   sizeof(cur));
+        mm_vm_read(info + BR_DMZ_TOTAL, &total, sizeof(total));
+        g_br_zone.nextS = 0.0f;
+        if (isfinite(nextT) && nextT > 1.0e9f) {
+            float nowT = (float)[[NSDate date] timeIntervalSince1970];
+            float d = nextT - nowT;
+            if (d > 0.0f && d < 3600.0f) g_br_zone.nextS = d;
         }
-        /* v0.7.3 (perf): solo bump si algo visible cambio */
+        g_br_zone.progress = isfinite(prog) ? prog : 0.0f;
+        g_br_zone.cur = cur;
+        g_br_zone.total = total;
         BOOL changed = (g_br_zone.ok == 0) ||
-                       (g_br_zone.x != shp[0]) || (g_br_zone.z != shp[2]) ||
+                       (g_br_zone.x != c[0]) || (g_br_zone.z != c[2]) ||
                        (g_br_zone.r != rad);
-        g_br_zone.x = shp[0];
-        g_br_zone.y = shp[1];
-        g_br_zone.z = shp[2];
+        g_br_zone.x = c[0]; g_br_zone.y = c[1]; g_br_zone.z = c[2];
         g_br_zone.r = rad;
         g_br_zone.t = now;
         g_br_zone.ok = 1;
-        g_br_zone_info = [NSString stringWithFormat:@"r=%.0f c=(%.0f,%.0f)",
-                          rad, shp[0], shp[2]];
+        if (g_br_zone.nextS > 0.0f) {
+            int s = (int)(g_br_zone.nextS + 0.5f);
+            g_br_zone_info = [NSString stringWithFormat:@"r=%.0f  cierre %d/%d  %d:%02d",
+                              rad, cur, total, s / 60, s % 60];
+        } else {
+            g_br_zone_info = [NSString stringWithFormat:@"r=%.0f  cierre %d/%d",
+                              rad, cur, total];
+        }
         if (changed) mm_scene_bump();
     } @catch (NSException *e) {
         g_br_zone.ok = 0;
