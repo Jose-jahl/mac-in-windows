@@ -636,6 +636,10 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 #ifndef OFF_PAWN_MODELROOT
 #define OFF_PAWN_MODELROOT 0x630ULL
 #endif
+/* C-5b: Pawn.m_Mesh (Transform del mesh) - segundo candidato de raiz */
+#ifndef OFF_PAWN_MESH
+#define OFF_PAWN_MESH 0x628ULL
+#endif
 /* 0.7: ventana contigua del pawn que cubre alive/transform/entity. Se lee de
    una sola pasada (con fallback a lecturas individuales si el rango falla). */
 #define MM_PAWN_BLOCK_BASE (OFF_PAWN_TRANSFORM & ~0xFFULL)
@@ -680,6 +684,8 @@ typedef struct {
     uint64_t pawn;
     uint64_t root;
     void    *bn[MM_SK_N];
+    CGPoint  pts[MM_SK_N];   /* C-5c: puntos cacheados (throttle ~10 Hz) */
+    uint32_t mask;
     int      ok;
 } MMSkelCache;
 static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
@@ -1444,6 +1450,15 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
             CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.55);
             CGContextStrokeEllipseInRect(ctx, CGRectMake(zpx - zpr, zpy - zpr,
                                                          zpr * 2.0, zpr * 2.0));
+        }
+        /* C-6b: proxima zona (estimada: mismo centro, radio * 0.55) en cian
+           para diferenciarla de la actual. */
+        CGFloat npr = zpr * 0.55;
+        if (npr > 0.5) {
+            CGContextSetLineWidth(ctx, 1.3);
+            CGContextSetRGBStrokeColor(ctx, 0.25, 0.95, 1.0, 0.85);
+            CGContextStrokeEllipseInRect(ctx, CGRectMake(zpx - npr, zpy - npr,
+                                                         npr * 2.0, npr * 2.0));
         }
         CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.90);
         CGContextFillEllipseInRect(ctx, CGRectMake(zpx - 2.0, zpy - 2.0, 4.0, 4.0));
@@ -4956,10 +4971,17 @@ static uint64_t g_br_info = 0;
 static uint64_t mm_br_dmz_find(void)
 {
     if (g_br_info != 0) return g_br_info;
+    /* PERF: el escaneo es caro (vm_read por puntero). Si no aparece, se
+       reintenta cada 5 s, no cada latido: antes eran ~1500 lecturas por
+       medio segundo y eso congelaba la pantalla a ratos. */
+    static double s_scan = 0.0;
+    double now = CACurrentMediaTime();
+    if (s_scan > 0.0 && now - s_scan < 5.0) return 0;
+    s_scan = now;
     if (g_fp_gameplay == NULL) return 0;
     void *gp = g_fp_gameplay();
     if (gp == NULL) return 0;
-    for (uintptr_t off = 0x100; off < 0x1000; off += 8) {
+    for (uintptr_t off = 0x100; off < 0x600; off += 8) {
         uint64_t q = 0;
         if (!mm_r64((uintptr_t)gp + off, &q) || q == 0) continue;
         if ((q & 7) != 0) continue;
@@ -5169,6 +5191,35 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 /* C-5: proyecta el esqueleto del pawn en su caja. Los Transform se resuelven
    UNA vez por pawn con Transform.Find y se cachean; si el model root cambia
    (pawn reciclado) se vuelven a resolver. Todo falla en silencio. */
+static void *mm_skel_find(void *root, const char *name)
+{
+    if (root == NULL || g_fp_find == NULL) return NULL;
+    NSString *p = [NSString stringWithUTF8String:name];
+    if (p == nil) return NULL;
+    return g_fp_find(root, (__bridge void *)p);
+}
+
+/* C-5b: resuelve los 21 huesos probando las raices y las formas de ruta que
+   usa CODM (root = Bip001, root encima de Bip001, o ruta con prefijo). */
+static int mm_skel_resolve(uint64_t root, MMSkelCache *c)
+{
+    void *r = (void *)(uintptr_t)root;
+    void *bip = mm_skel_find(r, "Bip001");
+    int found = 0;
+    for (int i = 0; i < MM_SK_N; i++) {
+        const char *bare = mm_sk_path[i];          /* "Bip001 Head" */
+        void *t = mm_skel_find(r, bare);
+        if (t == NULL && bip != NULL) t = mm_skel_find(bip, bare);
+        if (t == NULL) {
+            NSString *sub = [[NSString stringWithUTF8String:bare] substringFromIndex:7];
+            NSString *pth = [NSString stringWithFormat:@"Bip001/%@", sub];
+            t = g_fp_find(r, (__bridge void *)pth);
+        }
+        if (t != NULL) { c->bn[i] = t; found++; }
+    }
+    return found;
+}
+
 static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
                          CGFloat W, CGFloat H)
 {
@@ -5176,7 +5227,10 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
     if (!g_fp_find || !g_fp_trpos) return;
     uint64_t pawn = nb->pawn;
     uint64_t root = 0;
-    if (!mm_r64((uintptr_t)pawn + OFF_PAWN_MODELROOT, &root) || root == 0) return;
+    /* C-5b: dos candidatos de raiz (model root / mesh). */
+    if (!mm_r64((uintptr_t)pawn + OFF_PAWN_MODELROOT, &root) || root == 0)
+        mm_r64((uintptr_t)pawn + OFF_PAWN_MESH, &root);
+    if (root == 0) return;
 
     MMSkelCache *c = NULL;
     for (int i = 0; i < MM_MAX_BOXES; i++)
@@ -5186,34 +5240,35 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
         for (int i = 0; i < MM_MAX_BOXES; i++)
             if (g_skel_cache[i].pawn == 0) { c = &g_skel_cache[i]; break; }
     }
-    if (c->pawn != pawn || c->root != root) {
+    if (c->pawn != pawn || c->root != root || !c->ok) {
         memset(c, 0, sizeof(*c));
         c->pawn = pawn;
         c->root = root;
-        int found = 0;
-        for (int i = 0; i < MM_SK_N; i++) {
-            NSString *p = [NSString stringWithUTF8String:mm_sk_path[i]];
-            void *t = g_fp_find((void *)(uintptr_t)root, (__bridge void *)p);
-            if (t != NULL) { c->bn[i] = t; found++; }
-        }
-        c->ok = (found >= 6) ? 1 : 0;
+        int found = mm_skel_resolve(root, c);
+        c->ok = (found >= 4) ? 1 : 0;
         if (!c->ok) return;
     }
-    uint32_t mask = 0;
-    for (int i = 0; i < MM_SK_N; i++) {
-        if (c->bn[i] == NULL) continue;
-        float bp[3] = { 0.0f, 0.0f, 0.0f };
-        g_fp_trpos(c->bn[i], bp);
-        if (!isfinite(bp[0]) || !isfinite(bp[1]) || !isfinite(bp[2])) continue;
-        CGPoint p;
-        int det = 0;
-        float vx = 0.0f, vy = 0.0f;
-        if (mm_w2s(view, proj, bp, NO, W, H, &p, &det, &vx, &vy)) {
-            nb->sk[i] = p;
-            mask |= (1u << i);
+    /* C-5c: los 21 huesos se proyectan cada 3 pasadas (~10 Hz) y se reusan;
+       proyectar 21 huesos x N pawns a 30-60 Hz era parte del peso. */
+    static unsigned s_tick = 0;
+    if (c->mask == 0 || (s_tick++ % 3) == 0) {
+        c->mask = 0;
+        for (int i = 0; i < MM_SK_N; i++) {
+            if (c->bn[i] == NULL) continue;
+            float bp[3] = { 0.0f, 0.0f, 0.0f };
+            g_fp_trpos(c->bn[i], bp);
+            if (!isfinite(bp[0]) || !isfinite(bp[1]) || !isfinite(bp[2])) continue;
+            CGPoint p;
+            int det = 0;
+            float vx = 0.0f, vy = 0.0f;
+            if (mm_w2s(view, proj, bp, NO, W, H, &p, &det, &vx, &vy)) {
+                c->pts[i] = p;
+                c->mask |= (1u << i);
+            }
         }
     }
-    nb->skMask = mask;
+    memcpy(nb->sk, c->pts, sizeof(nb->sk));
+    nb->skMask = c->mask;
 }
 
 static void mm_esp_collect_real(void)
