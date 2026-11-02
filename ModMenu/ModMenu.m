@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.1"
+#define MODMENU_VERSION     "0.8.2"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.1";
+const char *modmenu_build_id = "modmenu-glass-0.8.2";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -564,6 +564,63 @@ static inline void mm_xor_decrypt(uint8_t key, const uint8_t *src, size_t n, cha
 /* =========================================================================
    FIN v0.8.1 HARDENING
    ========================================================================= */
+
+/* =========================================================================
+   v0.8.2 — DOBBY INTEGRATION (Fase B.2 + B.3)
+   -------------------------------------------------------------------------
+   Gated por MM_USE_DOBBY (compile flag inyectado por el workflow CI cuando
+   el input enable_dobby=true). Cuando NO esta definido, mm_dobby_init es
+   un no-op y la dylib compila sin libdobby.a (comportamiento = v0.8.1).
+
+   Cuando esta definido:
+   - include dobby.h (del submodulo clonado por el workflow)
+   - B.3 smoke test: hook de getpid() libc para validar pipeline end-to-end
+   - log "DOBBY_HOOK_OK: getpid hooked" al mm_write_status la primera vez
+     que algo llama getpid tras el init (si el log aparece en Documents/
+     modmenu_status.txt del equipo de prueba, Dobby funciona)
+
+   Esto NO cambia comportamiento del juego: solo prueba que el pipeline
+   compile + link + inject + hook funciona. Features reales (god mode,
+   silent aim, etc.) vienen en Fase C basadas en este cimiento.
+   ========================================================================= */
+#if defined(MM_USE_DOBBY) && MM_USE_DOBBY
+#include "dobby.h"
+#include <sys/types.h>
+
+/* Forward decl: mm_write_status se define mas abajo (linea ~5470).
+   El bloque Dobby ocurre antes para que mm_dobby_init este visible al
+   constructor. */
+static void mm_write_status(NSString *nota);
+
+static pid_t (*mm_orig_getpid)(void) = NULL;
+static BOOL  g_dobby_hit = NO;
+
+static pid_t mm_hooked_getpid(void)
+{
+    pid_t p = mm_orig_getpid ? mm_orig_getpid() : (pid_t)-1;
+    if (!g_dobby_hit) {
+        g_dobby_hit = YES;
+        /* mm_write_status se define mas abajo; llamada diferida al primer
+           invocacion de getpid tras el init del constructor. */
+        mm_write_status(@"DOBBY_HOOK_OK: getpid hooked (B.3 smoke test)");
+    }
+    return p;
+}
+
+static void mm_dobby_init(void)
+{
+    void *target = dlsym(RTLD_DEFAULT, "getpid");
+    if (target == NULL) {
+        mm_write_status(@"DOBBY: dlsym(getpid) == NULL, hook skip");
+        return;
+    }
+    int rv = DobbyHook(target, (void *)mm_hooked_getpid, (void **)&mm_orig_getpid);
+    mm_write_status([NSString stringWithFormat:@"DOBBY: init rv=%d target=%p",
+                     rv, target]);
+}
+#else
+static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
+#endif
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 32
@@ -8128,6 +8185,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     mm_write_status(@"arranque (opciones a fabrica)");
     mm_lic_check();       /* v0.3.7: licencia (observacion; migra KeyGate) */
     mm_nojb_start();      /* v0.2.8: fase C (antidetect) en segundo plano */
+    mm_dobby_init();     /* v0.8.2 Fase B.2/B.3: Dobby si MM_USE_DOBBY */
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ mm_tick(); });
