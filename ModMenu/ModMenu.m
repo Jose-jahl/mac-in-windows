@@ -394,6 +394,7 @@ const char *modmenu_build_id = "modmenu-glass-0.8.1";
    todavia, el slot vale 0 -> aim apagado (fail-safe, nunca maximo). */
 static float g_aim_strength = 28.0f;
 static float g_aim_fov = 180.0f;
+static float g_aim_smooth = 0.0f;   /* C-4: 0 = snap, 1 = suave */
 static BOOL  g_aim_on = YES;
 static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
 static BOOL  g_aim_key_held = NO;
@@ -401,11 +402,12 @@ static void mm_aim_apply(void)
 {
     const struct mach_header *h = _dyld_get_image_header(0);
     if (h == NULL) return;
-    /* strength +0xDC639EC, FOV +0xDC639F0, aim-key gate +0xDC639F4 (ADR 0008) */
+    /* strength +0xEC, FOV +0xF0, gate +0xF4, cur +0xF8 (lo escribe el relay), alpha +0xFC */
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_on ? g_aim_strength : 0.0f;
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639F0ULL) = g_aim_fov;
     *(int   *)((uintptr_t)h + (uintptr_t)0x0DC639F4ULL) =
         (g_aim_key_mode && !g_aim_key_held) ? 0 : 1;
+    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639FCULL) = g_aim_smooth;
 }
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
@@ -2512,6 +2514,7 @@ static void mm_haptic(int style)
 - (void)onMaxN:(UISlider *)s;
 - (void)onAimStrength:(UISlider *)s;
 - (void)onAimFov:(UISlider *)s;
+- (void)onAimSmooth:(UISlider *)s;
 - (void)onAimKeyDown:(UIButton *)b;
 - (void)onAimKeyUp:(UIButton *)b;
 - (void)onPanic:(UILongPressGestureRecognizer *)g;
@@ -2962,6 +2965,15 @@ static void mm_haptic(int style)
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_fov"];
     mm_aim_apply();
     mm_write_status(@"fov aim");
+}
+
+/* Fase C-4: suavizado del aim (0 = snap, 1 = lento). */
+- (void)onAimSmooth:(UISlider *)s
+{
+    g_aim_smooth = s.value;
+    [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_smooth"];
+    mm_aim_apply();
+    mm_write_status(@"suavizado aim");
 }
 
 /* Fase C-3: Aim Key (mantener el boton AIM para que asista). */
@@ -6221,23 +6233,30 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(b, @"Crosshair (mira)", @"mm_x_cross", NO, 38.0, YES);
     mm_cloud_row(b, @"Anillo de aim", @"mm_x_aimring", NO, 66.0, YES);
-    mm_cloud_card_caption(b, @"Estilo de crosshair", 100.0);
+    mm_cloud_card_caption(b, @"Estilo de crosshair", 96.0);
     int cstyle = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
     if (cstyle < 0 || cstyle > 3) cstyle = 0;
     UISegmentedControl *cs = mm_cloud_seg(@[ mm_tr(@"Cruz"), mm_tr(@"Punto"),
                                               mm_tr(@"Circulo"), mm_tr(@"Todo") ], iw);
-    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 116.0, iw, 28.0);
+    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 112.0, iw, 24.0);
     cs.selectedSegmentIndex = cstyle;
     [cs addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
         forControlEvents:UIControlEventValueChanged];
     [b addSubview:cs];
 
     /* Fase C-2: FOV del aim (grados). Fuera del cono, el aim no asiste. */
-    mm_cloud_card_caption(b, @"FOV de aim", 152.0);
+    mm_cloud_card_caption(b, @"FOV de aim", 138.0);
     UISlider *af = mm_cloud_slider(5.0f, 180.0f, g_aim_fov, @"mm_x_aim_fov",
                                    @selector(onAimFov:), iw);
-    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 166.0, iw, 24.0);
+    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 152.0, iw, 22.0);
     [b addSubview:af];
+
+    /* Fase C-4: suavizado del aim (0 = snap, 1 = lento). */
+    mm_cloud_card_caption(b, @"Suavizado de aim", 178.0);
+    UISlider *as2 = mm_cloud_slider(0.0f, 1.0f, g_aim_smooth, @"mm_x_aim_smooth",
+                                    @selector(onAimSmooth:), iw);
+    as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 192.0, iw, 22.0);
+    [b addSubview:as2];
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"MUNDO", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -7972,8 +7991,14 @@ __attribute__((constructor)) static void modmenu_init(void)
     if (g_aim_strength < 0.0f || g_aim_strength > 28.0f) g_aim_strength = 28.0f;
     g_aim_fov = mm_def_float(@"mm_x_aim_fov", 180.0f);
     if (g_aim_fov < 5.0f || g_aim_fov > 180.0f) g_aim_fov = 180.0f;
+    g_aim_smooth = mm_def_float(@"mm_x_aim_smooth", 0.0f);
+    if (g_aim_smooth < 0.0f || g_aim_smooth > 1.0f) g_aim_smooth = 0.0f;
     g_aim_on = mm_def_bool(@"mm_x_aim_on", YES);
     g_aim_key_mode = mm_def_bool(@"mm_x_aim_key", NO);
+    {   /* C-4: el relay lleva el estado del suavizado en +0xF8; arranca en 0. */
+        const struct mach_header *h0 = _dyld_get_image_header(0);
+        if (h0 != NULL) *(float *)((uintptr_t)h0 + (uintptr_t)0x0DC639F8ULL) = 0.0f;
+    }
     mm_aim_apply();
 
     /* v0.8.1 A.2/A.5: observers de captura y background. Se registran una
