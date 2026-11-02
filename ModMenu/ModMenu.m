@@ -5044,6 +5044,12 @@ static uint64_t mm_br_dmz_find(void)
 
 static void mm_br_zone_read(void)
 {
+    /* C-8: DESCARTADO. La instancia de DMZGameInfo no es alcanzable desde el
+       Gameplay (ni a 2 niveles) y el escaneo costaba caro. Se deja inerte. */
+    g_br_zone.ok = 0;
+    g_br_zone_info = nil;
+    return;
+    /* codigo viejo (no se ejecuta) */
     static double s_last = 0.0;
     double now = CACurrentMediaTime();
     if (s_last > 0.0 && now - s_last < 0.5) return;
@@ -5656,7 +5662,6 @@ static void mm_esp_collect_real(void)
         nb.alive = 1;
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
-        if (opts->skeleton) mm_skel_fill(&nb, view, proj, W, H);   /* C-5 */
 
         /* v0.2.4: estabilidad por pawn. La lista cambia de orden y las cajas
            saltaban; cada pawn conserva su caja y se interpola suavemente. */
@@ -6610,11 +6615,10 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
-    mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
-    mm_cloud_card_caption(c, @"FOV de camara (0 = off)", 130.0);
+    mm_cloud_card_caption(c, @"FOV de camara (0 = off)", 102.0);
     UISlider *cf = mm_cloud_slider(0.0f, 120.0f, g_cam_fov, @"mm_cam_fov",
                                    @selector(onCamFov:), iw);
-    cf.frame = CGRectMake(MM_CLOUD_CARD_INNER, 146.0, iw, 22.0);
+    cf.frame = CGRectMake(MM_CLOUD_CARD_INNER, 118.0, iw, 22.0);
     [c addSubview:cf];
     [page addSubview:c];
 }
