@@ -395,18 +395,23 @@ const char *modmenu_build_id = "modmenu-glass-0.8.1";
 static float g_aim_strength = 28.0f;
 static float g_aim_fov = 180.0f;
 static BOOL  g_aim_on = YES;
+static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
+static BOOL  g_aim_key_held = NO;
 static void mm_aim_apply(void)
 {
     const struct mach_header *h = _dyld_get_image_header(0);
     if (h == NULL) return;
-    /* strength en +0xDC639EC, FOV en +0xDC639F0 (slots del relay, ADR 0008/C-2) */
+    /* strength +0xDC639EC, FOV +0xDC639F0, aim-key gate +0xDC639F4 (ADR 0008) */
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_on ? g_aim_strength : 0.0f;
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639F0ULL) = g_aim_fov;
+    *(int   *)((uintptr_t)h + (uintptr_t)0x0DC639F4ULL) =
+        (g_aim_key_mode && !g_aim_key_held) ? 0 : 1;
 }
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
+static UIButton *g_aimkey_btn = nil; /* C-3: boton AIM (mantener) flotante    */
 @class MMBtnGlyph;                /* v0.5.0: emblema dibujado del boton       */
 static MMBtnGlyph *g_btn_glyph = nil;
 static UIView   *g_panel = nil;   /* panel desplegable                        */
@@ -2507,6 +2512,8 @@ static void mm_haptic(int style)
 - (void)onMaxN:(UISlider *)s;
 - (void)onAimStrength:(UISlider *)s;
 - (void)onAimFov:(UISlider *)s;
+- (void)onAimKeyDown:(UIButton *)b;
+- (void)onAimKeyUp:(UIButton *)b;
 - (void)onPanic:(UILongPressGestureRecognizer *)g;
 - (void)onProfileSlot:(UISegmentedControl *)s;
 - (void)onProfileSave;
@@ -2675,6 +2682,11 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
+    if ([k isEqualToString:@"mm_x_aim_key"]) {
+        g_aim_key_mode = s.on;
+        mm_aim_apply();
+        if (g_aimkey_btn != nil) g_aimkey_btn.hidden = !(g_aim_key_mode && g_aim_on);
+    }
     if ([k isEqualToString:@"mm_stream"]) {
         mm_apply_stream();
         /* Al activarlo desde VIS se cierra el panel para dejar limpia la
@@ -2951,6 +2963,21 @@ static void mm_haptic(int style)
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_fov"];
     mm_aim_apply();
     mm_write_status(@"fov aim");
+}
+
+/* Fase C-3: Aim Key (mantener el boton AIM para que asista). */
+- (void)onAimKeyDown:(UIButton *)b
+{
+    g_aim_key_held = YES;
+    mm_aim_apply();
+    b.backgroundColor = [UIColor colorWithRed:0.05 green:0.42 blue:0.22 alpha:0.95];
+}
+
+- (void)onAimKeyUp:(UIButton *)b
+{
+    g_aim_key_held = NO;
+    mm_aim_apply();
+    b.backgroundColor = [UIColor colorWithRed:0.02 green:0.08 blue:0.05 alpha:0.92];
 }
 
 /* v0.3.0: estilo de caja y tema de color del ESP. El lienzo lee la clave en
@@ -6405,6 +6432,9 @@ static void mm_cloud_build_info(UIView *page)
         forControlEvents:UIControlEventValueChanged];
     [b addSubview:lgs];
 
+    /* C-3: Aim Key (mantener el boton AIM flotante para que asista). */
+    mm_cloud_row(b, @"Aim Key (mantener)", @"mm_x_aim_key", NO, 186.0, NO);
+
     g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 162.0, 196.0, 22.0)];
     g_lic_label.numberOfLines = 2;
     g_lic_label.textColor = [UIColor colorWithWhite:0.66 alpha:1.0];
@@ -7599,6 +7629,29 @@ static BOOL mm_place_ui(void)
             bx = MAX(r + 4.0, MIN(g_root.bounds.size.width  - r - 4.0,  bx));
             by = MAX(r + 44.0, MIN(g_root.bounds.size.height - r - 60.0, by));
             g_btn.center = CGPointMake(bx, by);
+            /* C-3: boton AIM flotante (mantener = aim asiste en modo Aim Key) */
+            if (g_aimkey_btn == nil) {
+                g_aimkey_btn = [UIButton buttonWithType:UIButtonTypeCustom];
+                g_aimkey_btn.bounds = CGRectMake(0, 0, 46.0, 46.0);
+                g_aimkey_btn.layer.cornerRadius = 23.0;
+                g_aimkey_btn.layer.borderWidth = 1.0;
+                g_aimkey_btn.layer.borderColor =
+                    [mm_neon_green() colorWithAlphaComponent:0.5].CGColor;
+                g_aimkey_btn.backgroundColor =
+                    [UIColor colorWithRed:0.02 green:0.08 blue:0.05 alpha:0.92];
+                [g_aimkey_btn setTitle:@"AIM" forState:UIControlStateNormal];
+                g_aimkey_btn.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+                [g_aimkey_btn setTitleColor:mm_neon_green() forState:UIControlStateNormal];
+                [g_aimkey_btn addTarget:[MMTargets shared] action:@selector(onAimKeyDown:)
+                     forControlEvents:UIControlEventTouchDown];
+                [g_aimkey_btn addTarget:[MMTargets shared] action:@selector(onAimKeyUp:)
+                     forControlEvents:(UIControlEventTouchUpInside |
+                                     UIControlEventTouchUpOutside |
+                                     UIControlEventTouchCancel)];
+                [g_root addSubview:g_aimkey_btn];
+            }
+            g_aimkey_btn.center = CGPointMake(bx + 62.0, by);
+            g_aimkey_btn.hidden = !(g_aim_key_mode && g_aim_on);
             MM_LOG(@"%s boton+panel listos via=%s", MM_TAG, g_via);
         }
         mm_layout_quickbar();
@@ -7952,6 +8005,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     g_aim_fov = mm_def_float(@"mm_x_aim_fov", 180.0f);
     if (g_aim_fov < 5.0f || g_aim_fov > 180.0f) g_aim_fov = 180.0f;
     g_aim_on = mm_def_bool(@"mm_x_aim_on", YES);
+    g_aim_key_mode = mm_def_bool(@"mm_x_aim_key", NO);
     mm_aim_apply();
 
     /* v0.8.1 A.2/A.5: observers de captura y background. Se registran una
