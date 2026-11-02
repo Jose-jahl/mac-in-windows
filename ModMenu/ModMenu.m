@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.0"
+#define MODMENU_VERSION     "0.8.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,112 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.0";
+const char *modmenu_build_id = "modmenu-glass-0.8.1";
+
+/* =========================================================================
+   v0.8.1 — HARDENING (Fase A)
+   -------------------------------------------------------------------------
+   Bloque defensivo que no agrega features al usuario pero endurece el mod
+   contra: debugger attach casual, exposicion via screen record/stream,
+   screenshot del Control Center, y strings leakeadas por `strings` sobre
+   el .ipa (infra XOR para uso futuro).
+
+   NO cambia la arquitectura carrier (sigue siendo swap de MSDKPolicy),
+   NO agrega load commands, NO toca NSUserDefaults existentes.
+   ========================================================================= */
+
+/* A.1 — anti-debug. Direct syscall arm64 de ptrace(PT_DENY_ATTACH, 0, 0, 0)
+   sin pasar por libc; evita hooks sobre libSystem.ptrace que detectan la
+   llamada "clasica". syscall 26 = ptrace, flag 31 = PT_DENY_ATTACH. */
+static void mm_antidebug(void)
+{
+#if defined(__arm64__) || defined(__aarch64__)
+    __asm__ volatile(
+        "mov x0, #31\n"
+        "mov x1, #0\n"
+        "mov x2, #0\n"
+        "mov x3, #0\n"
+        "mov x16, #26\n"
+        "svc 0x80\n"
+        : : : "x0", "x1", "x2", "x3", "x16", "memory"
+    );
+#endif
+}
+
+/* A.2 — panic mode. El polling en mm_tick ya actualiza g_captured a 4 Hz;
+   aca registramos observer para reaccion inmediata (frame siguiente) al
+   evento de captura/stream, y ocultamos g_panel + g_btn mientras dure.
+   Al terminar la captura, restauramos el boton; el panel queda cerrado
+   (el usuario lo re-abre con el boton flotante, deliberado). */
+static BOOL g_hardening_hid_panel = NO;
+
+static void mm_apply_capture_hide(void)
+{
+    BOOL captured = NO;
+    if (@available(iOS 11.0, *)) {
+        captured = UIScreen.mainScreen.isCaptured;
+    }
+    if (captured) {
+        if (g_panel != nil && !g_panel.hidden) {
+            g_panel.hidden = YES;
+            g_hardening_hid_panel = YES;
+        }
+        if (g_btn != nil) g_btn.alpha = 0.0;
+    } else {
+        if (g_btn != nil) g_btn.alpha = 1.0;
+        g_hardening_hid_panel = NO;
+    }
+}
+
+/* A.5 — hide del panel cuando la app va a background (screenshot del
+   Control Center / App Switcher). Al volver, el panel queda cerrado:
+   el usuario lo abre a mano con el boton (consistente con panic mode). */
+static void mm_apply_background_hide(void)
+{
+    if (g_panel != nil && !g_panel.hidden) {
+        g_panel.hidden = YES;
+    }
+}
+
+static void mm_register_hardening_observers(void)
+{
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    NSOperationQueue *mq = [NSOperationQueue mainQueue];
+    if (@available(iOS 11.0, *)) {
+        [nc addObserverForName:UIScreenCapturedDidChangeNotification
+                        object:nil
+                         queue:mq
+                    usingBlock:^(NSNotification *n) { mm_apply_capture_hide(); }];
+    }
+    [nc addObserverForName:UIApplicationWillResignActiveNotification
+                    object:nil
+                     queue:mq
+                usingBlock:^(NSNotification *n) { mm_apply_background_hide(); }];
+    [nc addObserverForName:UIApplicationDidBecomeActiveNotification
+                    object:nil
+                     queue:mq
+                usingBlock:^(NSNotification *n) { mm_apply_capture_hide(); }];
+}
+
+/* A.3 — infra XOR para strings sensibles. NO se aplica a NSUserDefaults
+   keys existentes (romperia la persistencia del usuario); queda listo
+   para strings nuevos (ej. nombres de metodo IL2CPP cuando metamos Dobby).
+   Uso:
+     static const uint8_t K_HELLO[] = { 0x32, 0x3f, 0x36, 0x36, 0x35 }; // "hello"^0x5A
+     char buf[sizeof(K_HELLO)+1];
+     mm_xor_decrypt(0x5A, K_HELLO, sizeof(K_HELLO), buf);
+     // usar buf, luego memset_s(buf, sizeof(buf), 0, sizeof(buf)) si es sensible
+*/
+#define MM_XOR_DEFAULT_KEY 0x5A
+static inline void mm_xor_decrypt(uint8_t key, const uint8_t *src, size_t n, char *dst)
+{
+    for (size_t i = 0; i < n; i++) dst[i] = (char)(src[i] ^ key);
+    dst[n] = '\0';
+}
+
+/* =========================================================================
+   FIN v0.8.1 HARDENING
+   ========================================================================= */
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -7773,10 +7878,19 @@ static void mm_refresh_license_label(void)
 
 __attribute__((constructor)) static void modmenu_init(void)
 {
+    /* v0.8.1 A.1: anti-debug lo PRIMERO. Si llegaron a debuggear, al menos
+       que no puedan adjuntar debugger desde este punto en adelante. */
+    mm_antidebug();
+
     g_t0 = [NSDate date].timeIntervalSinceReferenceDate;
     mm_boot_check();      /* 1.11: crash counter ANTES de tocar la UI */
     mm_cfg_load();        /* 4.1: remote config firmado (opt-in por archivo) */
     mm_reset_options();   /* v0.2.7: opciones a fabrica en cada arranque */
+
+    /* v0.8.1 A.2/A.5: observers de captura y background. Se registran una
+       sola vez; la UI (g_panel/g_btn) puede no existir todavia, los
+       handlers son defensivos y checan nil. */
+    mm_register_hardening_observers();
     g_cb_mode = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_color_mode"];
     if (g_cb_mode != 1 && g_cb_mode != 3) g_cb_mode = 0;
     MM_LOG(@"%s dylib cargada v%s  path=%s  pid=%d (opciones reseteadas)",
