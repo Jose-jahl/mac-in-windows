@@ -640,6 +640,10 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 #ifndef OFF_PAWN_MESH
 #define OFF_PAWN_MESH 0x628ULL
 #endif
+/* C-7: Camera.set_fieldOfView (dump 1.0.57) */
+#ifndef VA_CAM_SETFOV
+#define VA_CAM_SETFOV 0x108BD9890ULL
+#endif
 /* 0.7: ventana contigua del pawn que cubre alive/transform/entity. Se lee de
    una sola pasada (con fallback a lecturas individuales si el rango falla). */
 #define MM_PAWN_BLOCK_BASE (OFF_PAWN_TRANSFORM & ~0xFFULL)
@@ -694,6 +698,9 @@ typedef void *(*MMFindFn)(void *transform, void *nsstring);
 typedef void  (*MMPosFn)(void *transform, float out[3]);
 static MMFindFn     g_fp_find  = NULL;
 static MMPosFn      g_fp_trpos = NULL;
+typedef void (*MMSetFovFn)(void *cam, float v);
+static MMSetFovFn   g_fp_cam_setfov = NULL;
+static float        g_cam_fov = 0.0f;   /* C-7: 0 = no tocar */
 /* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
    de la camara no se puede proyectar (no hay caja), pero SI esta en el mundo:
    el radar, el contador JUG/BOT y la flecha "detras de ti" salen de aca. */
@@ -2651,6 +2658,7 @@ static void mm_haptic(int style)
 - (void)onAimStrength:(UISlider *)s;
 - (void)onAimFov:(UISlider *)s;
 - (void)onAimSmooth:(UISlider *)s;
+- (void)onCamFov:(UISlider *)s;
 - (void)onAimKeyDown:(UIButton *)b;
 - (void)onAimKeyUp:(UIButton *)b;
 - (void)onPanic:(UILongPressGestureRecognizer *)g;
@@ -3110,6 +3118,15 @@ static void mm_haptic(int style)
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_smooth"];
     mm_aim_apply();
     mm_write_status(@"suavizado aim");
+}
+
+/* Fase C-7: FOV de camara (0 = no tocar; se reaplica a ~4 Hz). */
+- (void)onCamFov:(UISlider *)s
+{
+    g_cam_fov = s.value;
+    [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_cam_fov"];
+    if (g_cam_fov < 0.5f) g_cam_fov = 0.0f;
+    mm_write_status(@"fov camara");
 }
 
 /* Fase C-3: Aim Key (mantener el boton AIM para que asista). */
@@ -3835,6 +3852,15 @@ static unsigned long long mm_frame_digest(void)
 
 static void mm_esp_frame(double t)
 {
+    /* C-7: FOV de camara. Se reaplica a ~4 Hz para ganarle al ADS del juego. */
+    if (g_cam_fov > 0.5f && g_fp_cam_setfov != NULL && g_fp_maincam != NULL) {
+        static double s_fov = 0.0;
+        if (t - s_fov > 0.25) {
+            s_fov = t;
+            void *cam = g_fp_maincam();
+            if (cam != NULL) g_fp_cam_setfov(cam, g_cam_fov);
+        }
+    }
     @try {
         if (g_esp == nil) return;
         /* v0.4.3 (0.1): version gate - no leer offsets de 1.0.57 contra otra version del juego. */
@@ -5129,6 +5155,7 @@ static void mm_game_resolve(void)
             MMGetIntFn fp6 = (MMGetIntFn)(b + MM_GAME_DELTA(VA_HEALTH));
             MMFindFn   fp7 = (MMFindFn)(b + MM_GAME_DELTA(VA_TRFIND));   /* C-5 */
             MMPosFn    fp8 = (MMPosFn)(b + MM_GAME_DELTA(VA_TRPOS));    /* C-5 */
+            MMSetFovFn fp9 = (MMSetFovFn)(b + MM_GAME_DELTA(VA_CAM_SETFOV)); /* C-7 */
 
             if (!mm_ptr_en_imagen((const void *)fp0, b) ||
                 !mm_ptr_en_imagen((const void *)fp1, b) ||
@@ -5153,6 +5180,7 @@ static void mm_game_resolve(void)
             g_fp_health_f  = hpOk ? (MMGetFltFn)fp6 : NULL;   /* v0.2.6 */
             g_fp_find      = mm_ptr_en_imagen((const void *)fp7, b) ? fp7 : NULL;
             g_fp_trpos     = mm_ptr_en_imagen((const void *)fp8, b) ? fp8 : NULL;
+            g_fp_cam_setfov = mm_ptr_en_imagen((const void *)fp9, b) ? fp9 : NULL;
             g_fp_state     = 1;
             MM_LOG(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
                   MM_TAG, (unsigned long)b, k,
@@ -6581,6 +6609,11 @@ static void mm_cloud_build_visual(UIView *page)
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
     mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
+    mm_cloud_card_caption(c, @"FOV de camara (0 = off)", 130.0);
+    UISlider *cf = mm_cloud_slider(0.0f, 120.0f, g_cam_fov, @"mm_cam_fov",
+                                   @selector(onCamFov:), iw);
+    cf.frame = CGRectMake(MM_CLOUD_CARD_INNER, 146.0, iw, 22.0);
+    [c addSubview:cf];
     [page addSubview:c];
 }
 
@@ -8311,6 +8344,8 @@ __attribute__((constructor)) static void modmenu_init(void)
     if (g_aim_fov < 5.0f || g_aim_fov > 180.0f) g_aim_fov = 180.0f;
     g_aim_smooth = mm_def_float(@"mm_x_aim_smooth", 0.0f);
     if (g_aim_smooth < 0.0f || g_aim_smooth > 1.0f) g_aim_smooth = 0.0f;
+    g_cam_fov = mm_def_float(@"mm_cam_fov", 0.0f);
+    if (g_cam_fov < 0.5f || g_cam_fov > 120.0f) g_cam_fov = 0.0f;
     g_aim_on = mm_def_bool(@"mm_x_aim_on", YES);
     g_aim_key_mode = mm_def_bool(@"mm_x_aim_key", NO);
     {   /* C-4: el relay lleva el estado del suavizado en +0xF8; arranca en 0. */
