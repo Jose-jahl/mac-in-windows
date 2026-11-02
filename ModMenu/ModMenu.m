@@ -879,7 +879,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->telem     = mm_def_bool(@"mm_x_telem", NO);
     o->bearings  = mm_def_bool(@"mm_x_bearings", NO);
     o->trails    = mm_def_bool(@"mm_x_trails", NO);
-    o->declutter = mm_def_bool(@"mm_x_declutter", NO);
+    o->declutter = YES;   /* feature fija: anti-solape siempre on, sin UI */
     o->radarCam  = mm_def_bool(@"mm_x_radar_cam", YES);
     o->targetList= mm_def_bool(@"mm_x_targetlist", NO);
     o->players   = mm_def_bool(@"mm_esp_players", NO);
@@ -2422,7 +2422,7 @@ static NSString *mm_tr(NSString *es)
         @"ON  -  tocar = escribir TXT": @"ON  -  tap = write TXT",
         @"OFF  -  tocar = activar": @"OFF  -  tap = enable",
         @"Guardar en P": @"Save to P",
-        @"Aimbot no toggleable para mayor seguridad.\n\n":
+        @"Aimbot configurable desde COMBATE.\n\n":
             @"Aimbot is not toggleable, for safety.\n\n",
         @"Activar todas las opciones no da problemas de seguridad;\nel costo es rendimiento (FPS) en el dispositivo.\n\n":
             @"Enabling every option is not a security problem;\nthe cost is device performance (FPS).\n\n",
@@ -2631,8 +2631,7 @@ static void mm_haptic(int style)
     if (g_p_esp   != nil) g_p_esp.hidden   = (i != 0);
     if (g_p_vis   != nil) g_p_vis.hidden   = (i != 1);
     if (g_p_misc  != nil) g_p_misc.hidden  = (i != 2);
-    if (g_p_more  != nil) g_p_more.hidden  = (i != 3);
-    if (g_p_info  != nil) g_p_info.hidden  = (i != 4);
+    if (g_p_info  != nil) g_p_info.hidden  = (i != 3);
     /* v0.8.0: el selector real es horizontal; g_seg queda solo como estado
        para conservar los gestos y la persistencia existente. */
     for (NSUInteger n = 0; n < g_nav_btns.count; n++) {
@@ -6147,8 +6146,6 @@ static void mm_cloud_build_combat(UIView *page)
     ms.frame = CGRectMake(MM_CLOUD_CARD_INNER, 104.0, iw, 24.0);
     [c addSubview:ms];
 
-    mm_cloud_row(c, @"Lista de objetivos", @"mm_x_targetlist", NO, 140.0, NO);
-    mm_cloud_row(c, @"Prioridad cercano", @"mm_x_priority", NO, 168.0, NO);
     [page addSubview:c];
 }
 
@@ -6177,49 +6174,57 @@ static void mm_cloud_build_visual(UIView *page)
         forControlEvents:UIControlEventValueChanged];
     [a addSubview:ts];
 
-    mm_cloud_row(a, @"Color por distancia", @"mm_x_distcol", NO, 146.0, YES);
-    mm_cloud_row(a, @"Resaltar vida baja", @"mm_x_lowhp", NO, 174.0, YES);
+    /* Unica gestion de perfiles: tema + configuracion en 5 slots. */
+    mm_cloud_card_caption(a, @"Perfiles (tema + config)", 138.0);
+    g_profile_seg = mm_cloud_seg(@[ @"P1", @"P2", @"P3", @"P4", @"P5" ], iw);
+    g_profile_seg.frame = CGRectMake(MM_CLOUD_CARD_INNER, 152.0, iw, 26.0);
+    g_profile_seg.selectedSegmentIndex = g_profile_slot;
+    [g_profile_seg addTarget:[MMTargets shared] action:@selector(onProfileSlot:)
+            forControlEvents:UIControlEventValueChanged];
+    [a addSubview:g_profile_seg];
+    CGFloat halfW = (iw - 8.0) / 2.0;
+    UIButton *psv = mm_cloud_action(@"Guardar",
+        [UIColor colorWithRed:0.08 green:0.38 blue:0.20 alpha:0.96], halfW, 28.0);
+    psv.frame = CGRectMake(MM_CLOUD_CARD_INNER, 182.0, halfW, 28.0);
+    [psv addTarget:[MMTargets shared] action:@selector(onProfileSave)
+        forControlEvents:UIControlEventTouchUpInside];
+    [a addSubview:psv];
+    UIButton *pld = mm_cloud_action(@"Cargar",
+        [UIColor colorWithRed:0.08 green:0.24 blue:0.42 alpha:0.96], halfW, 28.0);
+    pld.frame = CGRectMake(MM_CLOUD_CARD_INNER + halfW + 8.0, 182.0, halfW, 28.0);
+    [pld addTarget:[MMTargets shared] action:@selector(onProfileLoad)
+        forControlEvents:UIControlEventTouchUpInside];
+    [a addSubview:pld];
+
     [page addSubview:a];
 
     UIView *b = mm_cloud_card(@"MIRA", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(b, @"Crosshair (mira)", @"mm_x_cross", NO, 38.0, YES);
     mm_cloud_row(b, @"Anillo de aim", @"mm_x_aimring", NO, 66.0, YES);
-    mm_cloud_row(b, @"Punto en la cabeza", @"mm_x_head", NO, 94.0, YES);
-    mm_cloud_card_caption(b, @"Estilo de crosshair", 128.0);
+    mm_cloud_card_caption(b, @"Estilo de crosshair", 100.0);
     int cstyle = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
     if (cstyle < 0 || cstyle > 3) cstyle = 0;
     UISegmentedControl *cs = mm_cloud_seg(@[ mm_tr(@"Cruz"), mm_tr(@"Punto"),
                                               mm_tr(@"Circulo"), mm_tr(@"Todo") ], iw);
-    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 144.0, iw, 28.0);
+    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 116.0, iw, 28.0);
     cs.selectedSegmentIndex = cstyle;
     [cs addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
         forControlEvents:UIControlEventValueChanged];
     [b addSubview:cs];
 
     /* Fase C-2: FOV del aim (grados). Fuera del cono, el aim no asiste. */
-    mm_cloud_card_caption(b, @"FOV de aim", 174.0);
+    mm_cloud_card_caption(b, @"FOV de aim", 152.0);
     UISlider *af = mm_cloud_slider(5.0f, 180.0f, g_aim_fov, @"mm_x_aim_fov",
                                    @selector(onAimFov:), iw);
-    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 188.0, iw, 24.0);
+    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 166.0, iw, 24.0);
     [b addSubview:af];
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"MUNDO", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
-    mm_cloud_row(c, @"Anti-solape", @"mm_x_declutter", NO, 66.0, YES);
-    mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 94.0, YES);
-    mm_cloud_row(c, @"Indicador de altura", @"mm_x_height", NO, 122.0, YES);
-    mm_cloud_card_caption(c, @"Paleta daltonismo", 156.0);
-    int cbm = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_color_mode"];
-    int cbi = (cbm == 1) ? 1 : ((cbm == 3) ? 2 : 0);
-    UISegmentedControl *cb = mm_cloud_seg(@[ mm_tr(@"Normal"), @"Deuter", @"Tritan" ], iw);
-    cb.frame = CGRectMake(MM_CLOUD_CARD_INNER, 172.0, iw, 26.0);
-    cb.selectedSegmentIndex = cbi;
-    [cb addTarget:[MMTargets shared] action:@selector(onColorMode:)
-        forControlEvents:UIControlEventValueChanged];
-    [c addSubview:cb];
+    mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
     [page addSubview:c];
 }
 
@@ -6242,10 +6247,9 @@ static void mm_cloud_build_radar(UIView *page)
     UIView *b = mm_cloud_card(@"HUD", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(b, @"Contador JUG / BOT", @"mm_esp_count", NO, 38.0, NO);
-    mm_cloud_row(b, @"Barra rapida", @"mm_quickbar", NO, 66.0, NO);
-    mm_cloud_row(b, @"Vibracion al tocar", @"mm_haptics", YES, 94.0, NO);
-    mm_cloud_row(b, @"Guard de captura", @"mm_guard_capture", NO, 122.0, NO);
-    mm_cloud_row(b, @"Stream Mode", @"mm_stream", NO, 150.0, NO);
+    mm_cloud_row(b, @"Vibracion al tocar", @"mm_haptics", YES, 66.0, NO);
+    mm_cloud_row(b, @"Guard de captura", @"mm_guard_capture", NO, 94.0, NO);
+    mm_cloud_row(b, @"Stream Mode", @"mm_stream", NO, 122.0, NO);
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"PANTALLA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -6760,7 +6764,7 @@ static void mm_build_ui(void)
     UILabel *h = mm_cloud_label(@"FUSION", 19.0, UIFontWeightHeavy, [UIColor whiteColor]);
     h.frame = CGRectMake(64.0, 9.0, 210.0, 24.0);
     [g_panel addSubview:h];
-    UILabel *sub = mm_cloud_label([NSString stringWithFormat:@"CLOUD CONTROL  ·  v%s", MODMENU_VERSION],
+    UILabel *sub = mm_cloud_label([NSString stringWithFormat:@"FUSION  ·  v%s", MODMENU_VERSION],
                                   8.0, UIFontWeightSemibold,
                                   [UIColor colorWithWhite:0.52 alpha:1.0]);
     sub.frame = CGRectMake(65.0, 34.0, 210.0, 13.0);
@@ -6811,8 +6815,8 @@ static void mm_build_ui(void)
 
     /* Navegacion horizontal real. g_seg queda oculto solo como estado para
        conservar el swipe y los metodos que ya existian. */
-    NSArray *navTitles = @[ @"COMBATE", @"VISUAL", @"RADAR", @"PERFIL", @"INFO" ];
-    CGFloat navW = (MM_PANEL_W - 36.0 - 32.0) / 5.0;
+    NSArray *navTitles = @[ @"COMBATE", @"VISUAL", @"RADAR", @"INFO" ];
+    CGFloat navW = (MM_PANEL_W - 36.0 - 32.0) / 4.0;
     g_nav_btns = [NSMutableArray array];
     for (NSUInteger i = 0; i < navTitles.count; i++) {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -6846,26 +6850,22 @@ static void mm_build_ui(void)
     g_p_esp  = [[UIView alloc] initWithFrame:body];
     g_p_vis  = [[UIView alloc] initWithFrame:body];
     g_p_misc = [[UIView alloc] initWithFrame:body];
-    g_p_more = [[UIView alloc] initWithFrame:body];
     g_p_info = [[UIView alloc] initWithFrame:body];
     g_p_vis.hidden = YES;
     g_p_misc.hidden = YES;
-    g_p_more.hidden = YES;
     g_p_info.hidden = YES;
     [g_panel addSubview:g_p_esp];
     [g_panel addSubview:g_p_vis];
     [g_panel addSubview:g_p_misc];
-    [g_panel addSubview:g_p_more];
     [g_panel addSubview:g_p_info];
 
     g_sub_switches = [NSMutableArray array];
     mm_cloud_build_combat(g_p_esp);
     mm_cloud_build_visual(g_p_vis);
     mm_cloud_build_radar(g_p_misc);
-    mm_cloud_build_profiles(g_p_more);
     mm_cloud_build_info(g_p_info);
 
-    UILabel *foot = mm_cloud_label(@"FUSION CLOUD  ·  STATIC AIM  ·  NOJB",
+    UILabel *foot = mm_cloud_label(@"FUSION  ·  STEALTH  ·  AIM",
                                    7.4, UIFontWeightSemibold,
                                    [UIColor colorWithWhite:0.34 alpha:1.0]);
     foot.frame = CGRectMake(18.0, 342.0, 300.0, 10.0);
@@ -7374,59 +7374,8 @@ static void mm_refresh_info(void)
                 attributes:@{ NSFontAttributeName: verFont,
                               NSForegroundColorAttributeName:
                                   [mm_neon_purple() colorWithAlphaComponent:0.95] }]];
-        /* v0.7.0 (4.6): chips de self-check por capa. */
-        {
-            NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
-            int sOff = ([gv isEqualToString:@FUSION_OFFSETS_VERSION] &&
-                        VA_GAMEPLAY != 0 && VA_LOCALPAWN != 0 && VA_MAINCAM != 0) ? 1 : -1;
-            int sEsp = (g_fp_state == 1) ? 1 : ((g_fp_state == 0) ? -1 : 0);
-            int sNojb = (g_nojb_passes > 0) ? 1 : 0;
-            int sLic = mm_lic_is_valid() ? 1 : 0;
-            UIColor *cg = [UIColor colorWithRed:0.20 green:1.00 blue:0.58 alpha:1.0];
-            UIColor *ca = [UIColor colorWithRed:1.00 green:0.72 blue:0.20 alpha:1.0];
-            UIColor *cr = [UIColor colorWithRed:1.00 green:0.35 blue:0.35 alpha:1.0];
-            UIFont *cf = [UIFont boldSystemFontOfSize:10.0];
-#define MM_CHIP(nm, st) do { \
-    UIColor *_c = ((st) == 1) ? cg : (((st) == 0) ? ca : cr); \
-    [t appendAttributedString:[[NSAttributedString alloc] \
-        initWithString:[NSString stringWithFormat:@"● %@  ", (nm)] \
-            attributes:@{ NSFontAttributeName: cf, NSForegroundColorAttributeName: _c }]]; \
-} while (0)
-            MM_CHIP(@"offsets", sOff);
-            MM_CHIP(@"ESP", sEsp);
-            MM_CHIP(@"NoJB", sNojb);
-            MM_CHIP(@"lic", sLic);
-#undef MM_CHIP
-            [t appendAttributedString:[[NSAttributedString alloc]
-                initWithString:[NSString stringWithFormat:@"\npack %s · %s\n",
-                                FUSION_PACK_VERSION, FUSION_EXPERIMENT_ID]
-                    attributes:@{ NSFontAttributeName: verFont,
-                                  NSForegroundColorAttributeName:
-                                      [UIColor colorWithWhite:0.62 alpha:1.0] }]];
-            if (mm_def_bool(@"mm_build_mark", NO)) {
-                [t appendAttributedString:[[NSAttributedString alloc]
-                    initWithString:[NSString stringWithFormat:@"marca %@\n", mm_build_mark()]
-                        attributes:@{ NSFontAttributeName: verFont,
-                                      NSForegroundColorAttributeName:
-                                          [UIColor colorWithWhite:0.62 alpha:1.0] }]];
-            }
-            if (strcmp(FUSION_LATEST_PACK, FUSION_PACK_VERSION) != 0) {
-                [t appendAttributedString:[[NSAttributedString alloc]
-                    initWithString:[NSString stringWithFormat:@"ACTUALIZACION: pack %s disponible\n",
-                                    FUSION_LATEST_PACK]
-                        attributes:@{ NSFontAttributeName: cf,
-                                      NSForegroundColorAttributeName: ca }]];
-            }
-            if (g_cfg_latest.length && ![g_cfg_latest isEqualToString:@FUSION_PACK_VERSION]) {
-                [t appendAttributedString:[[NSAttributedString alloc]
-                    initWithString:[NSString stringWithFormat:@"CONFIG: pack %@ disponible\n", g_cfg_latest]
-                        attributes:@{ NSFontAttributeName: cf,
-                                      NSForegroundColorAttributeName: ca }]];
-            }
-            [t appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
-        }
         [t appendAttributedString:[[NSAttributedString alloc]
-            initWithString:mm_tr(@"Aimbot no toggleable para mayor seguridad.\n\n")
+            initWithString:mm_tr(@"Aimbot configurable desde COMBATE.\n\n")
                 attributes:@{ NSFontAttributeName: itemFont,
                               NSForegroundColorAttributeName:
                                   [UIColor colorWithWhite:0.95 alpha:1.0],
