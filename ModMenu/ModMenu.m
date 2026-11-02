@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.13"
+#define MODMENU_VERSION     "0.7.14"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -374,7 +374,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.13";
+const char *modmenu_build_id = "modmenu-glass-0.7.14";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -2152,6 +2152,61 @@ static int mm_declutter_budget(void)
                 mm_draw_edge_arrow(ctx, bs, (CGFloat)tk->sx, (CGFloat)tk->sy,
                                    acr, acg, acb);
             }
+        }
+    }
+
+    /* v0.7.14 (B1): predictor de trayectoria de granada. Simula fisica real
+       desde la posicion del jugador local, en direccion del look-vector de
+       la camara, con velocidad inicial de 18 m/s y gravedad 9.8 m/s2.
+       Proyecta cada paso via mm_w2s y dibuja curva ambar. Pure overlay,
+       cero reads adicionales al juego. */
+    if (mm_def_bool(@"mm_x_nade_pred", NO) && g_have_local && g_have_view) {
+        float fx = -g_view_mtx[2];
+        float fy = -g_view_mtx[6];
+        float fz = -g_view_mtx[10];
+        float fh = sqrtf(fx * fx + fz * fz);
+        if (fh > 0.001f) {
+            /* normalizo plano XZ (solo direccion horizontal del look) */
+            float nfx = fx / fh, nfz = fz / fh;
+            /* componente de altura: look-vertical mapeado a lanzamiento con
+               slight-up (fy del look + bias de 0.35 para arco util). */
+            float vy_dir = fy + 0.35f;
+            float v0 = 18.0f;           /* velocidad inicial m/s */
+            float gravity = -9.8f;      /* m/s2 */
+            float dt = 0.08f;           /* 80 ms por sample => 25 muestras ~ 2 s */
+            CGContextSaveGState(ctx);
+            CGContextSetLineWidth(ctx, 2.4);
+            CGContextSetLineCap(ctx, kCGLineCapRound);
+            CGContextSetRGBStrokeColor(ctx, 1.0, 0.75, 0.12, 0.92);
+            CGContextSetShadowWithColor(ctx, CGSizeZero, 3.5,
+                [UIColor colorWithRed:1.0 green:0.65 blue:0.0 alpha:0.80].CGColor);
+            CGContextBeginPath(ctx);
+            BOOL started = NO;
+            float startY = g_local_pos[1] + 1.5f;    /* altura de pecho */
+            for (int i = 0; i < 30; i++) {
+                float t = (float)i * dt;
+                float wx = g_local_pos[0] + nfx * v0 * t;
+                float wz = g_local_pos[2] + nfz * v0 * t;
+                float wy = startY + vy_dir * v0 * t + 0.5f * gravity * t * t;
+                float wp[3] = { wx, wy, wz };
+                CGPoint sp; int det = 0; float cxTmp = 0.0f, cyTmp = 0.0f;
+                if (mm_w2s(g_view_mtx, g_proj_mtx, wp, NO,
+                           bs.size.width, bs.size.height, &sp, &det, &cxTmp, &cyTmp)) {
+                    if (!started) {
+                        CGContextMoveToPoint(ctx, sp.x, sp.y);
+                        started = YES;
+                    } else {
+                        CGContextAddLineToPoint(ctx, sp.x, sp.y);
+                    }
+                }
+                /* corta si bajamos mas de 10 m del punto de salida (toco el piso) */
+                if (wy < g_local_pos[1] - 10.0f) break;
+            }
+            if (started) {
+                CGContextStrokePath(ctx);
+                /* ultima muestra: marker rojo (punto de impacto estimado) */
+            }
+            CGContextRestoreGState(ctx);
         }
     }
 
@@ -6272,58 +6327,27 @@ static void mm_build_ui(void)
        vivos para el swipe de 2 dedos y la deserializacion del slot default,
        pero sin UI el usuario no ve los 5 slots ni los 4 preset buttons). */
 
-    /* v0.4.3 (0.8): debug — prende el status file (modmenu_status.txt) para diagnosticar.
-       Default OFF: sin esto no se escribe evidencia forense. */
-    /* v0.6.1: boton de fila completa en lugar del UISwitch. El switch chico
-       junto al borde no recibia el toque en algunos equipos; este boton
-       comparte pagina con Guardar/Cargar, que si responden. */
-    g_dbgbtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    g_dbgbtn.frame = CGRectMake(6.0, 78.0, 272.0, 34.0);
-    g_dbgbtn.layer.cornerRadius = 8.0;
-    g_dbgbtn.layer.borderWidth = 1.0;
-    g_dbgbtn.layer.borderColor =
-        [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:0.55].CGColor;
-    g_dbgbtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
-    [g_dbgbtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [g_dbgbtn addTarget:[MMTargets shared] action:@selector(onDebugToggle:)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:g_dbgbtn];
-    mm_refresh_debug_button();
-
-    /* v0.6.1: volcado manual del status, sin depender de ningun toggle. */
-    UIButton *stb = [UIButton buttonWithType:UIButtonTypeCustom];
-    stb.frame = CGRectMake(6.0, 116.0, 272.0, 34.0);
-    stb.backgroundColor = [UIColor colorWithRed:0.10 green:0.30 blue:0.52 alpha:0.95];
-    stb.layer.cornerRadius = 8.0;
-    stb.layer.borderWidth = 1.0;
-    stb.layer.borderColor =
-        [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:0.55].CGColor;
-    [stb setTitle:mm_tr(@"Escribir status TXT ahora") forState:UIControlStateNormal];
-    [stb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    stb.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
-    [stb addTarget:[MMTargets shared] action:@selector(onStatusNow:)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:stb];
-
-    /* v0.7.12: modo seguro, barra rapida y guard captura removidos del panel. */
+    /* v0.7.14: panel cliente final. Removidos los botones de desarrollo
+       (Debug status file, Escribir TXT, Auto-test del overlay). Lo que
+       queda es solo lo que el usuario final usa. */
 
     UIView *hpr = mm_switch_row(@"Vibracion al tocar", @"mm_haptics", YES);
-    hpr.frame = CGRectMake(0, 154.0, 284.0, 34.0);
+    hpr.frame = CGRectMake(0, 78.0, 284.0, 34.0);
     [g_p_misc addSubview:hpr];
 
     /* v0.7.0 (1.13): stream automatico. */
     UIView *asr = mm_switch_row(@"Stream auto al grabar", @"mm_auto_stream", YES);
-    asr.frame = CGRectMake(0, 188.0, 284.0, 34.0);
+    asr.frame = CGRectMake(0, 116.0, 284.0, 34.0);
     [g_p_misc addSubview:asr];
 
-    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 226.0, 272.0, 16.0)];
+    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 154.0, 272.0, 16.0)];
     lgl.text = mm_tr(@"Idioma (reiniciar)");
     lgl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
     lgl.font = [UIFont systemFontOfSize:11.0];
     [g_p_misc addSubview:lgl];
 
     UISegmentedControl *lgs = [[UISegmentedControl alloc] initWithItems:@[@"ES", @"EN"]];
-    lgs.frame = CGRectMake(6.0, 244.0, 272.0, 28.0);
+    lgs.frame = CGRectMake(6.0, 172.0, 272.0, 28.0);
     lgs.selectedSegmentIndex = (mm_lang() == 1) ? 1 : 0;
     if ([lgs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
         lgs.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
@@ -6338,28 +6362,14 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_misc addSubview:lgs];
 
-    UIButton *stf = [UIButton buttonWithType:UIButtonTypeCustom];
-    stf.frame = CGRectMake(6.0, 282.0, 272.0, 34.0);
-    stf.backgroundColor = [UIColor colorWithRed:0.12 green:0.34 blue:0.30 alpha:0.95];
-    stf.layer.cornerRadius = 8.0;
-    stf.layer.borderWidth = 1.0;
-    stf.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.55].CGColor;
-    [stf setTitle:mm_tr(@"Auto-test del overlay") forState:UIControlStateNormal];
-    [stf setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    stf.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
-    [stf addTarget:[MMTargets shared] action:@selector(onSelfTest:)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:stf];
-
     /* v0.7.0 (4.2): licencia in-menu sin red. */
-    UILabel *licl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 324.0, 272.0, 16.0)];
-    licl.text = mm_tr(@"Licencia (observacion)");
+    UILabel *licl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 212.0, 272.0, 16.0)];
+    licl.text = mm_tr(@"Licencia");
     licl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
     licl.font = [UIFont boldSystemFontOfSize:12.0];
     [g_p_misc addSubview:licl];
 
-    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 342.0, 272.0, 30.0)];
+    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 230.0, 272.0, 30.0)];
     g_lic_label.numberOfLines = 2;
     g_lic_label.textColor = [UIColor colorWithWhite:0.86 alpha:1.0];
     g_lic_label.font = [UIFont fontWithName:@"Menlo" size:9.0] ?:
@@ -6368,7 +6378,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:g_lic_label];
 
     UIButton *licp = [UIButton buttonWithType:UIButtonTypeCustom];
-    licp.frame = CGRectMake(6.0, 376.0, 132.0, 30.0);
+    licp.frame = CGRectMake(6.0, 264.0, 132.0, 30.0);
     licp.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
     licp.layer.cornerRadius = 7.0;
     [licp setTitle:mm_tr(@"Pegar token") forState:UIControlStateNormal];
@@ -6379,7 +6389,7 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:licp];
 
     UIButton *licr = [UIButton buttonWithType:UIButtonTypeCustom];
-    licr.frame = CGRectMake(146.0, 376.0, 132.0, 30.0);
+    licr.frame = CGRectMake(146.0, 264.0, 132.0, 30.0);
     licr.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
     licr.layer.cornerRadius = 7.0;
     [licr setTitle:mm_tr(@"Revalidar") forState:UIControlStateNormal];
@@ -6390,22 +6400,9 @@ static void mm_build_ui(void)
     [g_p_misc addSubview:licr];
 
     /* v0.7.12: telemetria local y marca HWID removidas del panel. */
+    /* v0.7.14: Copiar self-test removido (era boton de soporte DEV). */
 
-    UIButton *cst = [UIButton buttonWithType:UIButtonTypeCustom];
-    cst.frame = CGRectMake(6.0, 412.0, 272.0, 34.0);
-    cst.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    cst.layer.cornerRadius = 8.0;
-    cst.layer.borderWidth = 0.7;
-    cst.layer.borderColor =
-        [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
-    [cst setTitle:mm_tr(@"Copiar self-test") forState:UIControlStateNormal];
-    [cst setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    cst.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    [cst addTarget:[MMTargets shared] action:@selector(onSelfTestCopy)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:cst];
-
-    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 460.0);
+    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 310.0);
 
     /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
     UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
@@ -6415,19 +6412,21 @@ static void mm_build_ui(void)
     [g_p_more addSubview:xh];
 
     /* v0.7.12: removidos mm_x_distcol, mm_x_lowhp, mm_x_fps, mm_x_height,
-       mm_x_telem y mm_x_targetlist (sus defaults quedan en NO al no haber
-       UI; los backends siguen vivos pero inactivos). */
+       mm_x_telem y mm_x_targetlist.
+       v0.7.14: agregado mm_x_nade_pred (predictor de trayectoria de granada). */
     NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
                         @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
                         @"mm_x_radar",
                         @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
-                        @"mm_x_radar_cam" ];
+                        @"mm_x_radar_cam",
+                        @"mm_x_nade_pred" ];
     NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
                         @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
                         @"Flecha fuera de pantalla (detras)",
                         @"Radar 2D",
                         @"Brujula de bearings", @"Estelas (ultimos 2 s)",
-                        @"Anti-solape de etiquetas", @"Radar: arriba = mi vista" ];
+                        @"Anti-solape de etiquetas", @"Radar: arriba = mi vista",
+                        @"Predictor de granadas" ];
     for (NSUInteger i = 0; i < xkeys.count; i++) {
         BOOL xdef = [xkeys[i] isEqualToString:@"mm_x_radar_cam"];   /* default ON */
         UIView *xrow = mm_switch_row(xtit[i], xkeys[i], xdef);
@@ -6589,25 +6588,8 @@ static void mm_build_ui(void)
         forControlEvents:UIControlEventValueChanged];
     [g_p_more addSubview:ssl]; ry += 36.0;
 
-    /* Tier-2 (gated): presentes pero NO activables hasta dumpear offsets. Honesto:
-       no invento offsets. Aparecen atenuadas con nota. */
-    UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    t2.text = @"TIER 2 — requiere offsets (proxima)";
-    t2.textColor = [UIColor colorWithWhite:0.55 alpha:1.0];
-    t2.font = [UIFont boldSystemFontOfSize:10.0];
-    [g_p_more addSubview:t2]; ry += 20.0;
-    NSArray *t2tit = @[ @"ESP de esqueleto",
-                        @"ESP de granadas", @"ESP de loot / vehiculos",
-                        @"Prediccion de proxima zona (BR)" ];
-    for (NSUInteger i = 0; i < t2tit.count; i++) {
-        UISwitch *t2sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-        t2sw.on = NO; t2sw.enabled = NO;    /* gated */
-        t2sw.transform = CGAffineTransformMakeScale(0.9, 0.9);
-        UIView *t2row = mm_row(t2tit[i], t2sw);
-        t2row.frame = CGRectMake(0, ry, 284.0, 31.0);
-        t2row.alpha = 0.5;
-        [g_p_more addSubview:t2row]; ry += 31.0;
-    }
+    /* v0.7.14: Tier-2 gated removido completo (ESP esqueleto, granadas, loot,
+       prediccion de zona BR). No se van a implementar. Panel limpio. */
 
     ((UIScrollView *)g_p_more).contentSize = CGSizeMake(284.0, ry + 8.0);
 
