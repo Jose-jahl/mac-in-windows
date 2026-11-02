@@ -386,6 +386,20 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
    binario (el constructor es static y no sirve como prueba de presencia). */
 const char *modmenu_build_id = "modmenu-glass-0.8.1";
 
+/* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
+   El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
+     adrp x8,#0x10dc63000 ; ldr s0,[x8,#0x9ec] ; ret
+   es decir, GetAssitAimSpeed devuelve el float que vive en cod_base+0xDC639EC.
+   Aca escribimos ese float (fuerza de aim, 0..28). Si la dylib no lo escribio
+   todavia, el slot vale 0 -> aim apagado (fail-safe, nunca maximo). */
+static float g_aim_strength = 28.0f;
+static void mm_aim_apply(void)
+{
+    const struct mach_header *h = _dyld_get_image_header(0);
+    if (h == NULL) return;
+    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_strength;
+}
+
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
@@ -2484,6 +2498,7 @@ static void mm_haptic(int style)
 - (void)onMenuScale:(UISlider *)s;
 - (void)onCrossStyle:(UISegmentedControl *)s;
 - (void)onMaxN:(UISlider *)s;
+- (void)onAimStrength:(UISlider *)s;
 - (void)onPanic:(UILongPressGestureRecognizer *)g;
 - (void)onProfileSlot:(UISegmentedControl *)s;
 - (void)onProfileSave;
@@ -2909,6 +2924,15 @@ static void mm_haptic(int style)
     if (g_range_val != nil)
         g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(s.value + 0.5f)];
     mm_write_status(@"ajuste");
+}
+
+/* Fase C: fuerza de aim (relay en cod.__DATA). Persiste y escribe el slot. */
+- (void)onAimStrength:(UISlider *)s
+{
+    g_aim_strength = s.value;
+    [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_strength"];
+    mm_aim_apply();
+    mm_write_status(@"fuerza aim");
 }
 
 /* v0.3.0: estilo de caja y tema de color del ESP. El lienzo lee la clave en
@@ -6031,11 +6055,13 @@ static void mm_cloud_build_combat(UIView *page)
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
-    UILabel *note = mm_cloud_caption(@"El aim es fijo y seguro en esta build.", iw);
-    note.frame = CGRectMake(MM_CLOUD_CARD_INNER, 164.0, iw, 28.0);
-    note.numberOfLines = 2;
-    note.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
+    UILabel *note = mm_cloud_caption(@"Fuerza de aim", 164.0);
+    note.frame = CGRectMake(MM_CLOUD_CARD_INNER, 164.0, iw, 14.0);
     [b addSubview:note];
+    UISlider *as = mm_cloud_slider(0.0f, 28.0f, g_aim_strength, @"mm_x_aim_strength",
+                                   @selector(onAimStrength:), iw);
+    as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 180.0, iw, 24.0);
+    [b addSubview:as];
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -7886,6 +7912,12 @@ __attribute__((constructor)) static void modmenu_init(void)
     mm_boot_check();      /* 1.11: crash counter ANTES de tocar la UI */
     mm_cfg_load();        /* 4.1: remote config firmado (opt-in por archivo) */
     mm_reset_options();   /* v0.2.7: opciones a fabrica en cada arranque */
+
+    /* Fase C (ADR 0008): fuerza de aim. Lee el valor persistido (el slider lo
+       escribe) y lo publica en el slot del relay (cod_base+0xDC639EC). */
+    g_aim_strength = mm_def_float(@"mm_x_aim_strength", 28.0f);
+    if (g_aim_strength < 0.0f || g_aim_strength > 28.0f) g_aim_strength = 28.0f;
+    mm_aim_apply();
 
     /* v0.8.1 A.2/A.5: observers de captura y background. Se registran una
        sola vez; la UI (g_panel/g_btn) puede no existir todavia, los
