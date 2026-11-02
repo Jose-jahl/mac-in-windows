@@ -393,12 +393,15 @@ const char *modmenu_build_id = "modmenu-glass-0.8.1";
    Aca escribimos ese float (fuerza de aim, 0..28). Si la dylib no lo escribio
    todavia, el slot vale 0 -> aim apagado (fail-safe, nunca maximo). */
 static float g_aim_strength = 28.0f;
+static float g_aim_fov = 180.0f;
 static BOOL  g_aim_on = YES;
 static void mm_aim_apply(void)
 {
     const struct mach_header *h = _dyld_get_image_header(0);
     if (h == NULL) return;
+    /* strength en +0xDC639EC, FOV en +0xDC639F0 (slots del relay, ADR 0008/C-2) */
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_on ? g_aim_strength : 0.0f;
+    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639F0ULL) = g_aim_fov;
 }
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
@@ -2503,6 +2506,7 @@ static void mm_haptic(int style)
 - (void)onCrossStyle:(UISegmentedControl *)s;
 - (void)onMaxN:(UISlider *)s;
 - (void)onAimStrength:(UISlider *)s;
+- (void)onAimFov:(UISlider *)s;
 - (void)onPanic:(UILongPressGestureRecognizer *)g;
 - (void)onProfileSlot:(UISegmentedControl *)s;
 - (void)onProfileSave;
@@ -2938,6 +2942,15 @@ static void mm_haptic(int style)
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_strength"];
     mm_aim_apply();
     mm_write_status(@"fuerza aim");
+}
+
+/* Fase C-2: FOV del aim (grados). <= fuera del cono el relay devuelve 0. */
+- (void)onAimFov:(UISlider *)s
+{
+    g_aim_fov = s.value;
+    [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_x_aim_fov"];
+    mm_aim_apply();
+    mm_write_status(@"fov aim");
 }
 
 /* v0.3.0: estilo de caja y tema de color del ESP. El lienzo lee la clave en
@@ -6067,9 +6080,9 @@ static void mm_cloud_build_combat(UIView *page)
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
-    mm_cloud_row(b, @"Aimbot", @"mm_x_aim_on", YES, 146.0, NO);
-    UILabel *anote = mm_cloud_caption(@"Fuerza de aim", 176.0);
-    anote.frame = CGRectMake(MM_CLOUD_CARD_INNER, 176.0, iw, 12.0);
+    mm_cloud_row(b, @"Aimbot", @"mm_x_aim_on", YES, 150.0, NO);
+    UILabel *anote = mm_cloud_caption(@"Fuerza de aim", 178.0);
+    anote.frame = CGRectMake(MM_CLOUD_CARD_INNER, 178.0, iw, 12.0);
     [b addSubview:anote];
     UISlider *as = mm_cloud_slider(0.0f, 28.0f, g_aim_strength, @"mm_x_aim_strength",
                                    @selector(onAimStrength:), iw);
@@ -6156,6 +6169,13 @@ static void mm_cloud_build_visual(UIView *page)
     [cs addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
         forControlEvents:UIControlEventValueChanged];
     [b addSubview:cs];
+
+    /* Fase C-2: FOV del aim (grados). Fuera del cono, el aim no asiste. */
+    mm_cloud_card_caption(b, @"FOV de aim", 174.0);
+    UISlider *af = mm_cloud_slider(5.0f, 180.0f, g_aim_fov, @"mm_x_aim_fov",
+                                   @selector(onAimFov:), iw);
+    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 188.0, iw, 24.0);
+    [b addSubview:af];
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"MUNDO", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -7929,6 +7949,8 @@ __attribute__((constructor)) static void modmenu_init(void)
        escribe) y lo publica en el slot del relay (cod_base+0xDC639EC). */
     g_aim_strength = mm_def_float(@"mm_x_aim_strength", 28.0f);
     if (g_aim_strength < 0.0f || g_aim_strength > 28.0f) g_aim_strength = 28.0f;
+    g_aim_fov = mm_def_float(@"mm_x_aim_fov", 180.0f);
+    if (g_aim_fov < 5.0f || g_aim_fov > 180.0f) g_aim_fov = 180.0f;
     g_aim_on = mm_def_bool(@"mm_x_aim_on", YES);
     mm_aim_apply();
 
