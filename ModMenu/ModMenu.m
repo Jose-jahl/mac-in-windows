@@ -701,6 +701,7 @@ static MMPosFn      g_fp_trpos = NULL;
 typedef void (*MMSetFovFn)(void *cam, float v);
 static MMSetFovFn   g_fp_cam_setfov = NULL;
 static float        g_cam_fov = 0.0f;   /* C-7: 0 = no tocar */
+static void *(*g_fov_cam_get)(void) = NULL;   /* C-7: get_main (se setea en esp_try) */
 /* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
    de la camara no se puede proyectar (no hay caja), pero SI esta en el mundo:
    el radar, el contador JUG/BOT y la flecha "detras de ti" salen de aca. */
@@ -3853,11 +3854,11 @@ static unsigned long long mm_frame_digest(void)
 static void mm_esp_frame(double t)
 {
     /* C-7: FOV de camara. Se reaplica a ~4 Hz para ganarle al ADS del juego. */
-    if (g_cam_fov > 0.5f && g_fp_cam_setfov != NULL && g_fp_maincam != NULL) {
+    if (g_cam_fov > 0.5f && g_fp_cam_setfov != NULL && g_fov_cam_get != NULL) {
         static double s_fov = 0.0;
         if (t - s_fov > 0.25) {
             s_fov = t;
-            void *cam = g_fp_maincam();
+            void *cam = g_fov_cam_get();
             if (cam != NULL) g_fp_cam_setfov(cam, g_cam_fov);
         }
     }
@@ -5173,6 +5174,7 @@ static void mm_game_resolve(void)
             g_fp_localpawn = fp1;
             g_br_pawn_fn   = (void *(*)(void))fp1;   /* v0.7.11: espejo para el probe BR */
             g_fp_maincam   = fp2;
+            g_fov_cam_get  = (void *(*)(void))fp2;   /* C-7 */
             g_fp_w2c       = fp3;
             g_fp_proj      = fp4;
             g_fp_transpos  = fp5;
