@@ -393,11 +393,12 @@ const char *modmenu_build_id = "modmenu-glass-0.8.1";
    Aca escribimos ese float (fuerza de aim, 0..28). Si la dylib no lo escribio
    todavia, el slot vale 0 -> aim apagado (fail-safe, nunca maximo). */
 static float g_aim_strength = 28.0f;
+static BOOL  g_aim_on = YES;
 static void mm_aim_apply(void)
 {
     const struct mach_header *h = _dyld_get_image_header(0);
     if (h == NULL) return;
-    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_strength;
+    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_on ? g_aim_strength : 0.0f;
 }
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
@@ -2666,6 +2667,7 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_quickbar"]) mm_refresh_quickbar();
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
+    if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
     if ([k isEqualToString:@"mm_stream"]) {
         mm_apply_stream();
         /* Al activarlo desde VIS se cierra el panel para dejar limpia la
@@ -6055,14 +6057,14 @@ static void mm_cloud_build_combat(UIView *page)
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
-    UILabel *note = mm_cloud_caption(@"Fuerza de aim", 164.0);
-    note.frame = CGRectMake(MM_CLOUD_CARD_INNER, 164.0, iw, 14.0);
-    [b addSubview:note];
+    mm_cloud_row(b, @"Aimbot", @"mm_x_aim_on", YES, 146.0, NO);
+    UILabel *anote = mm_cloud_caption(@"Fuerza de aim", 176.0);
+    anote.frame = CGRectMake(MM_CLOUD_CARD_INNER, 176.0, iw, 12.0);
+    [b addSubview:anote];
     UISlider *as = mm_cloud_slider(0.0f, 28.0f, g_aim_strength, @"mm_x_aim_strength",
                                    @selector(onAimStrength:), iw);
-    as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 180.0, iw, 24.0);
-    [b addSubview:as];
-    [page addSubview:b];
+    as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 190.0, iw, 24.0);
+    [b addSubview:as];    [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
@@ -7917,6 +7919,7 @@ __attribute__((constructor)) static void modmenu_init(void)
        escribe) y lo publica en el slot del relay (cod_base+0xDC639EC). */
     g_aim_strength = mm_def_float(@"mm_x_aim_strength", 28.0f);
     if (g_aim_strength < 0.0f || g_aim_strength > 28.0f) g_aim_strength = 28.0f;
+    g_aim_on = mm_def_bool(@"mm_x_aim_on", YES);
     mm_aim_apply();
 
     /* v0.8.1 A.2/A.5: observers de captura y background. Se registran una
