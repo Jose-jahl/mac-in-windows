@@ -838,6 +838,7 @@ typedef struct {
     BOOL radarCam;                      /* Fase 1.1: radar camara-arriba */
     BOOL targetList;                    /* v0.6.4: lista de objetivos por distancia */
     BOOL players, bots;
+    BOOL master, safe_mode;             /* perf: snapshot de los gates por-frame */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -874,6 +875,8 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->radarCam  = mm_def_bool(@"mm_x_radar_cam", YES);
     o->targetList= mm_def_bool(@"mm_x_targetlist", NO);
     o->players   = mm_def_bool(@"mm_esp_players", NO);
+    o->master    = mm_def_bool(@"mm_esp_master", NO);
+    o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
     o->theme     = (int)mm_def_float(@"mm_esp_theme", 0.0f);
@@ -3662,8 +3665,10 @@ static void mm_esp_frame(double t)
             return;
         }
         /* v0.6.4: modo seguro = overlay apagado de verdad, aunque un toggle
-           haya quedado prendido. El boton/panel siguen para poder salir. */
-        if (mm_def_bool(@"mm_safe_mode", NO)) {
+           haya quedado prendido. El boton/panel siguen para poder salir.
+           perf: usa el snapshot cacheado (mm_draw_opts) en vez de NSUserDefaults
+           a 60 fps. */
+        if (mm_draw_opts()->safe_mode) {
             if (g_box_count != 0 || g_track_count != 0) {
                 g_box_count = 0;
                 g_track_count = 0;
@@ -3673,7 +3678,7 @@ static void mm_esp_frame(double t)
             mm_refresh_count_glass();
             return;
         }
-        if (!mm_def_bool(@"mm_esp_master", NO)) {
+        if (!mm_draw_opts()->master) {
             if (g_box_count != 0) {
                 g_box_count = 0;
                 [g_esp setNeedsDisplay];
@@ -5853,6 +5858,11 @@ static void mm_build_count_glass(void)
 static void mm_refresh_count_glass(void)
 {
     if (g_count_glass == nil) return;
+    /* perf: el coletor llama esto ~30 Hz; el contador cambia lento. 4 Hz basta. */
+    static double s_last = 0.0;
+    double nowc = CACurrentMediaTime();
+    if (s_last > 0.0 && nowc - s_last < 0.25) return;
+    s_last = nowc;
 
     if (!mm_count_glass_visible()) {
         if (!g_count_glass.hidden) g_count_glass.hidden = YES;
