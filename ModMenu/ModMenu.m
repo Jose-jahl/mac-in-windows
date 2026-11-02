@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.7.14"
+#define MODMENU_VERSION     "0.8.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -360,8 +360,18 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 #define MM_FAST_TRIES       120             /* 120 x 0.5 s = 60 s rapidos  */
 #define MM_FAST_LOG_EVERY   20              /* log de espera cada 10 s     */
 #define MM_SLOW_SECS        5               /* luego un latido cada 5 s    */
-#define MM_PANEL_W          300.0
-#define MM_PANEL_H          430.0
+/* v0.8.0: panel horizontal CLOUD. 640x356 entra completo en un iPhone
+   moderno en landscape y conserva una jerarquia de tres columnas. */
+#define MM_PANEL_W          640.0
+#define MM_PANEL_H          356.0
+#define MM_CLOUD_PAD         18.0
+#define MM_CLOUD_NAV_Y       72.0
+#define MM_CLOUD_BODY_Y     126.0
+#define MM_CLOUD_BODY_H     214.0
+#define MM_CLOUD_CARD_W     192.0
+#define MM_CLOUD_CARD_GAP    14.0
+#define MM_CLOUD_CARD_INNER  14.0
+#define MM_CLOUD_ROW_H       28.0
 #define MM_COUNT_H          30.0
 #define MM_COUNT_MIN_W      132.0
 #define MM_COUNT_PAD_X      16.0
@@ -374,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.7.14";
+const char *modmenu_build_id = "modmenu-glass-0.8.0";
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
@@ -393,8 +403,9 @@ static CAGradientLayer *g_count_neon = nil;
 static UILabel  *g_count_label = nil;
 static int       g_count_last_players = -1;
 static int       g_count_last_bots = -1;
-static UISegmentedControl *g_seg = nil;
-static UILabel  *g_status_strip = nil;  /* v0.7.13: HUD terminal arriba del panel */
+static UISegmentedControl *g_seg = nil;  /* v0.8.0: backing oculto de la nav */
+static NSMutableArray *g_nav_btns = nil; /* v0.8.0: botones horizontales */
+static UILabel  *g_status_strip = nil;  /* v0.8.0: HUD vivo del encabezado */
 static UILabel  *g_marca  = nil;  /* marca de agua v0.2.4 (identidad) */
 static UIView   *g_p_esp  = nil;
 static UIView   *g_p_vis  = nil;  /* v0.3.0: Stream Mode + pulido ESP */
@@ -403,7 +414,9 @@ static UIButton *g_dbgbtn = nil;  /* v0.6.1: Debug como boton de fila completa *
 static UIView   *g_p_info = nil;
 static UIView   *g_p_more = nil;  /* v0.4.0: pagina EXTRA (features nuevas)    */
 static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
+static UIScrollView *g_info_scroll = nil; /* v0.8.0: INFO en tarjeta scrolleable */
 static UILabel  *g_range_val = nil;
+static UILabel  *g_maxn_val  = nil;
 static NSMutableArray *g_sub_switches = nil;  /* switches bajo el maestro    */
 /* v0.6.4: barra rapida flotante (3 toggles) junto al boton. */
 static UIView   *g_quickbar = nil;
@@ -633,6 +646,7 @@ static NSString *g_cfg_error = nil;
 static void mm_tick(void);
 static void mm_set_panel(BOOL open);
 static void mm_position_panel(void);
+static CGFloat mm_menu_total_scale(CGRect host);
 static void mm_apply_esp_lock(void);
 static void mm_apply_stream(void);
 static void mm_refresh_info(void);
@@ -2155,61 +2169,6 @@ static int mm_declutter_budget(void)
         }
     }
 
-    /* v0.7.14 (B1): predictor de trayectoria de granada. Simula fisica real
-       desde la posicion del jugador local, en direccion del look-vector de
-       la camara, con velocidad inicial de 18 m/s y gravedad 9.8 m/s2.
-       Proyecta cada paso via mm_w2s y dibuja curva ambar. Pure overlay,
-       cero reads adicionales al juego. */
-    if (mm_def_bool(@"mm_x_nade_pred", NO) && g_have_local && g_have_view) {
-        float fx = -g_view_mtx[2];
-        float fy = -g_view_mtx[6];
-        float fz = -g_view_mtx[10];
-        float fh = sqrtf(fx * fx + fz * fz);
-        if (fh > 0.001f) {
-            /* normalizo plano XZ (solo direccion horizontal del look) */
-            float nfx = fx / fh, nfz = fz / fh;
-            /* componente de altura: look-vertical mapeado a lanzamiento con
-               slight-up (fy del look + bias de 0.35 para arco util). */
-            float vy_dir = fy + 0.35f;
-            float v0 = 18.0f;           /* velocidad inicial m/s */
-            float gravity = -9.8f;      /* m/s2 */
-            float dt = 0.08f;           /* 80 ms por sample => 25 muestras ~ 2 s */
-            CGContextSaveGState(ctx);
-            CGContextSetLineWidth(ctx, 2.4);
-            CGContextSetLineCap(ctx, kCGLineCapRound);
-            CGContextSetRGBStrokeColor(ctx, 1.0, 0.75, 0.12, 0.92);
-            CGContextSetShadowWithColor(ctx, CGSizeZero, 3.5,
-                [UIColor colorWithRed:1.0 green:0.65 blue:0.0 alpha:0.80].CGColor);
-            CGContextBeginPath(ctx);
-            BOOL started = NO;
-            float startY = g_local_pos[1] + 1.5f;    /* altura de pecho */
-            for (int i = 0; i < 30; i++) {
-                float t = (float)i * dt;
-                float wx = g_local_pos[0] + nfx * v0 * t;
-                float wz = g_local_pos[2] + nfz * v0 * t;
-                float wy = startY + vy_dir * v0 * t + 0.5f * gravity * t * t;
-                float wp[3] = { wx, wy, wz };
-                CGPoint sp; int det = 0; float cxTmp = 0.0f, cyTmp = 0.0f;
-                if (mm_w2s(g_view_mtx, g_proj_mtx, wp, NO,
-                           bs.size.width, bs.size.height, &sp, &det, &cxTmp, &cyTmp)) {
-                    if (!started) {
-                        CGContextMoveToPoint(ctx, sp.x, sp.y);
-                        started = YES;
-                    } else {
-                        CGContextAddLineToPoint(ctx, sp.x, sp.y);
-                    }
-                }
-                /* corta si bajamos mas de 10 m del punto de salida (toco el piso) */
-                if (wy < g_local_pos[1] - 10.0f) break;
-            }
-            if (started) {
-                CGContextStrokePath(ctx);
-                /* ultima muestra: marker rojo (punto de impacto estimado) */
-            }
-            CGContextRestoreGState(ctx);
-        }
-    }
-
     /* v0.4.2 (aviso de enemigo cercano): borde rojo pulsante si el mas cercano < 30 m. */
     if (conWarn && priIdx >= 0 && priDist < 30.0f) mm_draw_warn(ctx, bs);
 }
@@ -2340,6 +2299,49 @@ static NSString *mm_tr(NSString *es)
             @"Project developed by\nJose Lopez - Systems Engineer\n\n",
         @"Contacto:": @"Contact:",
         @"Listo": @"Done",
+        /* v0.8.0: panel horizontal CLOUD */
+        @"OBJETIVOS": @"TARGETS",
+        @"LECTURA": @"READOUT",
+        @"CONTROL": @"CONTROL",
+        @"CAJA": @"BOX",
+        @"MIRA": @"CROSSHAIR",
+        @"MUNDO": @"WORLD",
+        @"RADAR": @"RADAR",
+        @"HUD": @"HUD",
+        @"PANTALLA": @"DISPLAY",
+        @"PRESETS": @"PRESETS",
+        @"PERFILES": @"PROFILES",
+        @"ESTILO DEL MENU": @"MENU STYLE",
+        @"ESTADO DEL SISTEMA": @"SYSTEM STATUS",
+        @"SOPORTE Y CUENTA": @"SUPPORT & ACCOUNT",
+        @"COMBATE": @"COMBAT",
+        @"VISUAL": @"VISUAL",
+        @"PERFIL": @"PROFILE",
+        @"INFO": @"INFO",
+        @"Todos": @"All",
+        @"Rango ESP": @"ESP range",
+        @"Limite cercano": @"Nearest limit",
+        @"Prioridad cercano": @"Nearest priority",
+        @"Tema ESP": @"ESP theme",
+        @"Anti-solape": @"Declutter",
+        @"Flecha fuera de pantalla": @"Off-screen arrow",
+        @"Barra rapida": @"Quick bar",
+        @"Guard de captura": @"Capture guard",
+        @"Stream Mode": @"Stream Mode",
+        @"Modo seguro": @"Safe mode",
+        @"PANICO / OCULTAR": @"PANIC / HIDE",
+        @"MP · MULTIJUGADOR": @"MP · MULTIPLAYER",
+        @"BR · BATTLE ROYALE": @"BR · BATTLE ROYALE",
+        @"STREAM · LIMPIO": @"STREAM · CLEAN",
+        @"BAJO · RENDIMIENTO": @"LOW · PERFORMANCE",
+        @"Magenta": @"Magenta",
+        @"Aqua": @"Aqua",
+        @"El aim es fijo y seguro en esta build.":
+            @"Aim is fixed and safe in this build.",
+        @"Radar y flechas no leen memoria extra.":
+            @"Radar and arrows read no extra memory.",
+        @"2 dedos en el header cambia de perfil.":
+            @"2 fingers on the header switch profile.",
     };
     NSString *r = t[es];
     return (r != nil) ? r : es;
@@ -2368,6 +2370,7 @@ static void mm_haptic(int style)
 - (void)onFrame:(CADisplayLink *)link;
 - (void)onPanelPan:(UIPanGestureRecognizer *)g;
 - (void)onSeg:(UISegmentedControl *)s;
+- (void)onNav:(UIButton *)b;
 - (void)onTelegram;
 - (void)onBoxStyle:(UISegmentedControl *)s;
 - (void)onTheme:(UISegmentedControl *)s;
@@ -2466,10 +2469,13 @@ static void mm_haptic(int style)
         if (g.state == UIGestureRecognizerStateBegan) g_panel_drag0 = p.center;
         CGPoint t = [g translationInView:root];
         CGPoint c = CGPointMake(g_panel_drag0.x + t.x, g_panel_drag0.y + t.y);
-        CGFloat hw = p.bounds.size.width / 2.0;
-        CGFloat hh = p.bounds.size.height / 2.0;
+        /* v0.8.0: bounds no refleja la escala aplicada por transform. */
+        CGFloat sx = fabs(p.transform.a) > 0.01 ? fabs(p.transform.a) : 1.0;
+        CGFloat sy = fabs(p.transform.d) > 0.01 ? fabs(p.transform.d) : 1.0;
+        CGFloat hw = p.bounds.size.width  * sx / 2.0;
+        CGFloat hh = p.bounds.size.height * sy / 2.0;
         c.x = MAX(hw + 4.0, MIN(root.bounds.size.width  - hw - 4.0, c.x));
-        c.y = MAX(hh + 4.0, MIN(root.bounds.size.height - hh - 4.0, c.y));
+        c.y = MAX(hh + 24.0, MIN(root.bounds.size.height - hh - 4.0, c.y));
         p.center = c;
         if (g.state == UIGestureRecognizerStateEnded ||
             g.state == UIGestureRecognizerStateCancelled) {
@@ -2492,6 +2498,31 @@ static void mm_haptic(int style)
     if (g_p_misc  != nil) g_p_misc.hidden  = (i != 2);
     if (g_p_more  != nil) g_p_more.hidden  = (i != 3);
     if (g_p_info  != nil) g_p_info.hidden  = (i != 4);
+    /* v0.8.0: el selector real es horizontal; g_seg queda solo como estado
+       para conservar los gestos y la persistencia existente. */
+    for (NSUInteger n = 0; n < g_nav_btns.count; n++) {
+        UIButton *b = g_nav_btns[n];
+        BOOL on = ((NSInteger)n == i);
+        b.backgroundColor = on
+            ? [mm_neon_green() colorWithAlphaComponent:0.16]
+            : [UIColor colorWithWhite:1.0 alpha:0.035];
+        b.layer.borderColor = (on
+            ? [mm_neon_green() colorWithAlphaComponent:0.72]
+            : [UIColor colorWithWhite:1.0 alpha:0.07]).CGColor;
+        [b setTitleColor:(on ? [UIColor whiteColor]
+                            : [UIColor colorWithWhite:0.64 alpha:1.0])
+                forState:UIControlStateNormal];
+    }
+}
+
+- (void)onNav:(UIButton *)b
+{
+    if (g_seg == nil) return;
+    NSInteger i = (NSInteger)b.tag;
+    if (i < 0 || i >= (NSInteger)g_seg.numberOfSegments) return;
+    g_seg.selectedSegmentIndex = i;
+    [self onSeg:g_seg];
+    mm_haptic(0);
 }
 
 - (void)onSwitch:(UISwitch *)s
@@ -2818,8 +2849,7 @@ static void mm_haptic(int style)
 - (void)onMenuScale:(UISlider *)s
 {
     [[NSUserDefaults standardUserDefaults] setFloat:s.value forKey:@"mm_menu_scale"];
-    if (g_panel != nil && !g_panel.hidden)
-        g_panel.transform = CGAffineTransformMakeScale(s.value, s.value);
+    if (g_panel != nil && !g_panel.hidden) mm_position_panel();
 }
 
 /* v0.4.2: estilo de crosshair + limite de objetivos (el lienzo los lee en vivo). */
@@ -2832,8 +2862,13 @@ static void mm_haptic(int style)
 }
 - (void)onMaxN:(UISlider *)s
 {
-    [[NSUserDefaults standardUserDefaults] setFloat:(float)(int)(s.value + 0.5f)
-                                             forKey:@"mm_x_maxn"];
+    int n = (int)(s.value + 0.5f);
+    if (n < 0) n = 0;
+    if (n > MM_MAX_BOXES) n = MM_MAX_BOXES;
+    s.value = (float)n;
+    [[NSUserDefaults standardUserDefaults] setFloat:(float)n forKey:@"mm_x_maxn"];
+    if (g_maxn_val != nil)
+        g_maxn_val.text = (n == 0) ? mm_tr(@"Todos") : [NSString stringWithFormat:@"%d", n];
     mm_opts_invalidate();
 }
 
@@ -5501,7 +5536,7 @@ static void mm_layout_panel_glass(void)
     if (g_panel_blur != nil)  g_panel_blur.frame = b;
     if (g_panel_shade != nil) g_panel_shade.frame = b;
     g_panel.layer.shadowPath =
-        [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:6.0].CGPath;
+        [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:22.0].CGPath;
 }
 
 /*---------------------------------------------------------------------------
@@ -5701,47 +5736,537 @@ static void mm_refresh_count_glass(void)
     }
 }
 
-/* Fila generica del panel: titulo a la izquierda + control a la derecha. */
-static UIView *mm_row(NSString *titulo, UIView *ctrl)
+/*---------------------------------------------------------------------------
+ * v0.8.0: primitivas del panel horizontal CLOUD.
+ * Son vistas estaticas: nada se recalcula por frame. El estado vivo sigue en
+ * NSUserDefaults y en los callbacks existentes, para no tocar el motor ESP.
+ *--------------------------------------------------------------------------*/
+static UIFont *mm_cloud_font(CGFloat size, UIFontWeight weight)
 {
-    UIView *r = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 284.0, 34.0)];
-    /* v0.7.13: prefix terminal `>_ ` + fuente Menlo + color discreto. */
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8.0, 0, 196.0, 34.0)];
-    UIFont *rowFont = [UIFont fontWithName:@"Menlo" size:11.5] ?:
-                      [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
-    NSMutableAttributedString *rt = [[NSMutableAttributedString alloc]
-        initWithString:@">_ "
-            attributes:@{ NSFontAttributeName: rowFont,
-                          NSForegroundColorAttributeName:
-                              [mm_neon_green() colorWithAlphaComponent:0.60] }];
-    [rt appendAttributedString:[[NSAttributedString alloc]
-        initWithString:mm_tr(titulo)
-            attributes:@{ NSFontAttributeName: rowFont,
-                          NSForegroundColorAttributeName:
-                              [UIColor colorWithWhite:0.93 alpha:1.0] }]];
-    l.attributedText = rt;
-    [r addSubview:l];
-    /* v0.4.0: hairline inferior tenue. v0.7.13: cyan en vez de purple. */
-    UIView *hair = [[UIView alloc] initWithFrame:CGRectMake(6.0, 33.0, 272.0, 0.5)];
-    hair.backgroundColor = [mm_neon_green() colorWithAlphaComponent:0.18];
-    hair.userInteractionEnabled = NO;
-    [r addSubview:hair];
-    CGRect cf = ctrl.frame;
-    ctrl.frame = CGRectMake(284.0 - cf.size.width - 6.0, (34.0 - cf.size.height) / 2.0,
-                            cf.size.width, cf.size.height);
-    [r addSubview:ctrl];
-    return r;
+    return [UIFont systemFontOfSize:size weight:weight];
 }
 
-static UIView *mm_switch_row(NSString *titulo, NSString *key, BOOL def)
+static UILabel *mm_cloud_label(NSString *text, CGFloat size, UIFontWeight weight,
+                               UIColor *color)
 {
-    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
+    l.text = text;
+    l.textColor = color;
+    l.font = mm_cloud_font(size, weight);
+    l.adjustsFontSizeToFitWidth = YES;
+    l.minimumScaleFactor = 0.70;
+    l.numberOfLines = 1;
+    return l;
+}
+
+/* Tarjeta de contenido: vidrio oscuro, radio amplio y acento fino. */
+static UIView *mm_cloud_card(NSString *title, CGFloat x, CGFloat w, CGFloat h)
+{
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(x, 0.0, w, h)];
+    card.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.036];
+    card.layer.cornerRadius = 16.0;
+    card.layer.borderWidth = 0.7;
+    card.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.075].CGColor;
+    card.clipsToBounds = YES;
+
+    UIView *tick = [[UIView alloc] initWithFrame:CGRectMake(14.0, 14.0, 3.0, 11.0)];
+    tick.backgroundColor = [mm_neon_green() colorWithAlphaComponent:0.90];
+    tick.layer.cornerRadius = 1.5;
+    [card addSubview:tick];
+
+    UILabel *l = mm_cloud_label([mm_tr(title) uppercaseString], 9.6,
+                                UIFontWeightSemibold,
+                                [UIColor colorWithWhite:0.63 alpha:1.0]);
+    l.frame = CGRectMake(24.0, 10.0, w - 37.0, 19.0);
+    [card addSubview:l];
+
+    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(14.0, 34.0, w - 28.0, 0.5)];
+    line.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    line.userInteractionEnabled = NO;
+    [card addSubview:line];
+    return card;
+}
+
+static UILabel *mm_cloud_caption(NSString *text, CGFloat w)
+{
+    UILabel *l = mm_cloud_label(mm_tr(text), 9.4, UIFontWeightSemibold,
+                                [UIColor colorWithWhite:0.60 alpha:1.0]);
+    l.frame = CGRectMake(0.0, 0.0, w, 14.0);
+    return l;
+}
+
+/* Fila compacta: etiqueta + switch. `dim` la ata al maestro ESP. */
+static UIView *mm_cloud_switch_row(NSString *title, NSString *key, BOOL def,
+                                   CGFloat w, BOOL dim)
+{
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, w, MM_CLOUD_ROW_H)];
+    UILabel *l = mm_cloud_label(mm_tr(title), 10.8, UIFontWeightMedium,
+                                [UIColor colorWithWhite:0.91 alpha:1.0]);
+    l.frame = CGRectMake(0.0, 0.0, w - 43.0, MM_CLOUD_ROW_H);
+    [row addSubview:l];
+
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0.0, 0.0, 51.0, 31.0)];
     sw.on = mm_def_bool(key, def);
-    sw.onTintColor = mm_verde();
+    sw.onTintColor = mm_neon_green();
     sw.accessibilityIdentifier = key;
+    sw.accessibilityLabel = mm_tr(title);
+    sw.center = CGPointMake(w - 18.0, MM_CLOUD_ROW_H / 2.0);
+    sw.transform = CGAffineTransformMakeScale(0.74, 0.74);
     [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
         forControlEvents:UIControlEventValueChanged];
-    return mm_row(titulo, sw);
+    [row addSubview:sw];
+    if (dim) [g_sub_switches addObject:sw];
+    return row;
+}
+
+static UISegmentedControl *mm_cloud_seg(NSArray *items, CGFloat w)
+{
+    UISegmentedControl *s = [[UISegmentedControl alloc] initWithItems:items];
+    s.frame = CGRectMake(0.0, 0.0, w, 28.0);
+    s.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.045];
+    if (@available(iOS 13.0, *))
+        s.selectedSegmentTintColor = [mm_neon_green() colorWithAlphaComponent:0.24];
+    s.layer.cornerRadius = 8.0;
+    s.layer.masksToBounds = YES;
+    s.layer.borderWidth = 0.6;
+    s.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.07].CGColor;
+    UIFont *f = mm_cloud_font(8.7, UIFontWeightSemibold);
+    [s setTitleTextAttributes:@{ NSForegroundColorAttributeName:
+                                     [UIColor colorWithWhite:0.70 alpha:1.0],
+                                 NSFontAttributeName: f }
+                      forState:UIControlStateNormal];
+    [s setTitleTextAttributes:@{ NSForegroundColorAttributeName: [UIColor whiteColor],
+                                 NSFontAttributeName: f }
+                      forState:UIControlStateSelected];
+    return s;
+}
+
+static UIButton *mm_cloud_action(NSString *title, UIColor *bg, CGFloat w, CGFloat h)
+{
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    b.frame = CGRectMake(0.0, 0.0, w, h);
+    b.backgroundColor = bg;
+    b.layer.cornerRadius = 8.0;
+    b.layer.borderWidth = 0.6;
+    b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+    b.titleLabel.font = mm_cloud_font(10.0, UIFontWeightSemibold);
+    b.titleLabel.adjustsFontSizeToFitWidth = YES;
+    b.titleLabel.minimumScaleFactor = 0.72;
+    [b setTitle:mm_tr(title) forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    return b;
+}
+
+static UISlider *mm_cloud_slider(float lo, float hi, float value, NSString *key,
+                                SEL action, CGFloat w)
+{
+    UISlider *s = [[UISlider alloc] initWithFrame:CGRectMake(0.0, 0.0, w, 24.0)];
+    s.minimumValue = lo;
+    s.maximumValue = hi;
+    s.value = value;
+    s.continuous = YES;
+    s.tintColor = mm_neon_green();
+    s.thumbTintColor = [UIColor colorWithWhite:0.96 alpha:1.0];
+    s.accessibilityIdentifier = key;
+    [s addTarget:[MMTargets shared] action:action
+        forControlEvents:UIControlEventValueChanged];
+    return s;
+}
+
+/* Coloca una vista dentro de una tarjeta, respetando el padding interno. */
+static void mm_cloud_put(UIView *card, UIView *v, CGFloat y)
+{
+    CGRect f = v.frame;
+    f.origin.x = MM_CLOUD_CARD_INNER;
+    f.origin.y = y;
+    v.frame = f;
+    [card addSubview:v];
+}
+
+/*---------------------------------------------------------------------------
+ * v0.8.0: paginas del panel CLOUD.
+ * Tres tarjetas por pagina. Cada control conserva su clave y su callback
+ * historicos: la UI cambia, el contrato de datos no.
+ *--------------------------------------------------------------------------*/
+static void mm_cloud_row(UIView *card, NSString *title, NSString *key,
+                         BOOL def, CGFloat y, BOOL dim)
+{
+    CGFloat w = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+    UIView *row = mm_cloud_switch_row(title, key, def, w, dim);
+    mm_cloud_put(card, row, y);
+}
+
+static void mm_cloud_card_caption(UIView *card, NSString *text, CGFloat y)
+{
+    CGFloat w = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+    UILabel *l = mm_cloud_caption(text, w);
+    l.frame = CGRectMake(MM_CLOUD_CARD_INNER, y, w, 14.0);
+    [card addSubview:l];
+}
+
+static void mm_cloud_build_combat(UIView *page)
+{
+    CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+
+    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
+                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist" ];
+    NSArray *titles = @[ @"ESP maestro", @"Cajas", @"Jugadores", @"Bots",
+                         @"Nombres", @"Distancia" ];
+    for (NSUInteger i = 0; i < keys.count; i++)
+        mm_cloud_row(a, titles[i], keys[i], NO,
+                     38.0 + (CGFloat)i * MM_CLOUD_ROW_H, (i != 0));
+    [page addSubview:a];
+
+    UIView *b = mm_cloud_card(@"LECTURA", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    NSArray *rkeys = @[ @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
+                        @"mm_esp_fill" ];
+    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba", @"Relleno" ];
+    for (NSUInteger i = 0; i < rkeys.count; i++)
+        mm_cloud_row(b, rtit[i], rkeys[i], NO,
+                     38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
+    UILabel *note = mm_cloud_caption(@"El aim es fijo y seguro en esta build.", iw);
+    note.frame = CGRectMake(MM_CLOUD_CARD_INNER, 164.0, iw, 28.0);
+    note.numberOfLines = 2;
+    note.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
+    [b addSubview:note];
+    [page addSubview:b];
+
+    UIView *c = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    float rng = mm_def_float(@"mm_esp_range", 500.0f);
+    UILabel *rl = mm_cloud_caption(@"Rango ESP", 108.0);
+    rl.frame = CGRectMake(MM_CLOUD_CARD_INNER, 38.0, 108.0, 14.0);
+    [c addSubview:rl];
+    g_range_val = mm_cloud_label([NSString stringWithFormat:@"%d m", (int)(rng + 0.5f)],
+                                 10.2, UIFontWeightSemibold, mm_neon_green());
+    g_range_val.textAlignment = NSTextAlignmentRight;
+    g_range_val.frame = CGRectMake(MM_CLOUD_CARD_INNER + 112.0, 38.0, iw - 112.0, 14.0);
+    [c addSubview:g_range_val];
+    UISlider *rs = mm_cloud_slider(20.0f, 500.0f, rng, @"mm_esp_range",
+                                   @selector(onSlider:), iw);
+    rs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 54.0, iw, 24.0);
+    [c addSubview:rs];
+
+    float maxn = mm_def_float(@"mm_x_maxn", 0.0f);
+    UILabel *ml = mm_cloud_caption(@"Limite cercano", 108.0);
+    ml.frame = CGRectMake(MM_CLOUD_CARD_INNER, 88.0, 108.0, 14.0);
+    [c addSubview:ml];
+    g_maxn_val = mm_cloud_label((maxn < 0.5f) ? mm_tr(@"Todos")
+                                              : [NSString stringWithFormat:@"%d", (int)(maxn + 0.5f)],
+                                10.2, UIFontWeightSemibold, mm_neon_green());
+    g_maxn_val.textAlignment = NSTextAlignmentRight;
+    g_maxn_val.frame = CGRectMake(MM_CLOUD_CARD_INNER + 112.0, 88.0, iw - 112.0, 14.0);
+    [c addSubview:g_maxn_val];
+    UISlider *ms = mm_cloud_slider(0.0f, (float)MM_MAX_BOXES, maxn, @"mm_x_maxn",
+                                   @selector(onMaxN:), iw);
+    ms.frame = CGRectMake(MM_CLOUD_CARD_INNER, 104.0, iw, 24.0);
+    [c addSubview:ms];
+
+    mm_cloud_row(c, @"Lista de objetivos", @"mm_x_targetlist", NO, 140.0, NO);
+    mm_cloud_row(c, @"Prioridad cercano", @"mm_x_priority", NO, 168.0, NO);
+    [page addSubview:c];
+}
+
+static void mm_cloud_build_visual(UIView *page)
+{
+    CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+
+    UIView *a = mm_cloud_card(@"CAJA", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_card_caption(a, @"Estilo de caja", 38.0);
+    int bstyle = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
+    UISegmentedControl *bs = mm_cloud_seg(@[ mm_tr(@"Completa"), mm_tr(@"Esquinas") ], iw);
+    bs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 54.0, iw, 28.0);
+    bs.selectedSegmentIndex = (bstyle == 1) ? 1 : 0;
+    [bs addTarget:[MMTargets shared] action:@selector(onBoxStyle:)
+        forControlEvents:UIControlEventValueChanged];
+    [a addSubview:bs];
+
+    mm_cloud_card_caption(a, @"Tema ESP", 92.0);
+    int etheme = (int)mm_def_float(@"mm_esp_theme", 0.0f);
+    if (etheme < 0 || etheme > 2) etheme = 0;
+    UISegmentedControl *ts = mm_cloud_seg(@[ mm_tr(@"Clasico"), mm_tr(@"Neon"),
+                                             mm_tr(@"Blanco") ], iw);
+    ts.frame = CGRectMake(MM_CLOUD_CARD_INNER, 108.0, iw, 28.0);
+    ts.selectedSegmentIndex = etheme;
+    [ts addTarget:[MMTargets shared] action:@selector(onTheme:)
+        forControlEvents:UIControlEventValueChanged];
+    [a addSubview:ts];
+
+    mm_cloud_row(a, @"Color por distancia", @"mm_x_distcol", NO, 146.0, YES);
+    mm_cloud_row(a, @"Resaltar vida baja", @"mm_x_lowhp", NO, 174.0, YES);
+    [page addSubview:a];
+
+    UIView *b = mm_cloud_card(@"MIRA", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_row(b, @"Crosshair (mira)", @"mm_x_cross", NO, 38.0, YES);
+    mm_cloud_row(b, @"Anillo de aim", @"mm_x_aimring", NO, 66.0, YES);
+    mm_cloud_row(b, @"Punto en la cabeza", @"mm_x_head", NO, 94.0, YES);
+    mm_cloud_card_caption(b, @"Estilo de crosshair", 128.0);
+    int cstyle = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
+    if (cstyle < 0 || cstyle > 3) cstyle = 0;
+    UISegmentedControl *cs = mm_cloud_seg(@[ mm_tr(@"Cruz"), mm_tr(@"Punto"),
+                                              mm_tr(@"Circulo"), mm_tr(@"Todo") ], iw);
+    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 144.0, iw, 28.0);
+    cs.selectedSegmentIndex = cstyle;
+    [cs addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
+        forControlEvents:UIControlEventValueChanged];
+    [b addSubview:cs];
+    [page addSubview:b];
+
+    UIView *c = mm_cloud_card(@"MUNDO", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
+    mm_cloud_row(c, @"Anti-solape", @"mm_x_declutter", NO, 66.0, YES);
+    mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 94.0, YES);
+    mm_cloud_row(c, @"Indicador de altura", @"mm_x_height", NO, 122.0, YES);
+    mm_cloud_card_caption(c, @"Paleta daltonismo", 156.0);
+    int cbm = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_color_mode"];
+    int cbi = (cbm == 1) ? 1 : ((cbm == 3) ? 2 : 0);
+    UISegmentedControl *cb = mm_cloud_seg(@[ mm_tr(@"Normal"), @"Deuter", @"Tritan" ], iw);
+    cb.frame = CGRectMake(MM_CLOUD_CARD_INNER, 172.0, iw, 26.0);
+    cb.selectedSegmentIndex = cbi;
+    [cb addTarget:[MMTargets shared] action:@selector(onColorMode:)
+        forControlEvents:UIControlEventValueChanged];
+    [c addSubview:cb];
+    [page addSubview:c];
+}
+
+static void mm_cloud_build_radar(UIView *page)
+{
+    CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+
+    UIView *a = mm_cloud_card(@"RADAR", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_row(a, @"Radar 2D", @"mm_x_radar", NO, 38.0, YES);
+    mm_cloud_row(a, @"Radar: arriba = mi vista", @"mm_x_radar_cam", YES, 66.0, YES);
+    mm_cloud_row(a, @"Flecha fuera de pantalla", @"mm_x_arrow", NO, 94.0, YES);
+    mm_cloud_row(a, @"Aviso enemigo cerca", @"mm_x_warn", NO, 122.0, YES);
+    UILabel *note = mm_cloud_caption(@"Radar y flechas no leen memoria extra.", iw);
+    note.frame = CGRectMake(MM_CLOUD_CARD_INNER, 164.0, iw, 28.0);
+    note.numberOfLines = 2;
+    note.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
+    [a addSubview:note];
+    [page addSubview:a];
+
+    UIView *b = mm_cloud_card(@"HUD", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_row(b, @"Contador JUG / BOT", @"mm_esp_count", NO, 38.0, NO);
+    mm_cloud_row(b, @"Barra rapida", @"mm_quickbar", NO, 66.0, NO);
+    mm_cloud_row(b, @"Vibracion al tocar", @"mm_haptics", YES, 94.0, NO);
+    mm_cloud_row(b, @"Guard de captura", @"mm_guard_capture", NO, 122.0, NO);
+    mm_cloud_row(b, @"Stream Mode", @"mm_stream", NO, 150.0, NO);
+    [page addSubview:b];
+
+    UIView *c = mm_cloud_card(@"PANTALLA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_card_caption(c, @"Opacidad del menu", 38.0);
+    UISlider *op = mm_cloud_slider(0.4f, 1.0f,
+                                   mm_def_float(@"mm_menu_opacity", 1.0f),
+                                   @"mm_menu_opacity", @selector(onMenuOpacity:), iw);
+    op.frame = CGRectMake(MM_CLOUD_CARD_INNER, 54.0, iw, 24.0);
+    [c addSubview:op];
+    mm_cloud_card_caption(c, @"Escala del menu", 84.0);
+    UISlider *sc = mm_cloud_slider(0.8f, 1.2f,
+                                   mm_def_float(@"mm_menu_scale", 1.0f),
+                                   @"mm_menu_scale", @selector(onMenuScale:), iw);
+    sc.frame = CGRectMake(MM_CLOUD_CARD_INNER, 100.0, iw, 24.0);
+    [c addSubview:sc];
+    mm_cloud_row(c, @"Modo seguro", @"mm_safe_mode", NO, 132.0, NO);
+
+    UIButton *panic = mm_cloud_action(@"PANICO / OCULTAR",
+        [UIColor colorWithRed:0.48 green:0.08 blue:0.10 alpha:0.95], iw, 30.0);
+    panic.frame = CGRectMake(MM_CLOUD_CARD_INNER, 166.0, iw, 30.0);
+    panic.accessibilityIdentifier = @"__panic";
+    [panic addTarget:[MMTargets shared] action:@selector(onQuick:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [c addSubview:panic];
+    [page addSubview:c];
+}
+
+static void mm_cloud_build_profiles(UIView *page)
+{
+    CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+
+    UIView *a = mm_cloud_card(@"PRESETS", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    NSArray *pt = @[ @"MP · MULTIJUGADOR", @"BR · BATTLE ROYALE",
+                     @"STREAM · LIMPIO", @"BAJO · RENDIMIENTO" ];
+    for (NSUInteger i = 0; i < pt.count; i++) {
+        UIButton *b = mm_cloud_action(pt[i],
+            [UIColor colorWithRed:0.07 green:0.20 blue:0.30 alpha:0.96], iw, 32.0);
+        b.frame = CGRectMake(MM_CLOUD_CARD_INNER, 38.0 + (CGFloat)i * 40.0, iw, 32.0);
+        b.tag = (NSInteger)i;
+        [b addTarget:[MMTargets shared] action:@selector(onPreset:)
+            forControlEvents:UIControlEventTouchUpInside];
+        [a addSubview:b];
+    }
+    [page addSubview:a];
+
+    UIView *b = mm_cloud_card(@"PERFILES", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    g_profile_seg = mm_cloud_seg(@[ @"P1", @"P2", @"P3", @"P4", @"P5" ], iw);
+    g_profile_seg.frame = CGRectMake(MM_CLOUD_CARD_INNER, 38.0, iw, 28.0);
+    g_profile_seg.selectedSegmentIndex = g_profile_slot;
+    [g_profile_seg addTarget:[MMTargets shared] action:@selector(onProfileSlot:)
+            forControlEvents:UIControlEventValueChanged];
+    [b addSubview:g_profile_seg];
+
+    UIButton *sv = mm_cloud_action(@"Guardar",
+        [UIColor colorWithRed:0.08 green:0.38 blue:0.20 alpha:0.96], 78.0, 30.0);
+    sv.frame = CGRectMake(MM_CLOUD_CARD_INNER, 72.0, 78.0, 30.0);
+    [sv addTarget:[MMTargets shared] action:@selector(onProfileSave)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:sv];
+    UIButton *ld = mm_cloud_action(@"Cargar",
+        [UIColor colorWithRed:0.08 green:0.24 blue:0.42 alpha:0.96], 78.0, 30.0);
+    ld.frame = CGRectMake(MM_CLOUD_CARD_INNER + 86.0, 72.0, 78.0, 30.0);
+    [ld addTarget:[MMTargets shared] action:@selector(onProfileLoad)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:ld];
+
+    UIButton *ex = mm_cloud_action(@"Exportar", [UIColor colorWithWhite:0.13 alpha:0.96],
+                                   78.0, 30.0);
+    ex.frame = CGRectMake(MM_CLOUD_CARD_INNER, 106.0, 78.0, 30.0);
+    [ex addTarget:[MMTargets shared] action:@selector(onProfileExport)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:ex];
+    UIButton *im = mm_cloud_action(@"Importar", [UIColor colorWithWhite:0.13 alpha:0.96],
+                                   78.0, 30.0);
+    im.frame = CGRectMake(MM_CLOUD_CARD_INNER + 86.0, 106.0, 78.0, 30.0);
+    [im addTarget:[MMTargets shared] action:@selector(onProfileImport)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:im];
+
+    g_profile_name_label = mm_cloud_label(mm_profile_name(g_profile_slot), 9.6,
+                                          UIFontWeightSemibold, mm_neon_green());
+    g_profile_name_label.textAlignment = NSTextAlignmentCenter;
+    g_profile_name_label.frame = CGRectMake(MM_CLOUD_CARD_INNER, 142.0, iw, 16.0);
+    [b addSubview:g_profile_name_label];
+    UILabel *note = mm_cloud_caption(@"2 dedos en el header cambia de perfil.", iw);
+    note.frame = CGRectMake(MM_CLOUD_CARD_INNER, 166.0, iw, 28.0);
+    note.numberOfLines = 2;
+    note.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
+    [b addSubview:note];
+    [page addSubview:b];
+
+    UIView *c = mm_cloud_card(@"ESTILO DEL MENU", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    int ti = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"];
+    if (ti < 0 || ti > 4) ti = 0;
+    UISegmentedControl *tac = mm_cloud_seg(@[ @"FUSION", mm_tr(@"Hielo"),
+                                               mm_tr(@"Magenta"), mm_tr(@"Fuego"),
+                                               mm_tr(@"Aqua") ], iw);
+    tac.frame = CGRectMake(MM_CLOUD_CARD_INNER, 38.0, iw, 26.0);
+    tac.selectedSegmentIndex = ti;
+    [tac addTarget:[MMTargets shared] action:@selector(onThemeAccent:)
+        forControlEvents:UIControlEventValueChanged];
+    [c addSubview:tac];
+
+    UIButton *a1 = mm_cloud_action(@"Acento 1", [UIColor colorWithWhite:0.13 alpha:0.96],
+                                   78.0, 28.0);
+    a1.frame = CGRectMake(MM_CLOUD_CARD_INNER, 70.0, 78.0, 28.0);
+    a1.tag = 0;
+    [a1 addTarget:[MMTargets shared] action:@selector(onAccentPick:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [c addSubview:a1];
+    UIButton *a2 = mm_cloud_action(@"Acento 2", [UIColor colorWithWhite:0.13 alpha:0.96],
+                                   78.0, 28.0);
+    a2.frame = CGRectMake(MM_CLOUD_CARD_INNER + 86.0, 70.0, 78.0, 28.0);
+    a2.tag = 1;
+    [a2 addTarget:[MMTargets shared] action:@selector(onAccentPick:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [c addSubview:a2];
+
+    UISegmentedControl *ths = mm_cloud_seg(@[ @"T1", @"T2", @"T3" ], iw);
+    ths.frame = CGRectMake(MM_CLOUD_CARD_INNER, 104.0, iw, 24.0);
+    ths.selectedSegmentIndex = g_theme_slot;
+    [ths addTarget:[MMTargets shared] action:@selector(onThemeSlot:)
+        forControlEvents:UIControlEventValueChanged];
+    [c addSubview:ths];
+    UIButton *tsv = mm_cloud_action(@"Guardar",
+        [UIColor colorWithRed:0.08 green:0.38 blue:0.20 alpha:0.96], 78.0, 26.0);
+    tsv.frame = CGRectMake(MM_CLOUD_CARD_INNER, 132.0, 78.0, 26.0);
+    [tsv addTarget:[MMTargets shared] action:@selector(onThemeSave)
+        forControlEvents:UIControlEventTouchUpInside];
+    [c addSubview:tsv];
+    UIButton *tld = mm_cloud_action(@"Cargar",
+        [UIColor colorWithRed:0.08 green:0.24 blue:0.42 alpha:0.96], 78.0, 26.0);
+    tld.frame = CGRectMake(MM_CLOUD_CARD_INNER + 86.0, 132.0, 78.0, 26.0);
+    [tld addTarget:[MMTargets shared] action:@selector(onThemeLoad)
+        forControlEvents:UIControlEventTouchUpInside];
+    [c addSubview:tld];
+    [page addSubview:c];
+}
+
+static void mm_cloud_build_info(UIView *page)
+{
+    CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
+    UIView *a = mm_cloud_card(@"ESTADO DEL SISTEMA", 0.0, 366.0, MM_CLOUD_BODY_H);
+    g_info_scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(14.0, 38.0, 338.0, 164.0)];
+    g_info_scroll.showsVerticalScrollIndicator = YES;
+    g_info_scroll.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    g_info_scroll.alwaysBounceVertical = YES;
+    [a addSubview:g_info_scroll];
+
+    g_info = [[UILabel alloc] initWithFrame:CGRectMake(0.0, 0.0, 338.0, 240.0)];
+    g_info.numberOfLines = 0;
+    g_info.clipsToBounds = YES;
+    g_info.textColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    g_info.font = [UIFont fontWithName:@"Menlo" size:9.0] ?: [UIFont systemFontOfSize:9.0];
+    [g_info_scroll addSubview:g_info];
+    g_info_scroll.contentSize = CGSizeMake(338.0, 250.0);
+    [page addSubview:a];
+
+    UIView *b = mm_cloud_card(@"SOPORTE Y CUENTA", 380.0, 224.0, MM_CLOUD_BODY_H);
+    UIButton *tg = mm_cloud_action(@"Telegram  @l0pez9801",
+        [UIColor colorWithRed:0.12 green:0.48 blue:0.82 alpha:0.96], 196.0, 36.0);
+    tg.frame = CGRectMake(14.0, 38.0, 196.0, 36.0);
+    [tg addTarget:[MMTargets shared] action:@selector(onTelegram)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:tg];
+
+    UIButton *gr = mm_cloud_action(@"Restablecer invitado",
+        [UIColor colorWithRed:0.46 green:0.08 blue:0.10 alpha:0.96], 196.0, 30.0);
+    gr.frame = CGRectMake(14.0, 80.0, 196.0, 30.0);
+    [gr addTarget:[MMTargets shared] action:@selector(onGuestReset)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:gr];
+
+    UILabel *lgl = mm_cloud_caption(@"Idioma (reiniciar)", 196.0);
+    lgl.frame = CGRectMake(14.0, 116.0, 196.0, 14.0);
+    [b addSubview:lgl];
+    UISegmentedControl *lgs = mm_cloud_seg(@[ @"ES", @"EN" ], 196.0);
+    lgs.frame = CGRectMake(14.0, 132.0, 196.0, 26.0);
+    lgs.selectedSegmentIndex = (mm_lang() == 1) ? 1 : 0;
+    [lgs addTarget:[MMTargets shared] action:@selector(onLang:)
+        forControlEvents:UIControlEventValueChanged];
+    [b addSubview:lgs];
+
+    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 162.0, 196.0, 22.0)];
+    g_lic_label.numberOfLines = 2;
+    g_lic_label.textColor = [UIColor colorWithWhite:0.66 alpha:1.0];
+    g_lic_label.font = [UIFont fontWithName:@"Menlo" size:7.4] ?:
+                       [UIFont systemFontOfSize:7.4];
+    g_lic_label.adjustsFontSizeToFitWidth = YES;
+    g_lic_label.minimumScaleFactor = 0.70;
+    g_lic_label.text = mm_lic_short_status();
+    [b addSubview:g_lic_label];
+
+    UIButton *lp = mm_cloud_action(@"Pegar token", [UIColor colorWithWhite:0.13 alpha:0.96],
+                                   94.0, 22.0);
+    lp.frame = CGRectMake(14.0, 186.0, 94.0, 22.0);
+    [lp addTarget:[MMTargets shared] action:@selector(onLicensePaste)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:lp];
+    UIButton *lr = mm_cloud_action(@"Revalidar", [UIColor colorWithWhite:0.13 alpha:0.96],
+                                   94.0, 22.0);
+    lr.frame = CGRectMake(116.0, 186.0, 94.0, 22.0);
+    [lr addTarget:[MMTargets shared] action:@selector(onLicenseCheck)
+        forControlEvents:UIControlEventTouchUpInside];
+    [b addSubview:lr];
+    [page addSubview:b];
+
+    (void)iw;
 }
 
 /* v0.2.9: barra "Listo" para cerrar el teclado numerico de los campos de ID. */
@@ -5955,78 +6480,61 @@ static void mm_build_ui(void)
 
     if (g_panel != nil) return;
 
-    /* --- panel (v0.7.13: HACK TERMINAL - negro mate, angular, borde cyan) --- */
+    /* --- panel horizontal CLOUD (v0.8.0) ------------------------------- */
     g_panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MM_PANEL_W, MM_PANEL_H)];
-    g_panel.backgroundColor = [UIColor colorWithRed:0.015 green:0.02 blue:0.03 alpha:0.95];
-    g_panel.layer.cornerRadius = 6.0;        /* angular, no soft */
-    g_panel.layer.borderWidth = 1.4;
+    g_panel.backgroundColor =
+        [UIColor colorWithRed:0.012 green:0.018 blue:0.030 alpha:0.985];
+    g_panel.layer.cornerRadius = 22.0;
+    g_panel.layer.borderWidth = 1.0;
     g_panel.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.92].CGColor;
+        [mm_neon_green() colorWithAlphaComponent:0.34].CGColor;
     g_panel.layer.shadowColor =
-        [mm_neon_green() colorWithAlphaComponent:1.0].CGColor;
-    g_panel.layer.shadowOpacity = 0.75;
-    g_panel.layer.shadowRadius = 24.0;        /* glow mas marcado */
-    g_panel.layer.shadowOffset = CGSizeMake(0.0, 4.0);
+        [mm_neon_green() colorWithAlphaComponent:0.55].CGColor;
+    g_panel.layer.shadowOpacity = 0.35;
+    g_panel.layer.shadowRadius = 28.0;
+    g_panel.layer.shadowOffset = CGSizeMake(0.0, 10.0);
     g_panel.clipsToBounds = NO;
     g_panel.hidden = YES;
     g_panel.alpha = 0.0;
 
-    /* v0.7.13: gradient aurora sutil (cyan -> purple en diagonal) solo como
-       tinte de fondo. Mantiene el "pulso" existente del neon-border. */
+    /* Fondo: gradiente frio y estable. Sin blur de pantalla completa: el panel
+       se abre sobre gameplay y el material dinamico costaba GPU por frame. */
     g_panel_neon = [CAGradientLayer layer];
     g_panel_neon.frame = g_panel.bounds;
-    g_panel_neon.cornerRadius = 6.0;
+    g_panel_neon.cornerRadius = 22.0;
     g_panel_neon.masksToBounds = YES;
     g_panel_neon.startPoint = CGPointMake(0.0, 0.0);
     g_panel_neon.endPoint = CGPointMake(1.0, 1.0);
-    g_panel_neon.locations = @[@0.0, @0.5, @1.0];
-    CGColorRef p1 = [UIColor colorWithRed:0.0 green:0.95 blue:0.75 alpha:0.20].CGColor;
+    g_panel_neon.locations = @[@0.0, @0.52, @1.0];
+    CGColorRef p1 = [mm_neon_green() colorWithAlphaComponent:0.10].CGColor;
     CGColorRef p2 = [UIColor colorWithRed:0.0 green:0.0 blue:0.0 alpha:0.0].CGColor;
-    CGColorRef p3 = [UIColor colorWithRed:0.80 green:0.00 blue:0.40 alpha:0.18].CGColor;
+    CGColorRef p3 = [mm_neon_purple() colorWithAlphaComponent:0.09].CGColor;
     g_panel_neon.colors = @[(__bridge id)p1, (__bridge id)p2, (__bridge id)p3];
     [g_panel.layer insertSublayer:g_panel_neon atIndex:0];
 
-    g_panel_blur = [[UIVisualEffectView alloc] initWithEffect:
-                    [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-    g_panel_blur.frame = g_panel.bounds;
-    g_panel_blur.userInteractionEnabled = NO;
-    g_panel_blur.alpha = 0.65;
-    g_panel_blur.layer.cornerRadius = 6.0;
-    g_panel_blur.clipsToBounds = YES;
-    [g_panel addSubview:g_panel_blur];
-
     g_panel_shade = [[UIView alloc] initWithFrame:g_panel.bounds];
-    g_panel_shade.backgroundColor =
-        [UIColor colorWithRed:0.0 green:0.01 blue:0.015 alpha:0.75];
+    g_panel_shade.backgroundColor = [UIColor clearColor];
     g_panel_shade.userInteractionEnabled = NO;
-    g_panel_shade.layer.cornerRadius = 6.0;
-    g_panel_shade.clipsToBounds = YES;
+    g_panel_shade.layer.cornerRadius = 22.0;
     g_panel_shade.layer.borderWidth = 0.6;
     g_panel_shade.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.22].CGColor;
+        [UIColor colorWithWhite:1.0 alpha:0.055].CGColor;
     [g_panel addSubview:g_panel_shade];
-
     mm_layout_panel_glass();
-    mm_start_neon_gradient(g_panel_neon);
-    mm_start_neon_border(g_panel.layer, mm_neon_green(), mm_neon_purple(), 8.0);
 
-    /* v0.2.4: zona de arrastre del panel (franja superior). Va ANTES que el
-       titulo y la X para no taparlos. */
-    UIView *dz = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, MM_PANEL_W, 32.0)];
+    /* Zona de arrastre: solo el header. Los controles se agregan despues y
+       reciben el toque antes que este pan. */
+    UIView *dz = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, MM_PANEL_W - 54.0, 64.0)];
     dz.backgroundColor = [UIColor clearColor];
     dz.userInteractionEnabled = YES;
     UIPanGestureRecognizer *dpan = [[UIPanGestureRecognizer alloc]
         initWithTarget:[MMTargets shared] action:@selector(onPanelPan:)];
     [dz addGestureRecognizer:dpan];
-    /* v0.6.4: doble toque en el encabezado cierra el panel. El swipe de pagina
-       vive en el selector (abajo), no aca: el pan del encabezado arrastra el
-       panel y no debe competir con un swipe. */
     UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc]
         initWithTarget:[MMTargets shared] action:@selector(onHeaderDoubleTap:)];
     dtap.numberOfTapsRequired = 2;
     [dz addGestureRecognizer:dtap];
     [dtap requireGestureRecognizerToFail:dpan];
-    /* v0.7.0 (1.10): swipe de DOS dedos en el encabezado -> perfil anterior/siguiente. */
     UISwipeGestureRecognizer *psl = [[UISwipeGestureRecognizer alloc]
         initWithTarget:[MMTargets shared] action:@selector(onProfileSwipe:)];
     psl.direction = UISwipeGestureRecognizerDirectionLeft;
@@ -6039,122 +6547,114 @@ static void mm_build_ui(void)
     [dz addGestureRecognizer:psr];
     [g_panel addSubview:dz];
 
-    /* v0.7.13: header con prompt terminal y version en kernel */
-    UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 6.0, 222.0, 22.0)];
-    UIFont *hf = [UIFont fontWithName:@"Menlo-Bold" size:14.0];
-    if (hf == nil) hf = [UIFont boldSystemFontOfSize:14.0];
-    UIFont *vf = [UIFont fontWithName:@"Menlo" size:9.5];
-    if (vf == nil) vf = [UIFont systemFontOfSize:9.5];
-    NSMutableAttributedString *ht = [[NSMutableAttributedString alloc]
-        initWithString:@">_ "
-            attributes:@{ NSFontAttributeName: hf,
-                          NSForegroundColorAttributeName:
-                              [mm_neon_green() colorWithAlphaComponent:0.95],
-                          NSKernAttributeName: @0.5 }];
-    [ht appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"FUSION"
-            attributes:@{ NSFontAttributeName: hf,
-                          NSForegroundColorAttributeName:
-                              [UIColor colorWithRed:0.0 green:1.0 blue:0.75 alpha:1.0],
-                          NSKernAttributeName: @1.5 }]];
-    [ht appendAttributedString:[[NSAttributedString alloc]
-        initWithString:[NSString stringWithFormat:@" // v%s", MODMENU_VERSION]
-            attributes:@{ NSFontAttributeName: vf,
-                          NSForegroundColorAttributeName:
-                              [UIColor colorWithWhite:0.55 alpha:1.0],
-                          NSKernAttributeName: @0.3 }]];
-    h.attributedText = ht;
-    h.adjustsFontSizeToFitWidth = YES;
-    h.minimumScaleFactor = 0.75;
-    [g_panel addSubview:h];
+    /* Marca compacta: cuadro con gradiente de acento. */
+    UIView *mark = [[UIView alloc] initWithFrame:CGRectMake(18.0, 15.0, 36.0, 36.0)];
+    mark.layer.cornerRadius = 11.0;
+    mark.clipsToBounds = YES;
+    CAGradientLayer *mg = [CAGradientLayer layer];
+    mg.frame = mark.bounds;
+    mg.startPoint = CGPointMake(0.0, 0.0);
+    mg.endPoint = CGPointMake(1.0, 1.0);
+    mg.colors = @[(__bridge id)[mm_neon_green() colorWithAlphaComponent:0.95].CGColor,
+                  (__bridge id)[mm_neon_purple() colorWithAlphaComponent:0.90].CGColor];
+    [mark.layer addSublayer:mg];
+    UILabel *fl = mm_cloud_label(@"F", 19.0, UIFontWeightHeavy, [UIColor whiteColor]);
+    fl.textAlignment = NSTextAlignmentCenter;
+    fl.frame = mark.bounds;
+    [mark addSubview:fl];
+    [g_panel addSubview:mark];
 
-    /* v0.7.13: boton X angular estilo terminal [X] */
+    UILabel *h = mm_cloud_label(@"FUSION", 19.0, UIFontWeightHeavy, [UIColor whiteColor]);
+    h.frame = CGRectMake(64.0, 9.0, 210.0, 24.0);
+    [g_panel addSubview:h];
+    UILabel *sub = mm_cloud_label([NSString stringWithFormat:@"CLOUD CONTROL  ·  v%s", MODMENU_VERSION],
+                                  8.0, UIFontWeightSemibold,
+                                  [UIColor colorWithWhite:0.52 alpha:1.0]);
+    sub.frame = CGRectMake(65.0, 34.0, 210.0, 13.0);
+    [g_panel addSubview:sub];
+
+    g_status_strip = [[UILabel alloc] initWithFrame:CGRectMake(286.0, 18.0, 246.0, 28.0)];
+    g_status_strip.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.04];
+    g_status_strip.layer.cornerRadius = 9.0;
+    g_status_strip.layer.masksToBounds = YES;
+    g_status_strip.layer.borderWidth = 0.6;
+    g_status_strip.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.07].CGColor;
+    g_status_strip.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
+    g_status_strip.font = [UIFont fontWithName:@"Menlo-Bold" size:8.2] ?:
+                          [UIFont boldSystemFontOfSize:8.2];
+    g_status_strip.textAlignment = NSTextAlignmentCenter;
+    g_status_strip.adjustsFontSizeToFitWidth = YES;
+    g_status_strip.minimumScaleFactor = 0.70;
+    g_status_strip.text = @"● AIM   ● ESP   ● NOJB   TGT --";
+    [g_panel addSubview:g_status_strip];
+
     UIButton *x = [UIButton buttonWithType:UIButtonTypeCustom];
-    x.frame = CGRectMake(MM_PANEL_W - 42.0, 5.0, 36.0, 24.0);
-    x.backgroundColor = [UIColor colorWithRed:0.08 green:0.0 blue:0.02 alpha:0.85];
-    x.layer.cornerRadius = 3.0;        /* angular */
-    x.layer.borderWidth = 1.0;
-    x.layer.borderColor =
-        [UIColor colorWithRed:1.0 green:0.25 blue:0.35 alpha:0.80].CGColor;
-    x.clipsToBounds = YES;
-    UIFont *xf = [UIFont fontWithName:@"Menlo-Bold" size:12.0];
-    if (xf == nil) xf = [UIFont boldSystemFontOfSize:12.0];
-    [x setTitle:@"[X]" forState:UIControlStateNormal];
-    [x setTitleColor:[UIColor colorWithRed:1.0 green:0.45 blue:0.50 alpha:1.0]
-             forState:UIControlStateNormal];
-    x.titleLabel.font = xf;
+    x.frame = CGRectMake(MM_PANEL_W - 48.0, 17.0, 30.0, 30.0);
+    x.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.05];
+    x.layer.cornerRadius = 9.0;
+    x.layer.borderWidth = 0.7;
+    x.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.09].CGColor;
+    x.accessibilityLabel = @"Cerrar";
+    UIImage *ximg = nil;
+    if (@available(iOS 13.0, *)) ximg = [UIImage systemImageNamed:@"xmark"];
+    if (ximg != nil) {
+        [x setImage:[ximg imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]
+            forState:UIControlStateNormal];
+        x.tintColor = [UIColor colorWithWhite:0.78 alpha:1.0];
+    } else {
+        [x setTitle:@"X" forState:UIControlStateNormal];
+        [x setTitleColor:[UIColor colorWithWhite:0.78 alpha:1.0]
+                forState:UIControlStateNormal];
+        x.titleLabel.font = mm_cloud_font(12.0, UIFontWeightBold);
+    }
     [x addTarget:[MMTargets shared] action:@selector(onClose)
         forControlEvents:UIControlEventTouchUpInside];
     [g_panel addSubview:x];
 
-    /* v0.7.13: status strip estilo HUD terminal. Fijo en el prolog del panel
-       (no live-update por ahora - lo refresca el latido via mm_refresh_info).
-       Formato: `[●] AIM  [●] ESP  [●] NOJB  TARGETS: N` en Menlo. */
-    g_status_strip = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 30.0, MM_PANEL_W - 20.0, 18.0)];
-    g_status_strip.backgroundColor = [UIColor colorWithRed:0.0 green:0.02 blue:0.03 alpha:0.60];
-    g_status_strip.layer.cornerRadius = 3.0;
-    g_status_strip.layer.masksToBounds = YES;
-    g_status_strip.layer.borderWidth = 0.6;
-    g_status_strip.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.30].CGColor;
-    g_status_strip.textColor = [UIColor colorWithWhite:0.78 alpha:1.0];
-    g_status_strip.font = [UIFont fontWithName:@"Menlo-Bold" size:9.5] ?:
-                          [UIFont boldSystemFontOfSize:9.5];
-    g_status_strip.textAlignment = NSTextAlignmentCenter;
-    g_status_strip.text = @"[*] AIM  [*] ESP  [*] NOJB  TARGETS: --";
-    [g_panel addSubview:g_status_strip];
+    UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(18.0, 64.0, MM_PANEL_W - 36.0, 0.5)];
+    sep.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    sep.userInteractionEnabled = NO;
+    [g_panel addSubview:sep];
 
-    /* v0.7.13: tabs con fuente Menlo + angular + tint cyan oscuro. Las paginas
-       (g_p_esp..) viven a y=74, asi que tabs ocupan 50-72 (22 pt). */
-    g_seg = [[UISegmentedControl alloc] initWithItems:@[@"ESP", @"VIS", @"MISC", @"EXTRA", @"INFO"]];
-    g_seg.frame = CGRectMake(8.0, 50.0, MM_PANEL_W - 16.0, 22.0);
+    /* Navegacion horizontal real. g_seg queda oculto solo como estado para
+       conservar el swipe y los metodos que ya existian. */
+    NSArray *navTitles = @[ @"COMBATE", @"VISUAL", @"RADAR", @"PERFIL", @"INFO" ];
+    CGFloat navW = (MM_PANEL_W - 36.0 - 32.0) / 5.0;
+    g_nav_btns = [NSMutableArray array];
+    for (NSUInteger i = 0; i < navTitles.count; i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(18.0 + (CGFloat)i * (navW + 8.0), MM_CLOUD_NAV_Y,
+                             navW, 38.0);
+        b.tag = (NSInteger)i;
+        b.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.035];
+        b.layer.cornerRadius = 11.0;
+        b.layer.borderWidth = 0.7;
+        b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.07].CGColor;
+        b.titleLabel.font = mm_cloud_font(9.8, UIFontWeightSemibold);
+        b.titleLabel.adjustsFontSizeToFitWidth = YES;
+        b.titleLabel.minimumScaleFactor = 0.72;
+        [b setTitle:[[mm_tr(navTitles[i]) uppercaseString]
+                        stringByReplacingOccurrencesOfString:@"\n" withString:@" "]
+            forState:UIControlStateNormal];
+        [b addTarget:[MMTargets shared] action:@selector(onNav:)
+            forControlEvents:UIControlEventTouchUpInside];
+        [g_panel addSubview:b];
+        [g_nav_btns addObject:b];
+    }
+
+    g_seg = [[UISegmentedControl alloc] initWithItems:navTitles];
+    g_seg.frame = CGRectZero;
+    g_seg.hidden = YES;
     g_seg.selectedSegmentIndex = 0;
-    g_seg.backgroundColor = [UIColor colorWithRed:0.0 green:0.015 blue:0.025 alpha:0.90];
-    g_seg.layer.cornerRadius = 3.0;        /* angular */
-    g_seg.layer.masksToBounds = YES;
-    g_seg.layer.borderWidth = 1.0;
-    g_seg.layer.borderColor =
-        [mm_neon_green() colorWithAlphaComponent:0.55].CGColor;
-    if ([g_seg respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        g_seg.selectedSegmentTintColor =
-            [UIColor colorWithRed:0.0 green:0.42 blue:0.35 alpha:0.95];
-    else
-        g_seg.tintColor = mm_neon_green();
-    UIFont *tabf = [UIFont fontWithName:@"Menlo-Bold" size:10.5];
-    if (tabf == nil) tabf = [UIFont boldSystemFontOfSize:10.5];
-    [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.65 alpha:1.0],
-            NSFontAttributeName: tabf,
-            NSKernAttributeName: @1.0 }
-                          forState:UIControlStateNormal];
-    [g_seg setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithRed:0.4 green:1.0 blue:0.9 alpha:1.0],
-            NSFontAttributeName: tabf,
-            NSKernAttributeName: @1.0 }
-                          forState:UIControlStateSelected];
-    [g_seg addTarget:[MMTargets shared] action:@selector(onSeg:)
-        forControlEvents:UIControlEventValueChanged];
-    /* v0.6.4: swipe horizontal sobre el selector cambia de pagina. */
-    UISwipeGestureRecognizer *swl = [[UISwipeGestureRecognizer alloc]
-        initWithTarget:[MMTargets shared] action:@selector(onHeaderSwipe:)];
-    swl.direction = UISwipeGestureRecognizerDirectionLeft;
-    [g_seg addGestureRecognizer:swl];
-    UISwipeGestureRecognizer *swr = [[UISwipeGestureRecognizer alloc]
-        initWithTarget:[MMTargets shared] action:@selector(onHeaderSwipe:)];
-    swr.direction = UISwipeGestureRecognizerDirectionRight;
-    [g_seg addGestureRecognizer:swr];
     [g_panel addSubview:g_seg];
 
-    g_p_esp  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
-    g_p_vis  = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
-    g_p_misc = [[UIScrollView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
-    ((UIScrollView *)g_p_misc).showsVerticalScrollIndicator = YES;
-    ((UIScrollView *)g_p_misc).indicatorStyle = UIScrollViewIndicatorStyleWhite;
-    ((UIScrollView *)g_p_misc).alwaysBounceVertical = YES;
-    g_p_more = [[UIScrollView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
-    ((UIScrollView *)g_p_more).showsVerticalScrollIndicator = YES;
-    ((UIScrollView *)g_p_more).indicatorStyle = UIScrollViewIndicatorStyleWhite;
-    g_p_info = [[UIView alloc] initWithFrame:CGRectMake(8.0, 74.0, 284.0, 348.0)];
+    /* Paginas: area ancha de tres columnas, 604 x 214. */
+    CGRect body = CGRectMake(18.0, MM_CLOUD_BODY_Y, MM_PANEL_W - 36.0, MM_CLOUD_BODY_H);
+    g_p_esp  = [[UIView alloc] initWithFrame:body];
+    g_p_vis  = [[UIView alloc] initWithFrame:body];
+    g_p_misc = [[UIView alloc] initWithFrame:body];
+    g_p_more = [[UIView alloc] initWithFrame:body];
+    g_p_info = [[UIView alloc] initWithFrame:body];
     g_p_vis.hidden = YES;
     g_p_misc.hidden = YES;
     g_p_more.hidden = YES;
@@ -6165,504 +6665,29 @@ static void mm_build_ui(void)
     [g_panel addSubview:g_p_more];
     [g_panel addSubview:g_p_info];
 
-    /* --- pagina ESP --- */
-    NSArray *keys = @[@"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
-                      @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
-                      @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
-                      @"mm_esp_fill"];
-    NSArray *titulos = @[@"ESP maestro", @"Cajas", @"Jugadores",
-                         @"Bots", @"Nombres", @"Distancia",
-                         @"Salud", @"Lineas", @"Lineas desde arriba",
-                         @"Relleno"];
     g_sub_switches = [NSMutableArray array];
-    for (NSUInteger i = 0; i < keys.count; i++) {
-        UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-        /* v0.2.7: todo arranca apagado, tambien Jugadores/Bots (antes venian
-           ON por defecto). Con el reseteo de arranque la clave casi nunca
-           existe al construir; el default queda como red de seguridad. */
-        sw.on = mm_def_bool(keys[i], NO);
-        sw.onTintColor = mm_verde();
-        sw.accessibilityIdentifier = keys[i];
-        /* v0.2.5: 10 filas; el switch se reduce al 90% para que la fila de
-           29.5 pt no se solape con la siguiente y quepa el nuevo toggle. */
-        sw.transform = CGAffineTransformMakeScale(0.9, 0.9);
-        [sw addTarget:[MMTargets shared] action:@selector(onSwitch:)
-            forControlEvents:UIControlEventValueChanged];
-        UIView *row = mm_row(titulos[i], sw);
-        row.frame = CGRectMake(0, (CGFloat)i * 29.5, 284.0, 31.0);
-        [g_p_esp addSubview:row];
-        if (i > 0) [g_sub_switches addObject:sw];
-    }
+    mm_cloud_build_combat(g_p_esp);
+    mm_cloud_build_visual(g_p_vis);
+    mm_cloud_build_radar(g_p_misc);
+    mm_cloud_build_profiles(g_p_more);
+    mm_cloud_build_info(g_p_info);
 
-    float rng = mm_def_float(@"mm_esp_range", 500.0f);
-
-    UILabel *rt = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 298.0, 190.0, 18.0)];
-    rt.text = mm_tr(@"Rango ESP (m)");
-    rt.textColor = [UIColor whiteColor];
-    rt.font = [UIFont systemFontOfSize:13.0];
-    [g_p_esp addSubview:rt];
-
-    g_range_val = [[UILabel alloc] initWithFrame:CGRectMake(200.0, 298.0, 78.0, 18.0)];
-    g_range_val.text = [NSString stringWithFormat:@"%d m", (int)(rng + 0.5f)];
-    g_range_val.textColor = [UIColor colorWithWhite:0.8 alpha:1.0];
-    g_range_val.font = [UIFont systemFontOfSize:12.0];
-    g_range_val.textAlignment = NSTextAlignmentRight;
-    [g_p_esp addSubview:g_range_val];
-
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, 315.0, 272.0, 30.0)];
-    sl.minimumValue = 20.0f;
-    sl.maximumValue = 500.0f;
-    sl.value = rng;
-    sl.accessibilityIdentifier = @"mm_esp_range";
-    sl.tintColor = mm_verde();
-    sl.thumbTintColor = [UIColor colorWithRed:0.80 green:1.0 blue:0.86 alpha:1.0];
-    [sl addTarget:[MMTargets shared] action:@selector(onSlider:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_esp addSubview:sl];
-
-    /* --- pagina VIS (v0.3.0: Stream Mode + pulido ESP) --- */
-    UIView *vr = mm_switch_row(@"Stream Mode (ocultar UI)", @"mm_stream", NO);
-    vr.frame = CGRectMake(0, 2.0, 284.0, 34.0);
-    [g_p_vis addSubview:vr];
-
-    UILabel *vh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 90.0, 272.0, 18.0)];
-    vh.text = mm_tr(@"ESP EN PANTALLA");
-    vh.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
-    vh.font = [UIFont boldSystemFontOfSize:11.0];
-    [g_p_vis addSubview:vh];
-
-    UISwitch *cs = [[UISwitch alloc] initWithFrame:CGRectMake(0, 0, 51.0, 31.0)];
-    cs.on = mm_def_bool(@"mm_esp_count", NO);
-    cs.onTintColor = mm_verde();
-    cs.accessibilityIdentifier = @"mm_esp_count";
-    cs.transform = CGAffineTransformMakeScale(0.9, 0.9);
-    [cs addTarget:[MMTargets shared] action:@selector(onSwitch:)
-        forControlEvents:UIControlEventValueChanged];
-    UIView *csr = mm_row(@"Contador JUG / BOT", cs);
-    csr.frame = CGRectMake(0, 108.0, 284.0, 31.0);
-    [g_p_vis addSubview:csr];
-    [g_sub_switches addObject:cs];
-
-    UILabel *vsl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 144.0, 272.0, 15.0)];
-    vsl.text = mm_tr(@"Estilo de caja");
-    vsl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    vsl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_vis addSubview:vsl];
-
-    UISegmentedControl *bs = [[UISegmentedControl alloc]
-        initWithItems:@[mm_tr(@"Completa"), mm_tr(@"Esquinas")]];
-    bs.frame = CGRectMake(6.0, 160.0, 272.0, 30.0);
-    bs.selectedSegmentIndex =
-        ((int)mm_def_float(@"mm_esp_box_style", 0.0f) == 1) ? 1 : 0;
-    if ([bs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        bs.selectedSegmentTintColor =
-            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
-    else
-        bs.tintColor = mm_verde();
-    [bs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.88 alpha:1.0],
-            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
-                      forState:UIControlStateNormal];
-    [bs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor whiteColor],
-            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
-                      forState:UIControlStateSelected];
-    [bs addTarget:[MMTargets shared] action:@selector(onBoxStyle:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_vis addSubview:bs];
-
-    UILabel *vtl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 196.0, 272.0, 15.0)];
-    vtl.text = mm_tr(@"Tema de color");
-    vtl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    vtl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_vis addSubview:vtl];
-
-    UISegmentedControl *ts = [[UISegmentedControl alloc]
-        initWithItems:@[mm_tr(@"Clasico"), mm_tr(@"Neon"), mm_tr(@"Blanco")]];
-    ts.frame = CGRectMake(6.0, 212.0, 272.0, 30.0);
-    {
-        int t = (int)mm_def_float(@"mm_esp_theme", 0.0f);
-        if (t < 0 || t > 2) t = 0;
-        ts.selectedSegmentIndex = t;
-    }
-    if ([ts respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        ts.selectedSegmentTintColor =
-            [UIColor colorWithRed:0.10 green:0.55 blue:0.25 alpha:1.0];
-    else
-        ts.tintColor = mm_verde();
-    [ts setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.88 alpha:1.0],
-            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
-                      forState:UIControlStateNormal];
-    [ts setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor whiteColor],
-            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
-                      forState:UIControlStateSelected];
-    [ts addTarget:[MMTargets shared] action:@selector(onTheme:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_vis addSubview:ts];
-
-    /* --- pagina MISC --- */
-    UILabel *d1 = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 6.0, 272.0, 18.0)];
-    d1.text = mm_tr(@"Cuenta invitado");
-    d1.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
-    d1.font = [UIFont boldSystemFontOfSize:12.0];
-    [g_p_misc addSubview:d1];
-
-    UIButton *gr = [UIButton buttonWithType:UIButtonTypeCustom];
-    gr.frame = CGRectMake(6.0, 28.0, 272.0, 36.0);
-    gr.backgroundColor = [UIColor colorWithRed:0.48 green:0.08 blue:0.08 alpha:0.95];
-    gr.layer.cornerRadius = 8.0;
-    gr.layer.borderWidth = 1.0;
-    gr.layer.borderColor = [UIColor colorWithRed:1.0 green:0.45 blue:0.45 alpha:0.7].CGColor;
-    [gr setTitle:mm_tr(@"Restablecer invitado") forState:UIControlStateNormal];
-    [gr setTitleColor:[UIColor colorWithRed:1.0 green:0.9 blue:0.9 alpha:1.0]
-             forState:UIControlStateNormal];
-    gr.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    [gr addTarget:[MMTargets shared] action:@selector(onGuestReset)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:gr];
-
-    /* v0.7.12: perfiles / presets removidos del panel (callbacks siguen
-       vivos para el swipe de 2 dedos y la deserializacion del slot default,
-       pero sin UI el usuario no ve los 5 slots ni los 4 preset buttons). */
-
-    /* v0.7.14: panel cliente final. Removidos los botones de desarrollo
-       (Debug status file, Escribir TXT, Auto-test del overlay). Lo que
-       queda es solo lo que el usuario final usa. */
-
-    UIView *hpr = mm_switch_row(@"Vibracion al tocar", @"mm_haptics", YES);
-    hpr.frame = CGRectMake(0, 78.0, 284.0, 34.0);
-    [g_p_misc addSubview:hpr];
-
-    /* v0.7.0 (1.13): stream automatico. */
-    UIView *asr = mm_switch_row(@"Stream auto al grabar", @"mm_auto_stream", YES);
-    asr.frame = CGRectMake(0, 116.0, 284.0, 34.0);
-    [g_p_misc addSubview:asr];
-
-    UILabel *lgl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 154.0, 272.0, 16.0)];
-    lgl.text = mm_tr(@"Idioma (reiniciar)");
-    lgl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    lgl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_misc addSubview:lgl];
-
-    UISegmentedControl *lgs = [[UISegmentedControl alloc] initWithItems:@[@"ES", @"EN"]];
-    lgs.frame = CGRectMake(6.0, 172.0, 272.0, 28.0);
-    lgs.selectedSegmentIndex = (mm_lang() == 1) ? 1 : 0;
-    if ([lgs respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        lgs.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
-    [lgs setTitleTextAttributes:@{ NSForegroundColorAttributeName:
-            [UIColor colorWithWhite:0.88 alpha:1.0],
-            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
-                       forState:UIControlStateNormal];
-    [lgs setTitleTextAttributes:@{ NSForegroundColorAttributeName: [UIColor whiteColor],
-            NSFontAttributeName: [UIFont systemFontOfSize:11.0] }
-                       forState:UIControlStateSelected];
-    [lgs addTarget:[MMTargets shared] action:@selector(onLang:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_misc addSubview:lgs];
-
-    /* v0.7.0 (4.2): licencia in-menu sin red. */
-    UILabel *licl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 212.0, 272.0, 16.0)];
-    licl.text = mm_tr(@"Licencia");
-    licl.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
-    licl.font = [UIFont boldSystemFontOfSize:12.0];
-    [g_p_misc addSubview:licl];
-
-    g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 230.0, 272.0, 30.0)];
-    g_lic_label.numberOfLines = 2;
-    g_lic_label.textColor = [UIColor colorWithWhite:0.86 alpha:1.0];
-    g_lic_label.font = [UIFont fontWithName:@"Menlo" size:9.0] ?:
-                       [UIFont systemFontOfSize:9.0];
-    g_lic_label.text = mm_lic_short_status();
-    [g_p_misc addSubview:g_lic_label];
-
-    UIButton *licp = [UIButton buttonWithType:UIButtonTypeCustom];
-    licp.frame = CGRectMake(6.0, 264.0, 132.0, 30.0);
-    licp.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
-    licp.layer.cornerRadius = 7.0;
-    [licp setTitle:mm_tr(@"Pegar token") forState:UIControlStateNormal];
-    [licp setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    licp.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [licp addTarget:[MMTargets shared] action:@selector(onLicensePaste)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:licp];
-
-    UIButton *licr = [UIButton buttonWithType:UIButtonTypeCustom];
-    licr.frame = CGRectMake(146.0, 264.0, 132.0, 30.0);
-    licr.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    licr.layer.cornerRadius = 7.0;
-    [licr setTitle:mm_tr(@"Revalidar") forState:UIControlStateNormal];
-    [licr setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    licr.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [licr addTarget:[MMTargets shared] action:@selector(onLicenseCheck)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_misc addSubview:licr];
-
-    /* v0.7.12: telemetria local y marca HWID removidas del panel. */
-    /* v0.7.14: Copiar self-test removido (era boton de soporte DEV). */
-
-    ((UIScrollView *)g_p_misc).contentSize = CGSizeMake(284.0, 310.0);
-
-    /* --- pagina EXTRA (v0.4.0: features nuevas de overlay) --- */
-    UILabel *xh = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 2.0, 272.0, 18.0)];
-    xh.text = @"OVERLAY";
-    xh.textColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.66 alpha:1.0];
-    xh.font = [UIFont boldSystemFontOfSize:11.0];
-    [g_p_more addSubview:xh];
-
-    /* v0.7.12: removidos mm_x_distcol, mm_x_lowhp, mm_x_fps, mm_x_height,
-       mm_x_telem y mm_x_targetlist.
-       v0.7.14: agregado mm_x_nade_pred (predictor de trayectoria de granada). */
-    NSArray *xkeys = @[ @"mm_x_cross", @"mm_x_aimring", @"mm_x_head",
-                        @"mm_x_priority", @"mm_x_warn", @"mm_x_arrow",
-                        @"mm_x_radar",
-                        @"mm_x_bearings", @"mm_x_trails", @"mm_x_declutter",
-                        @"mm_x_radar_cam",
-                        @"mm_x_nade_pred" ];
-    NSArray *xtit  = @[ @"Crosshair (mira)", @"Anillo de aim", @"Punto en la cabeza",
-                        @"Prioridad (mas cercano)", @"Aviso enemigo cerca",
-                        @"Flecha fuera de pantalla (detras)",
-                        @"Radar 2D",
-                        @"Brujula de bearings", @"Estelas (ultimos 2 s)",
-                        @"Anti-solape de etiquetas", @"Radar: arriba = mi vista",
-                        @"Predictor de granadas" ];
-    for (NSUInteger i = 0; i < xkeys.count; i++) {
-        BOOL xdef = [xkeys[i] isEqualToString:@"mm_x_radar_cam"];   /* default ON */
-        UIView *xrow = mm_switch_row(xtit[i], xkeys[i], xdef);
-        xrow.frame = CGRectMake(0, 24.0 + (CGFloat)i * 31.0, 284.0, 31.0);
-        [g_p_more addSubview:xrow];
-    }
-
-    CGFloat ry = 24.0 + (CGFloat)xkeys.count * 31.0 + 10.0;   /* bajo los toggles */
-
-    /* v0.4.2: estilo de crosshair */
-    UILabel *csl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    csl.text = mm_tr(@"Estilo de crosshair");
-    csl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    csl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:csl]; ry += 20.0;
-    UISegmentedControl *css = [[UISegmentedControl alloc]
-        initWithItems:@[mm_tr(@"Cruz"), mm_tr(@"Punto"), mm_tr(@"Circulo"), mm_tr(@"Todo")]];
-    css.frame = CGRectMake(6.0, ry, 272.0, 28.0);
-    { int cv = (int)mm_def_float(@"mm_x_cross_style", 0.0f); if (cv < 0 || cv > 3) cv = 0; css.selectedSegmentIndex = cv; }
-    if ([css respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        css.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
-    [css setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor colorWithWhite:0.88 alpha:1.0],
-        NSFontAttributeName:[UIFont systemFontOfSize:10.0] } forState:UIControlStateNormal];
-    [css addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:css]; ry += 38.0;
-
-    /* v0.4.2: limite de objetivos (closest-N) */
-    UILabel *mnl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    mnl.text = mm_tr(@"Limite de objetivos (0 = todos)");
-    mnl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    mnl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:mnl]; ry += 18.0;
-    UISlider *mns = [[UISlider alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 28.0)];
-    mns.minimumValue = 0.0f; mns.maximumValue = 32.0f;
-    mns.value = mm_def_float(@"mm_x_maxn", 0.0f);
-    mns.tintColor = mm_neon_green();
-    [mns addTarget:[MMTargets shared] action:@selector(onMaxN:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:mns]; ry += 36.0;
-
-    /* #10 selector de tema del menu (re-skina todo el acento) */
-    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    tl.text = mm_tr(@"Tema del menu");
-    tl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    tl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:tl]; ry += 20.0;
-    UISegmentedControl *tac = [[UISegmentedControl alloc]
-        initWithItems:@[@"FUSION", mm_tr(@"Hielo"), mm_tr(@"Magenta"),
-                        mm_tr(@"Fuego"), mm_tr(@"Aqua")]];
-    tac.frame = CGRectMake(6.0, ry, 272.0, 28.0);
-    { int ti = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"mm_theme_accent"];
-      if (ti < 0 || ti > 4) ti = 0; tac.selectedSegmentIndex = ti; }
-    if ([tac respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        tac.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
-    [tac setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor colorWithWhite:0.86 alpha:1.0],
-        NSFontAttributeName:[UIFont boldSystemFontOfSize:9.5] } forState:UIControlStateNormal];
-    [tac setTitleTextAttributes:@{ NSForegroundColorAttributeName:[UIColor whiteColor],
-        NSFontAttributeName:[UIFont boldSystemFontOfSize:9.5] } forState:UIControlStateSelected];
-    [tac addTarget:[MMTargets shared] action:@selector(onThemeAccent:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:tac]; ry += 38.0;
-
-    /* v0.7.12: paleta daltonismo removida del panel (g_cb_mode queda en 0,
-       la paleta normal). */
-
-    /* v0.7.0 (1.16): dos acentos personalizados (UIColorPickerViewController). */
-    UIButton *acb = [UIButton buttonWithType:UIButtonTypeCustom];
-    acb.frame = CGRectMake(6.0, ry, 132.0, 30.0);
-    acb.tag = 0;
-    acb.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    acb.layer.cornerRadius = 7.0;
-    acb.layer.borderWidth = 0.7;
-    acb.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
-    [acb setTitle:mm_tr(@"Acento 1") forState:UIControlStateNormal];
-    [acb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    acb.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [acb addTarget:[MMTargets shared] action:@selector(onAccentPick:)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_more addSubview:acb];
-
-    UIButton *ac2 = [UIButton buttonWithType:UIButtonTypeCustom];
-    ac2.frame = CGRectMake(146.0, ry, 132.0, 30.0);
-    ac2.tag = 1;
-    ac2.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.95];
-    ac2.layer.cornerRadius = 7.0;
-    ac2.layer.borderWidth = 0.7;
-    ac2.layer.borderColor = [mm_neon_purple() colorWithAlphaComponent:0.45].CGColor;
-    [ac2 setTitle:mm_tr(@"Acento 2") forState:UIControlStateNormal];
-    [ac2 setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    ac2.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
-    [ac2 addTarget:[MMTargets shared] action:@selector(onAccentPick:)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_more addSubview:ac2]; ry += 40.0;
-
-    UILabel *thl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    thl.text = mm_tr(@"Temas guardados");
-    thl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    thl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:thl]; ry += 20.0;
-
-    UISegmentedControl *ths = [[UISegmentedControl alloc]
-        initWithItems:@[@"T1", @"T2", @"T3"]];
-    ths.frame = CGRectMake(6.0, ry, 132.0, 28.0);
-    ths.selectedSegmentIndex = 0;
-    if ([ths respondsToSelector:@selector(setSelectedSegmentTintColor:)])
-        ths.selectedSegmentTintColor = [mm_neon_purple() colorWithAlphaComponent:0.85];
-    [ths addTarget:[MMTargets shared] action:@selector(onThemeSlot:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:ths];
-
-    UIButton *tsv = [UIButton buttonWithType:UIButtonTypeCustom];
-    tsv.frame = CGRectMake(146.0, ry, 64.0, 28.0);
-    tsv.backgroundColor = [UIColor colorWithRed:0.08 green:0.42 blue:0.20 alpha:0.95];
-    tsv.layer.cornerRadius = 7.0;
-    [tsv setTitle:mm_tr(@"Guardar") forState:UIControlStateNormal];
-    [tsv setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    tsv.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
-    [tsv addTarget:[MMTargets shared] action:@selector(onThemeSave)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_more addSubview:tsv];
-
-    UIButton *tld = [UIButton buttonWithType:UIButtonTypeCustom];
-    tld.frame = CGRectMake(214.0, ry, 64.0, 28.0);
-    tld.backgroundColor = [UIColor colorWithRed:0.10 green:0.28 blue:0.48 alpha:0.95];
-    tld.layer.cornerRadius = 7.0;
-    [tld setTitle:mm_tr(@"Cargar") forState:UIControlStateNormal];
-    [tld setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    tld.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
-    [tld addTarget:[MMTargets shared] action:@selector(onThemeLoad)
-        forControlEvents:UIControlEventTouchUpInside];
-    [g_p_more addSubview:tld]; ry += 38.0;
-
-    /* #11 opacidad del menu */
-    UILabel *ol = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    ol.text = mm_tr(@"Opacidad del menu");
-    ol.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    ol.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:ol]; ry += 18.0;
-    UISlider *osl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 28.0)];
-    osl.minimumValue = 0.4f; osl.maximumValue = 1.0f;
-    osl.value = mm_def_float(@"mm_menu_opacity", 1.0f);
-    osl.tintColor = mm_neon_green();
-    [osl addTarget:[MMTargets shared] action:@selector(onMenuOpacity:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:osl]; ry += 34.0;
-
-    /* #11 escala del menu */
-    UILabel *scl = [[UILabel alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 16.0)];
-    scl.text = mm_tr(@"Escala del menu");
-    scl.textColor = [UIColor colorWithWhite:0.80 alpha:1.0];
-    scl.font = [UIFont systemFontOfSize:11.0];
-    [g_p_more addSubview:scl]; ry += 18.0;
-    UISlider *ssl = [[UISlider alloc] initWithFrame:CGRectMake(6.0, ry, 272.0, 28.0)];
-    ssl.minimumValue = 0.8f; ssl.maximumValue = 1.2f;
-    ssl.value = mm_def_float(@"mm_menu_scale", 1.0f);
-    ssl.tintColor = mm_neon_green();
-    [ssl addTarget:[MMTargets shared] action:@selector(onMenuScale:)
-        forControlEvents:UIControlEventValueChanged];
-    [g_p_more addSubview:ssl]; ry += 36.0;
-
-    /* v0.7.14: Tier-2 gated removido completo (ESP esqueleto, granadas, loot,
-       prediccion de zona BR). No se van a implementar. Panel limpio. */
-
-    ((UIScrollView *)g_p_more).contentSize = CGSizeMake(284.0, ry + 8.0);
-
-    /* --- pagina INFO --- */
-    g_info = [[UILabel alloc] initWithFrame:CGRectMake(6.0, 4.0, 272.0, 280.0)];
-    g_info.numberOfLines = 0;
-    g_info.clipsToBounds = YES;
-    g_info.textColor = [UIColor colorWithWhite:0.95 alpha:1.0];
-    g_info.font = [UIFont fontWithName:@"Menlo" size:9.5] ?: [UIFont systemFontOfSize:9.5];
-    [g_p_info addSubview:g_info];
-
-    /* v0.3.3: pie de autoria + contacto Telegram tappable. */
-    UIView *foot = [[UIView alloc] initWithFrame:CGRectMake(6.0, 288.0, 272.0, 54.0)];
-    foot.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.55];
-    foot.layer.cornerRadius = 9.0;
-    foot.layer.borderWidth = 0.6;
-    foot.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
-    [g_p_info addSubview:foot];
-
-    UILabel *made = [[UILabel alloc] initWithFrame:CGRectMake(10.0, 5.0, 252.0, 12.0)];
-    made.text = @"Made by: Jose Lopez";
-    made.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
-    made.font = [UIFont systemFontOfSize:9.5 weight:UIFontWeightMedium];
-    [foot addSubview:made];
-
-    UIButton *tg = [UIButton buttonWithType:UIButtonTypeCustom];
-    tg.frame = CGRectMake(0.0, 19.0, 272.0, 32.0);
-    tg.backgroundColor = [UIColor clearColor];
-    tg.accessibilityLabel = @"Telegram @l0pez9801";
-    tg.accessibilityIdentifier = @"mm_telegram";
-    [tg addTarget:[MMTargets shared] action:@selector(onTelegram)
-        forControlEvents:UIControlEventTouchUpInside];
-    [foot addSubview:tg];
-
-    UIView *badge = [[UIView alloc] initWithFrame:CGRectMake(8.0, 4.0, 24.0, 24.0)];
-    badge.backgroundColor = [UIColor colorWithRed:0.16 green:0.58 blue:0.96 alpha:1.0];
-    badge.layer.cornerRadius = 12.0;
-    badge.userInteractionEnabled = NO;
-    [tg addSubview:badge];
-
-    UIImage *planeImg = [UIImage systemImageNamed:@"paperplane.fill"];
-    UIImageView *plane = [[UIImageView alloc] initWithFrame:CGRectMake(4.0, 4.0, 16.0, 16.0)];
-    plane.image = [planeImg imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    plane.tintColor = [UIColor whiteColor];
-    plane.contentMode = UIViewContentModeScaleAspectFit;
-    plane.userInteractionEnabled = NO;
-    [badge addSubview:plane];
-
-    UILabel *handle = [[UILabel alloc] initWithFrame:CGRectMake(40.0, 1.0, 190.0, 15.0)];
-    handle.text = @"@l0pez9801";
-    handle.textColor = [UIColor colorWithWhite:0.98 alpha:1.0];
-    handle.font = [UIFont fontWithName:@"Menlo-Bold" size:11.5] ?:
-                  [UIFont boldSystemFontOfSize:11.5];
-    handle.userInteractionEnabled = NO;
-    [tg addSubview:handle];
-
-    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(40.0, 16.0, 190.0, 11.0)];
-    sub.text = @"Telegram · tocar para abrir";
-    sub.textColor = [UIColor colorWithWhite:0.58 alpha:1.0];
-    sub.font = [UIFont systemFontOfSize:8.5];
-    sub.userInteractionEnabled = NO;
-    [tg addSubview:sub];
-
-    UILabel *chev = [[UILabel alloc] initWithFrame:CGRectMake(244.0, 5.0, 18.0, 20.0)];
-    chev.text = @"›";
-    chev.textColor = [UIColor colorWithWhite:0.55 alpha:1.0];
-    chev.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightMedium];
-    chev.textAlignment = NSTextAlignmentRight;
-    chev.userInteractionEnabled = NO;
-    [tg addSubview:chev];
+    UILabel *foot = mm_cloud_label(@"FUSION CLOUD  ·  STATIC AIM  ·  NOJB",
+                                   7.4, UIFontWeightSemibold,
+                                   [UIColor colorWithWhite:0.34 alpha:1.0]);
+    foot.frame = CGRectMake(18.0, 342.0, 300.0, 10.0);
+    [g_panel addSubview:foot];
+    UILabel *footR = mm_cloud_label(@"DRAG HEADER  ·  2-FINGER PROFILE",
+                                    7.4, UIFontWeightSemibold,
+                                    [UIColor colorWithWhite:0.30 alpha:1.0]);
+    footR.textAlignment = NSTextAlignmentRight;
+    footR.frame = CGRectMake(MM_PANEL_W - 320.0, 342.0, 302.0, 10.0);
+    [g_panel addSubview:footR];
 
     mm_apply_esp_lock();
-    mm_apply_safe_mode();   /* v0.6.4: arranca bloqueado si quedo en seguro */
+    mm_apply_safe_mode();
+    [[MMTargets shared] onSeg:g_seg];
+
 }
 
 /*---------------------------------------------------------------------------
@@ -7004,37 +7029,58 @@ static void mm_apply_stream(void)
     mm_refresh_quickbar();
 }
 
+/* v0.8.0: el panel horizontal solo cabe completo en landscape de iPhone
+   moderno. La escala total es el menor de (preferencia del operador, factor
+   que entra en la ventana). El usuario no puede ampliar por encima de lo que
+   la pantalla permite, pero si reducir. */
+static CGFloat mm_menu_total_scale(CGRect host)
+{
+    CGFloat user = mm_def_float(@"mm_menu_scale", 1.0f);
+    if (user < 0.8f) user = 0.8f;
+    if (user > 1.2f) user = 1.2f;
+
+    CGFloat fitW = (host.size.width  - 20.0) / MM_PANEL_W;
+    CGFloat fitH = (host.size.height - 28.0) / MM_PANEL_H;
+    CGFloat fit = MIN(fitW, fitH);
+    if (fit > 1.2f) fit = 1.2f;
+    if (fit < 0.45f) fit = 0.45f;
+
+    CGFloat total = MIN(user, fit);
+    if (total < 0.45f) total = 0.45f;
+    if (total > 1.2f) total = 1.2f;
+    return total;
+}
+
 static void mm_position_panel(void)
 {
-    if (g_panel == nil || g_panel.superview == nil || g_btn == nil) return;
+    if (g_panel == nil || g_panel.superview == nil) return;
     /* v0.4.1 FIX del bug de tamano: NUNCA setear .frame con un transform de escala
        activo (UIKit deja el frame indefinido y el panel salta/se deforma). Reset a
        identidad, posicionar en tamano base, y re-aplicar la escala del usuario. */
     g_panel.transform = CGAffineTransformIdentity;
 
     CGRect rb = g_panel.superview.bounds;
-    CGFloat w = MM_PANEL_W, h = MM_PANEL_H;
+    CGFloat sc = mm_menu_total_scale(rb);
+    CGFloat vw = MM_PANEL_W * sc;
+    CGFloat vh = MM_PANEL_H * sc;
+    CGFloat cx = CGRectGetMidX(rb);
+    CGFloat cy = CGRectGetMidY(rb);
     CGFloat px, py;
 
+    /* v0.8.0: sin posicion guardada el panel se centra. El boton flotante vive
+       en un borde y anclar ahi un panel de 640 pt lo dejaria fuera de pantalla. */
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"mm_panel_pos"]) {
-        CGFloat cx = mm_def_float(@"mm_panel_x", w / 2.0 + 8.0);
-        CGFloat cy = mm_def_float(@"mm_panel_y", h / 2.0 + 34.0);
-        px = cx - w / 2.0;
-        py = cy - h / 2.0;
-    } else {
-        CGPoint c = g_btn.center;
-        px = c.x - w / 2.0;
-        py = c.y + 34.0;
-        if (py + h > rb.size.height - 12.0) py = c.y - h - 34.0;  /* si no cabe abajo, arriba */
+        cx = mm_def_float(@"mm_panel_x", cx);
+        cy = mm_def_float(@"mm_panel_y", cy);
     }
-    px = MAX(4.0, MIN(rb.size.width  - w - 4.0, px));
-    py = MAX(34.0, MIN(rb.size.height - h - 12.0, py));
-    g_panel.frame = CGRectMake(px, py, w, h);
-    mm_layout_panel_glass();
+    cx = MAX(6.0 + vw / 2.0, MIN(rb.size.width  - 6.0 - vw / 2.0, cx));
+    cy = MAX(24.0 + vh / 2.0, MIN(rb.size.height - 6.0 - vh / 2.0, cy));
+    px = cx - MM_PANEL_W / 2.0;
+    py = cy - MM_PANEL_H / 2.0;
 
-    CGFloat mmSc = mm_def_float(@"mm_menu_scale", 1.0f);
-    if (mmSc < 0.8f) mmSc = 0.8f; if (mmSc > 1.2f) mmSc = 1.2f;
-    if (mmSc != 1.0f) g_panel.transform = CGAffineTransformMakeScale(mmSc, mmSc);
+    g_panel.frame = CGRectMake(px, py, MM_PANEL_W, MM_PANEL_H);
+    mm_layout_panel_glass();
+    if (sc != 1.0f) g_panel.transform = CGAffineTransformMakeScale(sc, sc);
 }
 
 static void mm_set_panel(BOOL open)
@@ -7050,9 +7096,8 @@ static void mm_set_panel(BOOL open)
             g_panel.hidden = NO;
             g_panel.alpha = 0.0;
             CGFloat mmOp = mm_def_float(@"mm_menu_opacity", 1.0f);
-            CGFloat mmSc = mm_def_float(@"mm_menu_scale", 1.0f);
+            CGFloat mmSc = mm_menu_total_scale(g_panel.superview.bounds);
             if (mmOp < 0.4f) mmOp = 0.4f; if (mmOp > 1.0f) mmOp = 1.0f;
-            if (mmSc < 0.8f) mmSc = 0.8f; if (mmSc > 1.2f) mmSc = 1.2f;
             g_panel.transform = CGAffineTransformMakeScale(mmSc * 0.97f, mmSc * 0.97f);
             /* v0.4.0: apertura con resorte (spring) + opacidad/escala del usuario (#11). */
             [UIView animateWithDuration:0.32 delay:0.0
@@ -7080,20 +7125,39 @@ static void mm_set_panel(BOOL open)
    sigue en Documents/modmenu_status.txt y en el syslog. */
 static void mm_refresh_info(void)
 {
-    /* v0.7.13: status strip (HUD arriba del panel) - refresca cada latido con
-       estado real. Formato: `[●] AIM  [●] ESP  [●] NOJB  TARGETS: N`.
-       Cero costo si el panel esta cerrado (label hidden). */
+    /* v0.8.0: pill de estado del encabezado. Puntos de color en vez de
+       corchetes, para que se lea como una barra de sistema y no como consola.
+       Cero costo si el panel esta cerrado (label oculto con el panel). */
     if (g_status_strip != nil) {
         int sAim  = 1;  /* aim es parche estatico, siempre activo si la IPA se instalo */
         int sEsp  = (g_fp_state == 1) ? 1 : 0;
         int sNojb = (g_nojb_passes > 0) ? 1 : 0;
         int targets = g_track_count;
-        NSString *dAim  = sAim  ? @"●" : @"○";
-        NSString *dEsp  = sEsp  ? @"●" : @"○";
-        NSString *dNojb = sNojb ? @"●" : @"○";
-        g_status_strip.text = [NSString stringWithFormat:
-            @"[%@] AIM  [%@] ESP  [%@] NOJB  TARGETS: %d",
-            dAim, dEsp, dNojb, targets];
+        UIFont *sf = [UIFont fontWithName:@"Menlo-Bold" size:8.2] ?:
+                     [UIFont boldSystemFontOfSize:8.2];
+        UIColor *on  = [UIColor colorWithRed:0.20 green:1.0 blue:0.58 alpha:1.0];
+        UIColor *off = [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0];
+        NSMutableAttributedString *st = [[NSMutableAttributedString alloc] init];
+        NSArray *names = @[ @"AIM", @"ESP", @"NOJB" ];
+        BOOL states[3] = { (BOOL)sAim, (BOOL)sEsp, (BOOL)sNojb };
+        for (int i = 0; i < 3; i++) {
+            [st appendAttributedString:[[NSAttributedString alloc]
+                initWithString:names[i]
+                    attributes:@{ NSFontAttributeName: sf,
+                                  NSForegroundColorAttributeName:
+                                      [UIColor colorWithWhite:0.70 alpha:1.0] }]];
+            [st appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"  ●    "
+                    attributes:@{ NSFontAttributeName: sf,
+                                  NSForegroundColorAttributeName:
+                                      states[i] ? on : off }]];
+        }
+        [st appendAttributedString:[[NSAttributedString alloc]
+            initWithString:[NSString stringWithFormat:@"TGT %02d", targets]
+                attributes:@{ NSFontAttributeName: sf,
+                              NSForegroundColorAttributeName:
+                                  [UIColor colorWithWhite:0.92 alpha:1.0] }]];
+        g_status_strip.attributedText = st;
     }
     if (g_info == nil) return;
     if (g_info.attributedText.length > 0) return;
@@ -7192,7 +7256,20 @@ static void mm_refresh_info(void)
                 attributes:@{ NSFontAttributeName: bodyFont,
                               NSForegroundColorAttributeName:
                                   [UIColor colorWithWhite:0.55 alpha:1.0] }]];
+        [t appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"  Telegram @l0pez9801"
+                attributes:@{ NSFontAttributeName: bodyFont,
+                              NSForegroundColorAttributeName:
+                                  [mm_neon_green() colorWithAlphaComponent:0.92] }]];
         g_info.attributedText = t;
+
+        /* v0.8.0: INFO vive en una tarjeta scrolleable. El alto se calcula del
+           texto real (no se recorta) y el scroll recibe el contentSize exacto. */
+        CGSize fit = [g_info sizeThatFits:CGSizeMake(338.0, CGFLOAT_MAX)];
+        CGFloat ih = MAX(190.0, fit.height + 12.0);
+        g_info.frame = CGRectMake(0.0, 0.0, 338.0, ih);
+        if (g_info_scroll != nil)
+            g_info_scroll.contentSize = CGSizeMake(338.0, ih + 8.0);
     } @catch (NSException *e) {}
 }
 
