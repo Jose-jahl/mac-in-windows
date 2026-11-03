@@ -2198,7 +2198,7 @@ static int mm_declutter_budget(void)
     if (conAimRing) mm_draw_aimring(ctx, bs, ar, ag, ab);
     if (conCross)   mm_draw_crosshair(ctx, bs, crossStyle, ar, ag, ab);
     if (conFps)     mm_draw_fps(bs);
-    mm_draw_fov_circle(ctx, bs, cr, cg, cb);   /* C-11 */
+    mm_draw_fov_circle(ctx, bs, ar, ag, ab);   /* C-11 */
     if (conRadar)   mm_draw_radar(ctx, bs, ar, ag, ab);
     if (conTelem)   mm_draw_telem(bs);
     if (o->targetList) mm_draw_target_list(ctx, bs);
