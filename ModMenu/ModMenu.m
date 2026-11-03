@@ -648,6 +648,16 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 #ifndef VA_CAM_GETFOV
 #define VA_CAM_GETFOV 0x108BD9868ULL
 #endif
+/* C-15: Object.get_name / Transform.get_childCount / GetChild */
+#ifndef VA_GETNAME
+#define VA_GETNAME 0x108C0CCA8ULL
+#endif
+#ifndef VA_CHILDCOUNT
+#define VA_CHILDCOUNT 0x108C3C954ULL
+#endif
+#ifndef VA_GETCHILD
+#define VA_GETCHILD 0x108C3C924ULL
+#endif
 /* 0.7: ventana contigua del pawn que cubre alive/transform/entity. Se lee de
    una sola pasada (con fallback a lecturas individuales si el rango falla). */
 #define MM_PAWN_BLOCK_BASE (OFF_PAWN_TRANSFORM & ~0xFFULL)
@@ -680,6 +690,14 @@ static const char *mm_sk_path[MM_SK_N] = {
     "Bip001 L Thigh", "Bip001 L Calf", "Bip001 L Foot",
     "Bip001 R Thigh", "Bip001 R Calf", "Bip001 R Foot"
 };
+static const char *mm_sk_suffix[MM_SK_N] = {
+    " Pelvis", " Spine", " Spine1", " Spine2", " Spine3",
+    " Neck", " Head",
+    " L Clavicle", " L UpperArm", " L Forearm", " L Hand",
+    " R Clavicle", " R UpperArm", " R Forearm", " R Hand",
+    " L Thigh", " L Calf", " L Foot",
+    " R Thigh", " R Calf", " R Foot"
+};
 static const int mm_sk_link[][2] = {
     {0,1},{1,2},{2,3},{3,4},{4,5},{5,6},        /* pelvis -> spine -> cabeza */
     {4,7},{7,8},{8,9},{9,10},                   /* pecho -> brazo izq        */
@@ -698,6 +716,7 @@ typedef struct {
     int      ok;
 } MMSkelCache;
 static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
+static int          g_skel_budget = 1;   /* C-15: resoluciones por pasada */
 typedef void *(*MMFindFn)(void *transform, void *nsstring);
 typedef void  (*MMPosFn)(void *transform, float out[3]);
 static MMFindFn     g_fp_find  = NULL;
@@ -706,6 +725,12 @@ typedef void (*MMSetFovFn)(void *cam, float v);
 static MMSetFovFn   g_fp_cam_setfov = NULL;
 typedef float (*MMGetFovFn)(void *cam);
 static MMGetFovFn   g_fp_cam_getfov = NULL;   /* C-11 */
+typedef void *(*MMStrFn)(void *obj);
+typedef int   (*MMIntFn1)(void *obj);
+typedef void *(*MMObjIntFn)(void *obj, int i);
+static MMStrFn      g_fp_getname = NULL;      /* C-15 */
+static MMIntFn1     g_fp_childcount = NULL;
+static MMObjIntFn   g_fp_getchild = NULL;
 static float        g_cam_fov = 0.0f;   /* C-7: 0 = no tocar */
 static void *(*g_fov_cam_get)(void) = NULL;   /* C-7: get_main (se setea en esp_try) */
 /* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
@@ -2358,7 +2383,30 @@ static int mm_declutter_budget(void)
             CGContextStrokePath(ctx);
         }
 
-        /* C-12: esqueleto PROCEDURAL. SP3CTERIOS no resuelve la cadena de
+        /* C-15: huesos REALES si el walk los encontro. */
+        if (o->skeleton && b->skMask != 0) {
+            CGContextSaveGState(ctx);
+            CGContextSetShadowWithColor(ctx, CGSizeZero, 3.0,
+                [UIColor colorWithRed:cr green:cg blue:cb alpha:0.55].CGColor);
+            CGContextSetLineWidth(ctx, 1.3);
+            CGContextSetLineCap(ctx, kCGLineCapRound);
+            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.90);
+            CGContextBeginPath(ctx);
+            for (int l = 0; l < MM_SK_LINKS; l++) {
+                int i0 = mm_sk_link[l][0], i1 = mm_sk_link[l][1];
+                if (!(b->skMask & (1u << i0)) || !(b->skMask & (1u << i1))) continue;
+                CGContextMoveToPoint(ctx, b->sk[i0].x, b->sk[i0].y);
+                CGContextAddLineToPoint(ctx, b->sk[i1].x, b->sk[i1].y);
+            }
+            CGContextStrokePath(ctx);
+            if (b->skMask & (1u << 6)) {
+                CGFloat hr = MAX(1.6, r.size.height * 0.018);
+                CGContextStrokeEllipseInRect(ctx,
+                    CGRectMake(b->sk[6].x - hr, b->sk[6].y - hr, hr * 2.0, hr * 2.0));
+            }
+            CGContextRestoreGState(ctx);
+        } else if (o->skeleton && r.size.height > 8.0 && r.size.width > 2.0) {
+        /* C-12: esqueleto PROCEDURAL (fallback). SP3CTERIOS no resuelve la cadena de
            huesos (usa PickAimPoint + BoneCandidate con offsets del pawn);
            replicamos esa idea: figura de palos proporcional a la caja. Cero
            lecturas nuevas, cero riesgo de freeze. */
@@ -2409,6 +2457,7 @@ static int mm_declutter_budget(void)
                                                          hr * 2.0, hr * 2.0));
             CGContextRestoreGState(ctx);
         }
+        }   /* cierra el else-if del skeleton (C-15) */
 
         /* v0.7.0 (1.2): objetivo elegido en la lista -> aro blanco en la caja. */
         if (g_tl_sel_pawn != 0 && b->pawn == g_tl_sel_pawn) {
@@ -5299,6 +5348,9 @@ static void mm_game_resolve(void)
             g_fp_maincam   = fp2;
             g_fov_cam_get  = (void *(*)(void))fp2;   /* C-7 */
             g_fp_cam_getfov = (MMGetFovFn)(b + MM_GAME_DELTA(VA_CAM_GETFOV));   /* C-11 */
+            g_fp_getname = (MMStrFn)(b + MM_GAME_DELTA(VA_GETNAME));
+            g_fp_childcount = (MMIntFn1)(b + MM_GAME_DELTA(VA_CHILDCOUNT));
+            g_fp_getchild = (MMObjIntFn)(b + MM_GAME_DELTA(VA_GETCHILD));
             g_fp_w2c       = fp3;
             g_fp_proj      = fp4;
             g_fp_transpos  = fp5;
@@ -5358,6 +5410,57 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 /* C-5: proyecta el esqueleto del pawn en su caja. Los Transform se resuelven
    UNA vez por pawn con Transform.Find y se cachean; si el model root cambia
    (pawn reciclado) se vuelven a resolver. Todo falla en silencio. */
+/* C-15: lee un string IL2CPP (len en +0x10, chars UTF-16 en +0x14). */
+static void mm_cs_str(void *str, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) return;
+    out[0] = '\0';
+    if (str == NULL) return;
+    int len = 0;
+    if (!mm_vm_read((uintptr_t)str + 0x10, &len, sizeof(len))) return;
+    if (len <= 0 || len > 120) return;
+    size_t n = (size_t)len;
+    if (n > cap - 1) n = cap - 1;
+    uint16_t buf[121];
+    if (!mm_vm_read((uintptr_t)str + 0x14, buf, n * 2)) return;
+    for (size_t i = 0; i < n; i++) out[i] = (buf[i] < 128) ? (char)buf[i] : '?';
+    out[n] = '\0';
+}
+
+/* C-15: indice de hueso por sufijo exacto ("Bip001 Head" -> " Head"). */
+static int mm_bone_index(const char *name)
+{
+    if (name == NULL || name[0] == 0) return -1;
+    size_t ln = strlen(name);
+    for (int i = 0; i < MM_SK_N; i++) {
+        size_t sl = strlen(mm_sk_suffix[i]);
+        if (ln < sl) continue;
+        if (strcmp(name + ln - sl, mm_sk_suffix[i]) == 0) return i;
+    }
+    return -1;
+}
+
+/* C-15: recorre la jerarquia (profundidad y nodos acotados) buscando huesos. */
+static void mm_skel_walk(void *t, int depth, MMSkelCache *c, int *found, int *budget)
+{
+    if (t == NULL || depth > 7 || *found >= MM_SK_N || *budget <= 0) return;
+    (*budget)--;
+    void *nm = g_fp_getname ? g_fp_getname(t) : NULL;
+    char name[122];
+    mm_cs_str(nm, name, sizeof(name));
+    int idx = mm_bone_index(name);
+    if (idx >= 0 && c->bn[idx] == NULL) { c->bn[idx] = t; (*found)++; }
+    if (g_fp_childcount == NULL || g_fp_getchild == NULL) return;
+    int n = g_fp_childcount(t);
+    if (n <= 0) return;
+    if (n > 48) n = 48;
+    for (int i = 0; i < n; i++) {
+        if (*found >= MM_SK_N || *budget <= 0) return;
+        void *ch = g_fp_getchild(t, i);
+        mm_skel_walk(ch, depth + 1, c, found, budget);
+    }
+}
+
 static void *mm_skel_find(void *root, const char *name)
 {
     if (root == NULL || g_fp_find == NULL) return NULL;
@@ -5409,7 +5512,7 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
                          CGFloat W, CGFloat H)
 {
     nb->skMask = 0;
-    if (!g_fp_find || !g_fp_trpos) return;
+    if (!g_fp_trpos || !g_fp_getname) return;
     uint64_t pawn = nb->pawn;
     uint64_t root = 0;
     /* C-5b: dos candidatos de raiz (model root / mesh). */
@@ -5437,8 +5540,13 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
         c->pawn = pawn;
         c->root = root;
         c->lastTry = tnow;
-        int found = mm_skel_resolve(root, c);
-        c->ok = (found >= 4) ? 1 : 0;
+        /* C-15: UNA resolucion por pasada del colector. Antes se resolvian
+           todos los pawns de golpe y eso congelaba el juego. */
+        if (g_skel_budget <= 0) { memset(c, 0, sizeof(*c)); return; }
+        g_skel_budget--;
+        int found = 0, budget = 240;
+        mm_skel_walk((void *)(uintptr_t)root, 0, c, &found, &budget);
+        c->ok = (found >= 6) ? 1 : 0;
         if (!c->ok) return;
     }
     /* C-5c: los 21 huesos se proyectan cada 3 pasadas (~10 Hz) y se reusan;
@@ -5466,6 +5574,7 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
 
 static void mm_esp_collect_real(void)
 {
+    g_skel_budget = 1;   /* C-15: una resolucion de huesos por pasada */
     g_box_count = 0;
     g_track_count = 0;                     /* v0.5.0: track mundial */
     g_count_players = 0;
@@ -5780,6 +5889,7 @@ static void mm_esp_collect_real(void)
         nb.alive = 1;
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
+        if (opts->skeleton) mm_skel_fill(&nb, view, proj, W, H);   /* C-15 */
 
         /* v0.2.4: estabilidad por pawn. La lista cambia de orden y las cajas
            saltaban; cada pawn conserva su caja y se interpola suavemente. */
