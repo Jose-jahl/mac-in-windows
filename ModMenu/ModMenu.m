@@ -6733,6 +6733,7 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
+    mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
     [page addSubview:c];
 }
 
