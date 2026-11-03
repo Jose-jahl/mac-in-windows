@@ -734,6 +734,8 @@ typedef struct {
 } MMSkelCache;
 static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
 static int          g_skel_budget = 1;   /* C-15: resoluciones por pasada */
+static int          g_bone_fail = 0;    /* C-20: fallos seguidos del walk */
+static double       g_bone_off = 0.0;   /* C-20: pausa el walk si no hay huesos */
 typedef void *(*MMFindFn)(void *transform, void *nsstring);
 typedef void  (*MMPosFn)(void *transform, float out[3]);
 static MMFindFn     g_fp_find  = NULL;
@@ -5583,6 +5585,8 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
 {
     nb->skMask = 0;
     if (!g_fp_trpos || !g_fp_getname) return;
+    /* C-20: si el walk ya fallo varias veces, no se sigue gastando CPU. */
+    if (g_bone_off > 0.0 && CACurrentMediaTime() < g_bone_off) return;
     uint64_t pawn = nb->pawn;
     uint64_t root = 0;
     /* C-5b: dos candidatos de raiz (model root / mesh). */
@@ -5612,12 +5616,33 @@ static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
         c->lastTry = tnow;
         /* C-15: UNA resolucion por pasada del colector. Antes se resolvian
            todos los pawns de golpe y eso congelaba el juego. */
-        if (g_skel_budget <= 0) { memset(c, 0, sizeof(*c)); return; }
+        if (g_skel_budget <= 0) return;   /* C-20: conserva el cache */
         g_skel_budget--;
-        int found = 0, budget = 240;
+        int found = 0, budget = 120;
         mm_skel_walk((void *)(uintptr_t)root, 0, c, &found, &budget);
+        /* C-20: si la raiz principal no da huesos, probar m_Mesh y el Transform
+           del pawn (el modelo real puede colgar de cualquiera de los tres). */
+        if (found < 6) {
+            uint64_t r2 = 0;
+            if (mm_r64((uintptr_t)pawn + OFF_PAWN_MESH, &r2) && r2 != 0 && r2 != root) {
+                int b2 = 120;
+                mm_skel_walk((void *)(uintptr_t)r2, 0, c, &found, &b2);
+            }
+        }
+        if (found < 6) {
+            uint64_t r3 = 0;
+            if (mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &r3) && r3 != 0 && r3 != root) {
+                int b3 = 160;
+                mm_skel_walk((void *)(uintptr_t)r3, 0, c, &found, &b3);
+            }
+        }
         c->ok = (found >= 6) ? 1 : 0;
-        if (!c->ok) return;
+        if (!c->ok) {
+            g_bone_fail++;
+            if (g_bone_fail >= 6) { g_bone_off = CACurrentMediaTime() + 60.0; g_bone_fail = 0; }
+            return;
+        }
+        g_bone_fail = 0;
     }
     /* C-5c: los 21 huesos se proyectan cada 3 pasadas (~10 Hz) y se reusan;
        proyectar 21 huesos x N pawns a 30-60 Hz era parte del peso. */
