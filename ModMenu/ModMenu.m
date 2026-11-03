@@ -2995,6 +2995,7 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
+    if ([k isEqualToString:@"mm_x_skel"] && s.on) mm_bones_dump();   /* C-16 */
     if ([k isEqualToString:@"mm_x_aim_key"]) {
         g_aim_key_mode = s.on;
         mm_aim_apply();
@@ -5459,6 +5460,51 @@ static void mm_skel_walk(void *t, int depth, MMSkelCache *c, int *found, int *bu
         void *ch = g_fp_getchild(t, i);
         mm_skel_walk(ch, depth + 1, c, found, budget);
     }
+}
+
+/* C-16: volcado de la jerarquia de huesos a Documents/fusion_bones.txt para
+   diagnosticar por que el walk no encuentra los huesos. */
+static void mm_bones_dump_walk(void *t, int depth, NSMutableString *out, int *budget)
+{
+    if (t == NULL || depth > 8 || *budget <= 0) return;
+    (*budget)--;
+    void *nm = g_fp_getname ? g_fp_getname(t) : NULL;
+    char name[122];
+    mm_cs_str(nm, name, sizeof(name));
+    NSMutableString *ind = [NSMutableString string];
+    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
+    [out appendFormat:@"%@%s\n", ind, name];
+    if (g_fp_childcount == NULL || g_fp_getchild == NULL) return;
+    int n = g_fp_childcount(t);
+    if (n > 64) n = 64;
+    for (int i = 0; i < n && *budget > 0; i++)
+        mm_bones_dump_walk(g_fp_getchild(t, i), depth + 1, out, budget);
+}
+
+static void mm_bones_dump(void)
+{
+    @try {
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) return;
+        NSMutableString *out = [NSMutableString string];
+        [out appendString:@"# FUSION bones dump\n"];
+        if (g_box_count <= 0) {
+            [out appendString:@"sin cajas (activa el ESP y espera a ver enemigos)\n"];
+        } else {
+            uint64_t pawn = g_boxes[0].pawn;
+            uint64_t root = 0;
+            if (!mm_r64((uintptr_t)pawn + OFF_PAWN_MODELROOT, &root) || root == 0)
+                mm_r64((uintptr_t)pawn + OFF_PAWN_MESH, &root);
+            [out appendFormat:@"pawn=0x%llX root=0x%llX\n",
+                              (unsigned long long)pawn, (unsigned long long)root];
+            if (root != 0) {
+                int budget = 400;
+                mm_bones_dump_walk((void *)(uintptr_t)root, 0, out, &budget);
+            }
+        }
+        [out writeToFile:[docs stringByAppendingPathComponent:@"fusion_bones.txt"]
+              atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (NSException *e) { }
 }
 
 static void *mm_skel_find(void *root, const char *name)
