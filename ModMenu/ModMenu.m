@@ -2904,6 +2904,7 @@ static void mm_haptic(int style)
         b.backgroundColor = on
             ? [mm_neon_green() colorWithAlphaComponent:0.16]
             : [UIColor colorWithWhite:1.0 alpha:0.035];
+        { UIView *nb = [b viewWithTag:99]; if (nb != nil) nb.hidden = !on; }
         b.layer.borderColor = (on
             ? [mm_neon_green() colorWithAlphaComponent:0.72]
             : [UIColor colorWithWhite:1.0 alpha:0.07]).CGColor;
@@ -6445,6 +6446,11 @@ static UIView *mm_cloud_card(NSString *title, CGFloat x, CGFloat w, CGFloat h)
     line.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
     line.userInteractionEnabled = NO;
     [card addSubview:line];
+    /* C-13: brillo glass en el borde superior. */
+    UIView *gl = [[UIView alloc] initWithFrame:CGRectMake(10.0, 0.0, w - 20.0, 0.7)];
+    gl.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+    gl.userInteractionEnabled = NO;
+    [card addSubview:gl];
     return card;
 }
 
@@ -7374,6 +7380,14 @@ static void mm_build_ui(void)
         b.layer.cornerRadius = 11.0;
         b.layer.borderWidth = 0.7;
         b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.07].CGColor;
+        /* C-13: barra de acento inferior del tab activo. */
+        UIView *nb = [[UIView alloc] initWithFrame:CGRectMake(9.0, 38.0 - 3.2,
+                                                              navW - 18.0, 2.4)];
+        nb.tag = 99;
+        nb.backgroundColor = mm_neon_green();
+        nb.layer.cornerRadius = 1.2;
+        nb.hidden = (i != 0);
+        [b addSubview:nb];
         b.titleLabel.font = mm_cloud_font(9.8, UIFontWeightSemibold);
         b.titleLabel.adjustsFontSizeToFitWidth = YES;
         b.titleLabel.minimumScaleFactor = 0.72;
