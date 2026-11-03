@@ -1003,6 +1003,7 @@ typedef struct {
     BOOL master, safe_mode;             /* perf: snapshot de los gates por-frame */
     BOOL skeleton;                      /* C-5: esqueleto del biped */
     BOOL fovCircle;                     /* C-11: circulo del FOV de aim */
+    BOOL ignoreDown;                    /* C-17: no asistir a enemigos caidos */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -1042,6 +1043,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->master    = mm_def_bool(@"mm_esp_master", NO);
     o->skeleton  = mm_def_bool(@"mm_x_skel", NO);
     o->fovCircle = mm_def_bool(@"mm_x_fov_circle", NO);
+    o->ignoreDown = mm_def_bool(@"mm_x_ignore_down", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
@@ -5700,6 +5702,14 @@ static void mm_esp_collect_real(void)
     g_have_local = haveLocal ? 1 : 0;
 
     const MMDrawOpts *opts = mm_draw_opts();
+    /* C-17: localY para el filtro de caidos del relay. Si el toggle esta OFF
+       se escribe un valor muy bajo para que la condicion nunca se cumpla. */
+    {
+        const struct mach_header *hrel = _dyld_get_image_header(0);
+        if (hrel != NULL)
+            *(float *)((uintptr_t)hrel + (uintptr_t)0x0DC63A00ULL) =
+                opts->ignoreDown ? lpos[1] : -10000.0f;
+    }
     float rango = opts->range;
     BOOL conSalud  = opts->health;   /* v0.2.4 */
     BOOL conJug    = opts->players;  /* v0.2.7: a fabrica */
@@ -6897,6 +6907,7 @@ static void mm_cloud_build_visual(UIView *page)
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
     mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
+    mm_cloud_row(c, @"Ignorar caidos (aim)", @"mm_x_ignore_down", NO, 122.0, NO);
     [page addSubview:c];
 }
 
