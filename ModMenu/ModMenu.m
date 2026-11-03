@@ -407,7 +407,7 @@ static void mm_aim_apply(void)
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639F0ULL) = g_aim_fov;
     *(int   *)((uintptr_t)h + (uintptr_t)0x0DC639F4ULL) =
         (g_aim_key_mode && !g_aim_key_held) ? 0 : 1;
-    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639FCULL) = g_aim_smooth;
+    *(float *)((uintptr_t)h + (uintptr_t)0x0DC639FCULL) = 1.0f - g_aim_smooth * 0.98f;
 }
 
 /* --- objetos de UI (globales, creados una sola vez) --- */
@@ -3854,7 +3854,7 @@ static unsigned long long mm_frame_digest(void)
 static void mm_esp_frame(double t)
 {
     /* C-7: FOV de camara. Se reaplica a ~4 Hz para ganarle al ADS del juego. */
-    if (g_cam_fov > 0.5f && g_fp_cam_setfov != NULL && g_fov_cam_get != NULL) {
+    if (0) {   /* C-9: FOV changer retirado: el juego reescribe el FOV y no quedaba */
         static double s_fov = 0.0;
         if (t - s_fov > 0.25) {
             s_fov = t;
@@ -6487,7 +6487,7 @@ static void mm_cloud_build_combat(UIView *page)
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
-    mm_cloud_row(b, @"Aimbot", @"mm_x_aim_on", YES, 150.0, NO);
+    mm_cloud_row(b, @"Aimbot", @"mm_x_aim_on", NO, 150.0, NO);
     UILabel *anote = mm_cloud_caption(@"Fuerza de aim", 178.0);
     anote.frame = CGRectMake(MM_CLOUD_CARD_INNER, 178.0, iw, 12.0);
     [b addSubview:anote];
@@ -6615,11 +6615,6 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
-    mm_cloud_card_caption(c, @"FOV de camara (0 = off)", 102.0);
-    UISlider *cf = mm_cloud_slider(0.0f, 120.0f, g_cam_fov, @"mm_cam_fov",
-                                   @selector(onCamFov:), iw);
-    cf.frame = CGRectMake(MM_CLOUD_CARD_INNER, 118.0, iw, 22.0);
-    [c addSubview:cf];
     [page addSubview:c];
 }
 
@@ -6645,6 +6640,7 @@ static void mm_cloud_build_radar(UIView *page)
     mm_cloud_row(b, @"Vibracion al tocar", @"mm_haptics", YES, 66.0, NO);
     mm_cloud_row(b, @"Guard de captura", @"mm_guard_capture", NO, 94.0, NO);
     mm_cloud_row(b, @"Stream Mode", @"mm_stream", NO, 122.0, NO);
+    mm_cloud_row(b, @"FPS en pantalla", @"mm_x_fps", NO, 150.0, NO);
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"PANTALLA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -6904,34 +6900,71 @@ static void mm_cloud_build_info(UIView *page)
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (ctx == NULL) return;
     CGFloat cx = rect.size.width / 2.0, cy = rect.size.height / 2.0;
+    CGFloat R = MIN(rect.size.width, rect.size.height) / 2.0;
 
-    /* anillo base tenue */
-    CGContextSetLineWidth(ctx, 1.1);
-    CGContextSetRGBStrokeColor(ctx, 0.32, 1.0, 0.62, 0.45);
-    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - 19.5, cy - 19.5, 39.0, 39.0));
+    /* 1) marco hexagonal con gradiente verde -> violeta (fusion). */
+    CGPoint hex[6];
+    for (int i = 0; i < 6; i++) {
+        CGFloat a = (CGFloat)(M_PI / 3.0 * i) - (CGFloat)(M_PI / 6.0);
+        hex[i] = CGPointMake(cx + (CGFloat)cos(a) * (R - 3.2),
+                             cy + (CGFloat)sin(a) * (R - 3.2));
+    }
+    CGMutablePathRef hp = CGPathCreateMutable();
+    CGPathMoveToPoint(hp, NULL, hex[0].x, hex[0].y);
+    for (int i = 1; i < 6; i++) CGPathAddLineToPoint(hp, NULL, hex[i].x, hex[i].y);
+    CGPathCloseSubpath(hp);
 
-    /* "F" de trazo redondeado con glow neon */
+    CGContextSaveGState(ctx);
+    CGContextAddPath(ctx, hp);
+    CGContextSetLineWidth(ctx, 1.7);
+    CGContextReplacePathWithStrokedPath(ctx);
+    CGContextClip(ctx);
+    CGColorSpaceRef sp = CGColorSpaceCreateDeviceRGB();
+    CGFloat cols[8] = { 0.30, 1.00, 0.62, 1.0, 0.72, 0.42, 1.00, 1.0 };
+    CGFloat locs[2] = { 0.0, 1.0 };
+    CGGradientRef gr = CGGradientCreateWithColorComponents(sp, cols, locs, 2);
+    CGContextDrawLinearGradient(ctx, gr, CGPointMake(cx - R, cy - R),
+                                CGPointMake(cx + R, cy + R), 0);
+    CGGradientRelease(gr);
+    CGColorSpaceRelease(sp);
+    CGContextRestoreGState(ctx);
+    CGPathRelease(hp);
+
+    /* 2) "F" biselada. */
+    CGMutablePathRef fp = CGPathCreateMutable();
+    CGPathMoveToPoint(fp, NULL, cx - 5.2, cy + 9.0);
+    CGPathAddLineToPoint(fp, NULL, cx - 5.2, cy - 9.0);
+    CGPathAddLineToPoint(fp, NULL, cx + 7.6, cy - 9.0);
+    CGPathMoveToPoint(fp, NULL, cx - 5.2, cy - 1.2);
+    CGPathAddLineToPoint(fp, NULL, cx + 4.2, cy - 1.2);
+
     CGContextSetLineCap(ctx, kCGLineCapRound);
     CGContextSetLineJoin(ctx, kCGLineJoinRound);
-    CGContextSetShadowWithColor(ctx, CGSizeZero, 5.0,
+
+    /* 2a) cuerpo verde con glow. */
+    CGContextSetShadowWithColor(ctx, CGSizeZero, 8.0,
         [mm_neon_green() colorWithAlphaComponent:0.85].CGColor);
-    CGContextSetRGBStrokeColor(ctx, 0.96, 1.0, 0.97, 1.0);
-    CGContextSetLineWidth(ctx, 3.2);
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, cx - 5.0, cy + 8.0);
-    CGContextAddLineToPoint(ctx, cx - 5.0, cy - 8.0);
-    CGContextAddLineToPoint(ctx, cx + 6.5, cy - 8.0);
-    CGContextStrokePath(ctx);
-    CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, cx - 5.0, cy + 0.5);
-    CGContextAddLineToPoint(ctx, cx + 3.5, cy + 0.5);
+    CGContextSetRGBStrokeColor(ctx, 0.18, 1.00, 0.62, 0.96);
+    CGContextSetLineWidth(ctx, 4.8);
+    CGContextAddPath(ctx, fp);
     CGContextStrokePath(ctx);
 
-    /* punto de energia */
-    CGContextSetShadowWithColor(ctx, CGSizeZero, 4.0,
-        [mm_neon_purple() colorWithAlphaComponent:0.9].CGColor);
-    CGContextSetRGBFillColor(ctx, 0.78, 0.58, 1.0, 0.95);
-    CGContextFillEllipseInRect(ctx, CGRectMake(cx + 11.0, cy - 2.2, 4.4, 4.4));
+    /* 2b) fantasma violeta desplazado (efecto de fusion cromatica). */
+    CGContextSetShadowWithColor(ctx, CGSizeZero, 0.0, NULL);
+    CGContextSetRGBStrokeColor(ctx, 0.68, 0.36, 1.00, 0.60);
+    CGContextSetLineWidth(ctx, 1.7);
+    CGContextSaveGState(ctx);
+    CGContextTranslateCTM(ctx, 1.0, -1.0);
+    CGContextAddPath(ctx, fp);
+    CGContextStrokePath(ctx);
+    CGContextRestoreGState(ctx);
+
+    /* 2c) nucleo blanco. */
+    CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.95);
+    CGContextSetLineWidth(ctx, 1.2);
+    CGContextAddPath(ctx, fp);
+    CGContextStrokePath(ctx);
+    CGPathRelease(fp);
 }
 @end
 
@@ -8352,7 +8385,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     if (g_aim_smooth < 0.0f || g_aim_smooth > 1.0f) g_aim_smooth = 0.0f;
     g_cam_fov = mm_def_float(@"mm_cam_fov", 0.0f);
     if (g_cam_fov < 0.5f || g_cam_fov > 120.0f) g_cam_fov = 0.0f;
-    g_aim_on = mm_def_bool(@"mm_x_aim_on", YES);
+    g_aim_on = mm_def_bool(@"mm_x_aim_on", NO);
     g_aim_key_mode = mm_def_bool(@"mm_x_aim_key", NO);
     {   /* C-4: el relay lleva el estado del suavizado en +0xF8; arranca en 0. */
         const struct mach_header *h0 = _dyld_get_image_header(0);
