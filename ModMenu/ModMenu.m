@@ -410,6 +410,16 @@ static void mm_aim_apply(void)
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639FCULL) = 1.0f - g_aim_smooth * 0.98f;
 }
 
+/* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
+   cod_base+0xDC63A04; aca se escribe 0.125 s (ON) o 3.0 s (OFF). */
+static void mm_reload_apply(void)
+{
+    const struct mach_header *h = _dyld_get_image_header(0);
+    if (h == NULL) return;
+    BOOL on = mm_def_bool(@"mm_x_fast_reload", NO);
+    *(float *)((uintptr_t)h + (uintptr_t)0x0DC63A04ULL) = on ? 0.125f : 3.0f;
+}
+
 /* --- objetos de UI (globales, creados una sola vez) --- */
 static UIView   *g_root  = nil;   /* capa transparente sobre la ventana juego */
 static UIButton *g_btn   = nil;   /* boton flotante                           */
@@ -640,6 +650,10 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 #ifndef OFF_PAWN_MESH
 #define OFF_PAWN_MESH 0x628ULL
 #endif
+/* C-19: PlayerInfo.m_ReviveTime -> >0 = caido (dump 1.0.57) */
+#ifndef OFF_ENT_REVIVE
+#define OFF_ENT_REVIVE 0x5B4ULL
+#endif
 /* C-7: Camera.set_fieldOfView (dump 1.0.57) */
 #ifndef VA_CAM_SETFOV
 #define VA_CAM_SETFOV 0x108BD9890ULL
@@ -672,6 +686,7 @@ typedef struct {
     int     robot;
     int     alive;
     int     hasName;            /* v0.2.4: 1 si name trae nombre real   */
+    int     downed;             /* C-19: 1 si esta caido (revive)       */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
     CGPoint sk[MM_SK_N];        /* C-5: huesos proyectados (skeleton)   */
     uint32_t skMask;            /* bit i = hueso i proyectado           */
@@ -745,6 +760,7 @@ typedef struct {
     float sx, sy;       /* proyeccion cruda (aunque caiga fuera)        */
     int   robot;
     int   alive;
+    int   downed;       /* C-19: caido */
     int   proj;         /* 1 = tiene caja dibujable en g_boxes          */
     int   behind;       /* 1 = detras de la camara (no proyectable)     */
     int   has_sx;       /* 1 = la proyeccion dio un punto (aunque fuera)*/
@@ -960,6 +976,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
 static void mm_bones_dump(void);       /* C-16: dump de jerarquia de huesos */
+static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_br_probe_run(void);     /* 0.6.0: dump de los setters de RadiationZone */
 static void mm_br_zone_read(void);     /* 0.6.3: lee el manager si hay offsets verificados */
 static void mm_layout_count_glass(void);
@@ -1662,7 +1679,8 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
         CGContextFillEllipseInRect(ctx, CGRectMake(px - 3.6, py - 3.6, 7.2, 7.2));
 
         CGFloat colR, colG, colB;
-        if (tk->robot) { colR = 0.63; colG = 0.30; colB = 1.0; }
+        if (tk->downed) { colR = 1.0;  colG = 0.62; colB = 0.12; }   /* C-19: caido = naranja */
+        else if (tk->robot) { colR = 0.63; colG = 0.30; colB = 1.0; }
         else           { colR = 1.0;  colG = 0.25; colB = 0.30; }
 
         /* C-10: pulso expansivo para contactos cercanos (<25 m). */
@@ -2999,6 +3017,7 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
     if ([k isEqualToString:@"mm_x_skel"] && s.on) mm_bones_dump();   /* C-16 */
+    if ([k isEqualToString:@"mm_x_fast_reload"]) mm_reload_apply();   /* C-18 */
     if ([k isEqualToString:@"mm_x_aim_key"]) {
         g_aim_key_mode = s.on;
         mm_aim_apply();
@@ -5759,9 +5778,13 @@ static void mm_esp_collect_real(void)
         if ((a & 0xFF) == 0) continue;
 
         int robot = 0;
+        int downed = 0;   /* C-19 */
         if (ent != 0) {
             uint64_t rb = 0;
             if (mm_r64((uintptr_t)ent + OFF_ENT_ROBOT, &rb)) robot = (int)(rb & 0xFF);
+            float rt = 0.0f;
+            if (mm_vm_read((uintptr_t)ent + OFF_ENT_REVIVE, &rt, sizeof(rt)) &&
+                isfinite(rt) && rt > 0.5f) downed = 1;
         }
 
         /* v0.2.4: filtros por tipo */
@@ -5792,7 +5815,7 @@ static void mm_esp_collect_real(void)
         memset(&tk, 0, sizeof(tk));
         tk.pawn = pawn;
         tk.wx = wp[0]; tk.wy = wp[1]; tk.wz = wp[2];
-        tk.dist = dist; tk.robot = robot; tk.alive = 1;
+        tk.dist = dist; tk.robot = robot; tk.alive = 1; tk.downed = downed;
         int tslot = -1;
         if (g_track_count < MM_MAX_TRACKS) tslot = g_track_count++;
         else {
@@ -5943,6 +5966,7 @@ static void mm_esp_collect_real(void)
         nb.hp = hp;
         nb.hpMax = hpMax;
         nb.robot = robot;
+        nb.downed = downed;
         nb.alive = 1;
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
@@ -6908,6 +6932,7 @@ static void mm_cloud_build_visual(UIView *page)
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
     mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
     mm_cloud_row(c, @"Ignorar caidos (aim)", @"mm_x_ignore_down", NO, 122.0, NO);
+    mm_cloud_row(c, @"Recarga rapida", @"mm_x_fast_reload", NO, 150.0, NO);
     [page addSubview:c];
 }
 
@@ -8687,6 +8712,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     g_cam_fov = mm_def_float(@"mm_cam_fov", 0.0f);
     if (g_cam_fov < 0.5f || g_cam_fov > 120.0f) g_cam_fov = 0.0f;
     g_aim_on = mm_def_bool(@"mm_x_aim_on", NO);
+    mm_reload_apply();   /* C-18 */
     g_aim_key_mode = mm_def_bool(@"mm_x_aim_key", NO);
     {   /* C-4: el relay lleva el estado del suavizado en +0xF8; arranca en 0. */
         const struct mach_header *h0 = _dyld_get_image_header(0);
