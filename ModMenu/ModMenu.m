@@ -644,6 +644,10 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 #ifndef VA_CAM_SETFOV
 #define VA_CAM_SETFOV 0x108BD9890ULL
 #endif
+/* C-11: Camera.get_fieldOfView (para el circulo de FOV) */
+#ifndef VA_CAM_GETFOV
+#define VA_CAM_GETFOV 0x108BD9868ULL
+#endif
 /* 0.7: ventana contigua del pawn que cubre alive/transform/entity. Se lee de
    una sola pasada (con fallback a lecturas individuales si el rango falla). */
 #define MM_PAWN_BLOCK_BASE (OFF_PAWN_TRANSFORM & ~0xFFULL)
@@ -700,6 +704,8 @@ static MMFindFn     g_fp_find  = NULL;
 static MMPosFn      g_fp_trpos = NULL;
 typedef void (*MMSetFovFn)(void *cam, float v);
 static MMSetFovFn   g_fp_cam_setfov = NULL;
+typedef float (*MMGetFovFn)(void *cam);
+static MMGetFovFn   g_fp_cam_getfov = NULL;   /* C-11 */
 static float        g_cam_fov = 0.0f;   /* C-7: 0 = no tocar */
 static void *(*g_fov_cam_get)(void) = NULL;   /* C-7: get_main (se setea en esp_try) */
 /* v0.5.0: TRACK MUNDIAL, independiente de la proyeccion. Un enemigo detras
@@ -970,6 +976,7 @@ typedef struct {
     BOOL players, bots;
     BOOL master, safe_mode;             /* perf: snapshot de los gates por-frame */
     BOOL skeleton;                      /* C-5: esqueleto del biped */
+    BOOL fovCircle;                     /* C-11: circulo del FOV de aim */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -1008,6 +1015,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->players   = mm_def_bool(@"mm_esp_players", NO);
     o->master    = mm_def_bool(@"mm_esp_master", NO);
     o->skeleton  = mm_def_bool(@"mm_x_skel", NO);
+    o->fovCircle = mm_def_bool(@"mm_x_fov_circle", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
@@ -1308,6 +1316,35 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
    anillos 50/100/200, y los contactos a la ESPALDA se dibujan como aro hueco
    (los del cono se quedan como punto macizo). "Arriba = donde mira el jugador"
    queda explicito a primer golpe de vista. */
+/* C-11: circulo del FOV de aim (como SP3CTERIOS). Radio proyectado desde el
+   FOV de aim en grados y el FOV real de la camara. */
+static void mm_draw_fov_circle(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
+{
+    if (!mm_draw_opts()->fovCircle) return;
+    float aimFov = g_aim_fov;
+    if (aimFov <= 0.5f || aimFov >= 179.5f) return;
+    float camFov = 60.0f;
+    if (g_fp_cam_getfov != NULL && g_fov_cam_get != NULL) {
+        void *cam = g_fov_cam_get();
+        if (cam != NULL) {
+            float f = g_fp_cam_getfov(cam);
+            if (isfinite(f) && f > 20.0f && f < 140.0f) camFov = f;
+        }
+    }
+    CGFloat h = bs.size.height;
+    CGFloat r = (CGFloat)(tan(aimFov * (float)M_PI / 360.0f) /
+                          tan(camFov * (float)M_PI / 360.0f)) * (h / 2.0);
+    if (r < 10.0 || r > h) return;
+    CGPoint c = CGPointMake(bs.size.width / 2.0, bs.size.height / 2.0);
+    CGContextSaveGState(ctx);
+    CGContextSetShadowWithColor(ctx, CGSizeZero, 4.0,
+        [UIColor colorWithRed:cr green:cg blue:cb alpha:0.5].CGColor);
+    CGContextSetLineWidth(ctx, 1.4);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.55);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(c.x - r, c.y - r, r * 2.0, r * 2.0));
+    CGContextRestoreGState(ctx);
+}
+
 static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
 {
     if (!g_have_local) return;
@@ -2161,6 +2198,7 @@ static int mm_declutter_budget(void)
     if (conAimRing) mm_draw_aimring(ctx, bs, ar, ag, ab);
     if (conCross)   mm_draw_crosshair(ctx, bs, crossStyle, ar, ag, ab);
     if (conFps)     mm_draw_fps(bs);
+    mm_draw_fov_circle(ctx, bs, cr, cg, cb);   /* C-11 */
     if (conRadar)   mm_draw_radar(ctx, bs, ar, ag, ab);
     if (conTelem)   mm_draw_telem(bs);
     if (o->targetList) mm_draw_target_list(ctx, bs);
@@ -5220,6 +5258,7 @@ static void mm_game_resolve(void)
             g_br_pawn_fn   = (void *(*)(void))fp1;   /* v0.7.11: espejo para el probe BR */
             g_fp_maincam   = fp2;
             g_fov_cam_get  = (void *(*)(void))fp2;   /* C-7 */
+            g_fp_cam_getfov = (MMGetFovFn)(b + MM_GAME_DELTA(VA_CAM_GETFOV));   /* C-11 */
             g_fp_w2c       = fp3;
             g_fp_proj      = fp4;
             g_fp_transpos  = fp5;
@@ -6624,6 +6663,7 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(b, @"Crosshair (mira)", @"mm_x_cross", NO, 38.0, YES);
     mm_cloud_row(b, @"Anillo de aim", @"mm_x_aimring", NO, 66.0, YES);
+    mm_cloud_row(b, @"Circulo de FOV", @"mm_x_fov_circle", NO, 94.0, YES);
     mm_cloud_card_caption(b, @"Estilo de crosshair", 96.0);
     int cstyle = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
     if (cstyle < 0 || cstyle > 3) cstyle = 0;
