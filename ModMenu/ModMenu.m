@@ -1311,7 +1311,7 @@ static void mm_draw_warn(CGContextRef ctx, CGRect bs)
 static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, CGFloat cb)
 {
     if (!g_have_local) return;
-    CGFloat R = 76.0, cx = bs.size.width - R - 16.0, cy = R + 54.0;
+    CGFloat R = 92.0, cx = bs.size.width - R - 16.0, cy = R + 54.0;
     const MMDrawOpts *o = mm_draw_opts();
     float rng = o->range; if (rng < 40.0f) rng = 40.0f;
     /* El radar es tactico: 200 m de techo. Los contactos mas lejanos quedan
@@ -1321,12 +1321,40 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
 
     /* fondo: disco oscuro + aro interior tenue del color del tema para marcar
        que es parte del mod y no del HUD del juego. */
-    CGContextSetRGBFillColor(ctx, 0.02, 0.05, 0.04, 0.72);
-    CGContextFillEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
-    CGContextSetLineWidth(ctx, 0.8);
-    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.14);
-    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - (R - 1.5), cy - (R - 1.5),
-                                                  (R - 1.5) * 2.0, (R - 1.5) * 2.0));
+    /* C-10: fondo con gradiente radial (centro mas claro) + aro con glow. */
+    CGContextSaveGState(ctx);
+    CGContextAddEllipseInRect(ctx, CGRectMake(cx - R, cy - R, R * 2.0, R * 2.0));
+    CGContextClip(ctx);
+    {
+        CGColorSpaceRef spc = CGColorSpaceCreateDeviceRGB();
+        CGFloat gcol[8] = { 0.06, 0.13, 0.10, 0.90,  0.01, 0.03, 0.03, 0.94 };
+        CGFloat gloc[2] = { 0.0, 1.0 };
+        CGGradientRef grad = CGGradientCreateWithColorComponents(spc, gcol, gloc, 2);
+        if (grad != NULL) {
+            CGContextDrawRadialGradient(ctx, grad, CGPointMake(cx, cy), 0.0,
+                                        CGPointMake(cx, cy), R, 0);
+            CGGradientRelease(grad);
+        }
+        CGColorSpaceRelease(spc);
+    }
+    CGContextRestoreGState(ctx);
+    CGContextSaveGState(ctx);
+    CGContextSetShadowWithColor(ctx, CGSizeZero, 8.0,
+        [UIColor colorWithRed:cr green:cg blue:cb alpha:0.55].CGColor);
+    CGContextSetLineWidth(ctx, 1.3);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.42);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(cx - (R - 1.0), cy - (R - 1.0),
+                                                  (R - 1.0) * 2.0, (R - 1.0) * 2.0));
+    CGContextRestoreGState(ctx);
+    /* grilla tenue: cruz central */
+    CGContextSetLineWidth(ctx, 0.5);
+    CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.10);
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, cx - R + 5.0, cy);
+    CGContextAddLineToPoint(ctx, cx + R - 5.0, cy);
+    CGContextMoveToPoint(ctx, cx, cy - R + 5.0);
+    CGContextAddLineToPoint(ctx, cx, cy + R - 5.0);
+    CGContextStrokePath(ctx);
 
     /* direccion "arriba" del radar en espacio de pantalla.
        - camara-arriba: fijo arriba (frente al jugador = arriba de la pantalla).
@@ -1571,6 +1599,17 @@ static void mm_draw_radar(CGContextRef ctx, CGRect bs, CGFloat cr, CGFloat cg, C
         CGFloat colR, colG, colB;
         if (tk->robot) { colR = 0.63; colG = 0.30; colB = 1.0; }
         else           { colR = 1.0;  colG = 0.25; colB = 0.30; }
+
+        /* C-10: pulso expansivo para contactos cercanos (<25 m). */
+        if (tk->dist < 25.0f) {
+            double ph = fmod(CACurrentMediaTime(), 1.2) / 1.2;
+            CGFloat pr = 4.0 + (CGFloat)ph * 10.0;
+            CGFloat pa = (CGFloat)(1.0 - ph) * 0.55;
+            CGContextSetLineWidth(ctx, 1.2);
+            CGContextSetRGBStrokeColor(ctx, colR, colG, colB, pa);
+            CGContextStrokeEllipseInRect(ctx, CGRectMake(px - pr, py - pr,
+                                                         pr * 2.0, pr * 2.0));
+        }
 
         if (enConoVista) {
             /* punto macizo: contacto en la direccion que estas mirando */
