@@ -1062,7 +1062,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->targetList= mm_def_bool(@"mm_x_targetlist", NO);
     o->players   = mm_def_bool(@"mm_esp_players", NO);
     o->master    = mm_def_bool(@"mm_esp_master", NO);
-    o->skeleton  = mm_def_bool(@"mm_x_skel", NO);
+    o->skeleton  = NO;   /* C-24: skeleton ELIMINADO del proyecto */
     o->fovCircle = mm_def_bool(@"mm_x_fov_circle", NO);
     o->ignoreDown = mm_def_bool(@"mm_x_ignore_down", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
@@ -2408,81 +2408,6 @@ static int mm_declutter_budget(void)
             CGContextStrokePath(ctx);
         }
 
-        /* C-15: huesos REALES si el walk los encontro. */
-        if (o->skeleton && b->skMask != 0) {
-            CGContextSaveGState(ctx);
-            CGContextSetShadowWithColor(ctx, CGSizeZero, 3.0,
-                [UIColor colorWithRed:cr green:cg blue:cb alpha:0.55].CGColor);
-            CGContextSetLineWidth(ctx, 1.3);
-            CGContextSetLineCap(ctx, kCGLineCapRound);
-            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.90);
-            CGContextBeginPath(ctx);
-            for (int l = 0; l < MM_SK_LINKS; l++) {
-                int i0 = mm_sk_link[l][0], i1 = mm_sk_link[l][1];
-                if (!(b->skMask & (1u << i0)) || !(b->skMask & (1u << i1))) continue;
-                CGContextMoveToPoint(ctx, b->sk[i0].x, b->sk[i0].y);
-                CGContextAddLineToPoint(ctx, b->sk[i1].x, b->sk[i1].y);
-            }
-            CGContextStrokePath(ctx);
-            if (b->skMask & (1u << 5)) {
-                CGFloat hr = MAX(1.6, r.size.height * 0.018);
-                CGContextStrokeEllipseInRect(ctx,
-                    CGRectMake(b->sk[5].x - hr, b->sk[5].y - hr, hr * 2.0, hr * 2.0));
-            }
-            CGContextRestoreGState(ctx);
-        } else if (o->skeleton && r.size.height > 8.0 && r.size.width > 2.0) {
-        /* C-12: esqueleto PROCEDURAL (fallback). SP3CTERIOS no resuelve la cadena de
-           huesos (usa PickAimPoint + BoneCandidate con offsets del pawn);
-           replicamos esa idea: figura de palos proporcional a la caja. Cero
-           lecturas nuevas, cero riesgo de freeze. */
-        if (o->skeleton && r.size.height > 8.0 && r.size.width > 2.0) {
-            CGFloat fx = CGRectGetMidX(r);
-            CGFloat ty = r.origin.y, hh = r.size.height, ww = r.size.width;
-            CGFloat sh = ww * 0.34;                 /* media apertura de hombros */
-            CGPoint pHead = CGPointMake(fx, ty + hh * 0.07);
-            CGPoint pNeck = CGPointMake(fx, ty + hh * 0.14);
-            CGPoint pChest = CGPointMake(fx, ty + hh * 0.31);
-            CGPoint pHip = CGPointMake(fx, ty + hh * 0.52);
-            CGPoint pLSh = CGPointMake(fx - sh, ty + hh * 0.20);
-            CGPoint pRSh = CGPointMake(fx + sh, ty + hh * 0.20);
-            CGPoint pLEl = CGPointMake(fx - sh * 1.18, ty + hh * 0.41);
-            CGPoint pREl = CGPointMake(fx + sh * 1.18, ty + hh * 0.41);
-            CGPoint pLHa = CGPointMake(fx - sh * 1.10, ty + hh * 0.60);
-            CGPoint pRHa = CGPointMake(fx + sh * 1.10, ty + hh * 0.60);
-            CGPoint pLKn = CGPointMake(fx - sh * 0.62, ty + hh * 0.76);
-            CGPoint pRKn = CGPointMake(fx + sh * 0.62, ty + hh * 0.76);
-            CGPoint pLFe = CGPointMake(fx - sh * 0.62, ty + hh * 0.99);
-            CGPoint pRFe = CGPointMake(fx + sh * 0.62, ty + hh * 0.99);
-            CGPoint seg[][4] = {
-                { pNeck, pChest, pChest, pHip },     /* tronco */
-                { pChest, pLSh, pChest, pRSh },      /* hombros */
-                { pLSh, pLEl, pLEl, pLHa },          /* brazo izq */
-                { pRSh, pREl, pREl, pRHa },          /* brazo der */
-                { pHip, pLKn, pLKn, pLFe },          /* pierna izq */
-                { pHip, pRKn, pRKn, pRFe },          /* pierna der */
-                { pNeck, pHead, pHead, pHead }       /* cuello */
-            };
-            CGContextSaveGState(ctx);
-            CGContextSetShadowWithColor(ctx, CGSizeZero, 3.0,
-                [UIColor colorWithRed:cr green:cg blue:cb alpha:0.55].CGColor);
-            CGContextSetLineWidth(ctx, 1.2);
-            CGContextSetLineCap(ctx, kCGLineCapRound);
-            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.85);
-            CGContextBeginPath(ctx);
-            for (int k = 0; k < (int)(sizeof(seg) / sizeof(seg[0])); k++) {
-                CGContextMoveToPoint(ctx, seg[k][0].x, seg[k][0].y);
-                CGContextAddLineToPoint(ctx, seg[k][1].x, seg[k][1].y);
-                CGContextMoveToPoint(ctx, seg[k][2].x, seg[k][2].y);
-                CGContextAddLineToPoint(ctx, seg[k][3].x, seg[k][3].y);
-            }
-            CGContextStrokePath(ctx);
-            /* cabeza: circulo */
-            CGFloat hr = MAX(2.0, hh * 0.045);
-            CGContextStrokeEllipseInRect(ctx, CGRectMake(pHead.x - hr, pHead.y - hr,
-                                                         hr * 2.0, hr * 2.0));
-            CGContextRestoreGState(ctx);
-        }
-        }   /* cierra el else-if del skeleton (C-15) */
 
         /* v0.7.0 (1.2): objetivo elegido en la lista -> aro blanco en la caja. */
         if (g_tl_sel_pawn != 0 && b->pawn == g_tl_sel_pawn) {
@@ -3020,7 +2945,6 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
-    if ([k isEqualToString:@"mm_x_skel"] && s.on) mm_bones_dump();   /* C-16 */
     if ([k isEqualToString:@"mm_x_fast_reload"]) mm_reload_apply();   /* C-18 */
     if ([k isEqualToString:@"mm_x_aim_key"]) {
         g_aim_key_mode = s.on;
@@ -5997,7 +5921,6 @@ static void mm_esp_collect_real(void)
         nb.alive = 1;
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
-        if (opts->skeleton) mm_skel_fill(&nb, view, proj, W, H);   /* C-15 */
 
         /* v0.2.4: estabilidad por pawn. La lista cambia de orden y las cajas
            saltaban; cada pawn conserva su caja y se interpola suavemente. */
@@ -6957,9 +6880,7 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
-    mm_cloud_row(c, @"Esqueleto", @"mm_x_skel", NO, 94.0, YES);
     mm_cloud_row(c, @"Ignorar caidos (aim)", @"mm_x_ignore_down", NO, 122.0, NO);
-    mm_cloud_row(c, @"Recarga rapida", @"mm_x_fast_reload", NO, 150.0, NO);
     [page addSubview:c];
 }
 
@@ -7537,10 +7458,23 @@ static void mm_build_ui(void)
     UILabel *h = mm_cloud_label(@"FUSION", 19.0, UIFontWeightHeavy, [UIColor whiteColor]);
     h.frame = CGRectMake(64.0, 9.0, 210.0, 24.0);
     [g_panel addSubview:h];
-    UILabel *sub = mm_cloud_label([NSString stringWithFormat:@"FUSION  ·  v%s", MODMENU_VERSION],
+    UILabel *sub = mm_cloud_label(@"PRO MOD MENU  ·  iOS",
                                   8.0, UIFontWeightSemibold,
                                   [UIColor colorWithWhite:0.52 alpha:1.0]);
-    sub.frame = CGRectMake(65.0, 34.0, 210.0, 13.0);
+    sub.frame = CGRectMake(65.0, 34.0, 160.0, 13.0);
+    /* C-24: chip de version a la derecha del subtitulo. */
+    {
+        UILabel *ver = mm_cloud_label([NSString stringWithFormat:@"v%s", MODMENU_VERSION],
+                                      8.0, UIFontWeightBold, mm_neon_green());
+        ver.textAlignment = NSTextAlignmentCenter;
+        ver.backgroundColor = [mm_neon_green() colorWithAlphaComponent:0.12];
+        ver.layer.cornerRadius = 6.0;
+        ver.layer.masksToBounds = YES;
+        ver.layer.borderWidth = 0.6;
+        ver.layer.borderColor = [mm_neon_green() colorWithAlphaComponent:0.35].CGColor;
+        ver.frame = CGRectMake(65.0, 33.0, 54.0, 14.0);
+        [g_panel addSubview:ver];
+    }
     [g_panel addSubview:sub];
 
     g_status_strip = [[UILabel alloc] initWithFrame:CGRectMake(286.0, 18.0, 246.0, 28.0)];
@@ -7601,11 +7535,11 @@ static void mm_build_ui(void)
         b.layer.borderWidth = 0.7;
         b.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.07].CGColor;
         /* C-13: barra de acento inferior del tab activo. */
-        UIView *nb = [[UIView alloc] initWithFrame:CGRectMake(9.0, 38.0 - 3.2,
-                                                              navW - 18.0, 2.4)];
+        UIView *nb = [[UIView alloc] initWithFrame:CGRectMake(10.0, 34.5,
+                                                              navW - 20.0, 2.0)];
         nb.tag = 99;
         nb.backgroundColor = mm_neon_green();
-        nb.layer.cornerRadius = 1.2;
+        nb.layer.cornerRadius = 1.0;
         nb.hidden = (i != 0);
         [b addSubview:nb];
         b.titleLabel.font = mm_cloud_font(9.8, UIFontWeightSemibold);
