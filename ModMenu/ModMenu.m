@@ -636,7 +636,7 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 32
-#define MM_SK_N 21   /* C-5: huesos del biped que se proyectan por caja */
+#define MM_SK_N 20   /* C-23: huesos reales de CODM (b_*) */
 /* C-5: Transform.Find / Transform.get_position (dump 1.0.57, verificados) */
 #ifndef VA_TRFIND
 #define VA_TRFIND 0x108C65B98ULL
@@ -699,28 +699,28 @@ static int          g_box_count = 0;  /* cajas listas para pintar         */
 /* --- C-5: skeleton ESP. Huesos del biped 3ds Max (Bip001*) que usa CODM.
    Se resuelven una vez por pawn con Transform.Find y se cachean; cada frame
    solo se pide la posicion mundial de cada Transform cacheado. --- */
+/* C-23: nombres REALES de los huesos de CODM (del dump de device):
+   b_Root > Bip01 > b_Hips / b_Spine2 > b_Spine1 > b_Spine > b_Neck > b_Head ... */
 static const char *mm_sk_path[MM_SK_N] = {
-    "Bip001 Pelvis", "Bip001 Spine", "Bip001 Spine1", "Bip001 Spine2", "Bip001 Spine3",
-    "Bip001 Neck", "Bip001 Head",
-    "Bip001 L Clavicle", "Bip001 L UpperArm", "Bip001 L Forearm", "Bip001 L Hand",
-    "Bip001 R Clavicle", "Bip001 R UpperArm", "Bip001 R Forearm", "Bip001 R Hand",
-    "Bip001 L Thigh", "Bip001 L Calf", "Bip001 L Foot",
-    "Bip001 R Thigh", "Bip001 R Calf", "Bip001 R Foot"
+    "b_Hips", "b_Spine2", "b_Spine1", "b_Spine", "b_Neck", "b_Head",
+    "b_LeftClav", "b_LeftArm", "b_LeftForeArm",
+    "b_RightClav", "b_RightArm", "b_RightForeArm",
+    "b_LeftLegUpper", "b_LeftLeg", "b_LeftAnkle", "b_LeftToe",
+    "b_RightLegUpper", "b_RightLeg", "b_RightAnkle", "b_RightToe"
 };
 static const char *mm_sk_suffix[MM_SK_N] = {
-    " Pelvis", " Spine", " Spine1", " Spine2", " Spine3",
-    " Neck", " Head",
-    " L Clavicle", " L UpperArm", " L Forearm", " L Hand",
-    " R Clavicle", " R UpperArm", " R Forearm", " R Hand",
-    " L Thigh", " L Calf", " L Foot",
-    " R Thigh", " R Calf", " R Foot"
+    "b_Hips", "b_Spine2", "b_Spine1", "b_Spine", "b_Neck", "b_Head",
+    "b_LeftClav", "b_LeftArm", "b_LeftForeArm",
+    "b_RightClav", "b_RightArm", "b_RightForeArm",
+    "b_LeftLegUpper", "b_LeftLeg", "b_LeftAnkle", "b_LeftToe",
+    "b_RightLegUpper", "b_RightLeg", "b_RightAnkle", "b_RightToe"
 };
 static const int mm_sk_link[][2] = {
-    {0,1},{1,2},{2,3},{3,4},{4,5},{5,6},        /* pelvis -> spine -> cabeza */
-    {4,7},{7,8},{8,9},{9,10},                   /* pecho -> brazo izq        */
-    {4,11},{11,12},{12,13},{13,14},             /* pecho -> brazo der        */
-    {0,15},{15,16},{16,17},                     /* pelvis -> pierna izq      */
-    {0,18},{18,19},{19,20}                      /* pelvis -> pierna der      */
+    {0,1},{1,2},{2,3},{3,4},{4,5},              /* hips -> spine2 -> spine1 -> spine -> neck -> head */
+    {3,6},{6,7},{7,8},                          /* spine -> clav L -> arm L -> forearm L */
+    {3,9},{9,10},{10,11},                       /* spine -> clav R -> arm R -> forearm R */
+    {0,12},{12,13},{13,14},{14,15},             /* hips -> leg L -> ankle L -> toe L */
+    {0,16},{16,17},{17,18},{18,19}              /* hips -> leg R -> ankle R -> toe R */
 };
 #define MM_SK_LINKS ((int)(sizeof(mm_sk_link) / sizeof(mm_sk_link[0])))
 typedef struct {
@@ -2424,10 +2424,10 @@ static int mm_declutter_budget(void)
                 CGContextAddLineToPoint(ctx, b->sk[i1].x, b->sk[i1].y);
             }
             CGContextStrokePath(ctx);
-            if (b->skMask & (1u << 6)) {
+            if (b->skMask & (1u << 5)) {
                 CGFloat hr = MAX(1.6, r.size.height * 0.018);
                 CGContextStrokeEllipseInRect(ctx,
-                    CGRectMake(b->sk[6].x - hr, b->sk[6].y - hr, hr * 2.0, hr * 2.0));
+                    CGRectMake(b->sk[5].x - hr, b->sk[5].y - hr, hr * 2.0, hr * 2.0));
             }
             CGContextRestoreGState(ctx);
         } else if (o->skeleton && r.size.height > 8.0 && r.size.width > 2.0) {
