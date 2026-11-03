@@ -959,6 +959,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
+static void mm_bones_dump(void);       /* C-16: dump de jerarquia de huesos */
 static void mm_br_probe_run(void);     /* 0.6.0: dump de los setters de RadiationZone */
 static void mm_br_zone_read(void);     /* 0.6.3: lee el manager si hay offsets verificados */
 static void mm_layout_count_glass(void);
