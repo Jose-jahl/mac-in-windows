@@ -410,6 +410,8 @@ static void mm_aim_apply(void)
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639FCULL) = 1.0f - g_aim_smooth * 0.98f;
 }
 
+static BOOL mm_def_bool(NSString *k, BOOL d);   /* forward: lo usa mm_reload_apply */
+
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
    cod_base+0xDC63A04; aca se escribe 0.125 s (ON) o 3.0 s (OFF). */
 static void mm_reload_apply(void)
