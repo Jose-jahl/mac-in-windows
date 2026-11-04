@@ -2981,12 +2981,7 @@ static void mm_haptic(int style)
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"mm_debug"];
     [[NSUserDefaults standardUserDefaults] synchronize];
     mm_refresh_debug_button();
-    /* v0.7.5: fuerza una pasada fresca del probe BR antes de escribir
-       status. Asi si el operador toca el boton durante el shrink, el
-       status.txt y el br_probe.txt reflejan el BRMgr vivo (la instancia
-       resuelta). Si el singleton sigue en 0, el intento es barato (lee
-       bytes del binario, nunca llama al juego). */
-    mm_br_probe_run();
+    /* C-25: sin probe BR (era un dump de ~500 ms al tocar el boton). */
     mm_write_status(@"manual: escribir status");
     [b setTitle:mm_tr(@"Escrito: Documents/modmenu_status.txt")
         forState:UIControlStateNormal];
@@ -6822,9 +6817,9 @@ static void mm_cloud_build_visual(UIView *page)
     [a addSubview:ts];
 
     /* Unica gestion de perfiles: tema + configuracion en 5 slots. */
-    mm_cloud_card_caption(a, @"Perfiles (tema + config)", 138.0);
+    mm_cloud_card_caption(a, @"Perfiles (tema + config)", 142.0);
     g_profile_seg = mm_cloud_seg(@[ @"P1", @"P2", @"P3", @"P4", @"P5" ], iw);
-    g_profile_seg.frame = CGRectMake(MM_CLOUD_CARD_INNER, 152.0, iw, 26.0);
+    g_profile_seg.frame = CGRectMake(MM_CLOUD_CARD_INNER, 156.0, iw, 24.0);
     g_profile_seg.selectedSegmentIndex = g_profile_slot;
     [g_profile_seg addTarget:[MMTargets shared] action:@selector(onProfileSlot:)
             forControlEvents:UIControlEventValueChanged];
@@ -6832,13 +6827,13 @@ static void mm_cloud_build_visual(UIView *page)
     CGFloat halfW = (iw - 8.0) / 2.0;
     UIButton *psv = mm_cloud_action(@"Guardar",
         [UIColor colorWithRed:0.08 green:0.38 blue:0.20 alpha:0.96], halfW, 28.0);
-    psv.frame = CGRectMake(MM_CLOUD_CARD_INNER, 182.0, halfW, 28.0);
+    psv.frame = CGRectMake(MM_CLOUD_CARD_INNER, 184.0, halfW, 26.0);
     [psv addTarget:[MMTargets shared] action:@selector(onProfileSave)
         forControlEvents:UIControlEventTouchUpInside];
     [a addSubview:psv];
     UIButton *pld = mm_cloud_action(@"Cargar",
         [UIColor colorWithRed:0.08 green:0.24 blue:0.42 alpha:0.96], halfW, 28.0);
-    pld.frame = CGRectMake(MM_CLOUD_CARD_INNER + halfW + 8.0, 182.0, halfW, 28.0);
+    pld.frame = CGRectMake(MM_CLOUD_CARD_INNER + halfW + 8.0, 184.0, halfW, 26.0);
     [pld addTarget:[MMTargets shared] action:@selector(onProfileLoad)
         forControlEvents:UIControlEventTouchUpInside];
     [a addSubview:pld];
@@ -6847,32 +6842,33 @@ static void mm_cloud_build_visual(UIView *page)
 
     UIView *b = mm_cloud_card(@"MIRA", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(b, @"Crosshair (mira)", @"mm_x_cross", NO, 38.0, YES);
-    mm_cloud_row(b, @"Anillo de aim", @"mm_x_aimring", NO, 66.0, YES);
-    mm_cloud_row(b, @"Circulo de FOV", @"mm_x_fov_circle", NO, 94.0, YES);
-    mm_cloud_card_caption(b, @"Estilo de crosshair", 96.0);
+    /* C-25: re-layout para que no se pisen fila/caption/segmentado. */
+    mm_cloud_row(b, @"Crosshair (mira)", @"mm_x_cross", NO, 30.0, YES);
+    mm_cloud_row(b, @"Anillo de aim", @"mm_x_aimring", NO, 54.0, YES);
+    mm_cloud_row(b, @"Circulo de FOV", @"mm_x_fov_circle", NO, 78.0, YES);
+    mm_cloud_card_caption(b, @"Estilo de crosshair", 108.0);
     int cstyle = (int)mm_def_float(@"mm_x_cross_style", 0.0f);
     if (cstyle < 0 || cstyle > 3) cstyle = 0;
     UISegmentedControl *cs = mm_cloud_seg(@[ mm_tr(@"Cruz"), mm_tr(@"Punto"),
                                               mm_tr(@"Circulo"), mm_tr(@"Todo") ], iw);
-    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 112.0, iw, 24.0);
+    cs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 122.0, iw, 22.0);
     cs.selectedSegmentIndex = cstyle;
     [cs addTarget:[MMTargets shared] action:@selector(onCrossStyle:)
         forControlEvents:UIControlEventValueChanged];
     [b addSubview:cs];
 
     /* Fase C-2: FOV del aim (grados). Fuera del cono, el aim no asiste. */
-    mm_cloud_card_caption(b, @"FOV de aim", 138.0);
+    mm_cloud_card_caption(b, @"FOV de aim", 146.0);
     UISlider *af = mm_cloud_slider(5.0f, 180.0f, g_aim_fov, @"mm_x_aim_fov",
                                    @selector(onAimFov:), iw);
-    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 152.0, iw, 22.0);
+    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 160.0, iw, 18.0);
     [b addSubview:af];
 
     /* Fase C-4: suavizado del aim (0 = snap, 1 = lento). */
-    mm_cloud_card_caption(b, @"Suavizado de aim", 178.0);
+    mm_cloud_card_caption(b, @"Suavizado de aim", 180.0);
     UISlider *as2 = mm_cloud_slider(0.0f, 1.0f, g_aim_smooth, @"mm_x_aim_smooth",
                                     @selector(onAimSmooth:), iw);
-    as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 192.0, iw, 22.0);
+    as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 194.0, iw, 18.0);
     [b addSubview:as2];
     [page addSubview:b];
 
@@ -7461,7 +7457,7 @@ static void mm_build_ui(void)
     UILabel *sub = mm_cloud_label(@"PRO MOD MENU  ·  iOS",
                                   8.0, UIFontWeightSemibold,
                                   [UIColor colorWithWhite:0.52 alpha:1.0]);
-    sub.frame = CGRectMake(65.0, 34.0, 160.0, 13.0);
+    sub.frame = CGRectMake(65.0, 34.0, 148.0, 13.0);
     /* C-24: chip de version a la derecha del subtitulo. */
     {
         UILabel *ver = mm_cloud_label([NSString stringWithFormat:@"v%s", MODMENU_VERSION],
@@ -7472,7 +7468,7 @@ static void mm_build_ui(void)
         ver.layer.masksToBounds = YES;
         ver.layer.borderWidth = 0.6;
         ver.layer.borderColor = [mm_neon_green() colorWithAlphaComponent:0.35].CGColor;
-        ver.frame = CGRectMake(65.0, 33.0, 54.0, 14.0);
+        ver.frame = CGRectMake(216.0, 33.0, 56.0, 14.0);
         [g_panel addSubview:ver];
     }
     [g_panel addSubview:sub];
@@ -8367,26 +8363,11 @@ static void mm_tick(void)
                           mm_tr(@"Dos arranques sin cierre limpio seguidos. El overlay quedo apagado; revisa MISC."));
         }
         if (g_probe == nil && mm_uptime() > 2.0) mm_probe_run();
-        /* v0.7.5: el probe BR corre a los 2 s (menu/splash) para capturar
-           los prologos y chases; pero si en ese momento el singleton del
-           BRMgr aun no esta instanciado (slot estatico = 0), reintentabamos.
-           v0.7.8: cambio la gate de "got_inst" a "saw_diff"
-           (shrink activo capturado) para seguir reintentando hasta
-           enganchar el shrink. Cadencia 30 s (antes 15) para bajar el
-           hitch de 500 ms del dump dinamico; en gameplay el usuario entra
-           a BR, cae, llega al shrink en 3-5 min: con 30 s hay ventana
-           suficiente. Despues del primer shrink, saw_diff=1 y stop. */
-        {
-            double now = mm_uptime();
-            if (now > 2.0) {
-                int should_run = 0;
-                if (g_br_probe == nil) should_run = 1;
-                else if (!g_br_probe_saw_diff && (now - g_br_probe_last_run) >= 30.0)
-                    should_run = 1;
-                if (should_run) mm_br_probe_run();
-            }
-        }
-        mm_refresh_info();
+        /* C-25: probe BR DESACTIVADO. Hacia un dump de memoria de ~500 ms cada
+           30 s (hitch de medio segundo) y la zona BR esta descartada.
+           Tambien se dejo de reconstruir el texto de INFO en cada latido: solo
+           con el panel abierto (era un NSAttributedString grande por tick). */
+        if (g_panel_open) mm_refresh_info();
 
         if (fast) {
             if (!ok && (g_tries % MM_FAST_LOG_EVERY) == 0)
