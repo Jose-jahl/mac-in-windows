@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.9"
+#define MODMENU_VERSION     "0.9.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.9";
+const char *modmenu_build_id = "modmenu-glass-0.9.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -5987,7 +5987,7 @@ static void mm_cloud_build_combat(UIView *page)
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, (i != 0));
     [page addSubview:a];
 
-    UIView *b = mm_cloud_card(@"LECTURA", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
+    UIView *b = mm_cloud_card(@"AIM", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     NSArray *rkeys = @[ @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
                         @"mm_esp_fill" ];
@@ -6004,7 +6004,7 @@ static void mm_cloud_build_combat(UIView *page)
     as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 190.0, iw, 24.0);
     [b addSubview:as];    [page addSubview:b];
 
-    UIView *c = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+    UIView *c = mm_cloud_card(@"ALCANCE", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     float rng = mm_def_float(@"mm_esp_range", 500.0f);
     UILabel *rl = mm_cloud_caption(@"Rango ESP", 108.0);
@@ -6047,7 +6047,7 @@ static void mm_cloud_build_visual(UIView *page)
 {
     CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
 
-    UIView *a = mm_cloud_card(@"CAJA", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    UIView *a = mm_cloud_card(@"ESTILO", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_card_caption(a, @"Estilo de caja", 38.0);
     int bstyle = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
     UISegmentedControl *bs = mm_cloud_seg(@[ mm_tr(@"Completa"), mm_tr(@"Esquinas") ], iw);
@@ -6124,7 +6124,7 @@ static void mm_cloud_build_visual(UIView *page)
     [b addSubview:as2];
     [page addSubview:b];
 
-    UIView *c = mm_cloud_card(@"MUNDO", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+    UIView *c = mm_cloud_card(@"EXTRAS", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
@@ -6384,10 +6384,29 @@ static void mm_cloud_build_info(UIView *page)
  * lento con CABasicAnimation: costo GPU, cero CPU por frame.
  *--------------------------------------------------------------------------*/
 @interface MMBtnGlyph : UIView
-@property (nonatomic, strong) CAShapeLayer *arc;
+@property (nonatomic, strong) CAShapeLayer *arc;    /* estela ancha (glow)  */
+@property (nonatomic, strong) CAShapeLayer *core;   /* rayo blanco interior */
 @end
 
 @implementation MMBtnGlyph
+/* 2026-11: camino HEXAGONAL (antes era un circulo). El rayo recorre los seis
+   lados del emblema, no una orbita redonda. */
+static CGPathRef mm_glyph_hex_path(CGFloat w, CGFloat h)
+{
+    CGMutablePathRef p = CGPathCreateMutable();
+    CGFloat cx = w / 2.0, cy = h / 2.0;
+    CGFloat R = MIN(w, h) / 2.0 - 3.2;
+    CGPoint pt[6];
+    for (int i = 0; i < 6; i++) {
+        CGFloat a = (CGFloat)(M_PI / 3.0 * i) - (CGFloat)(M_PI / 6.0);
+        pt[i] = CGPointMake(cx + (CGFloat)cos(a) * R, cy + (CGFloat)sin(a) * R);
+    }
+    CGPathMoveToPoint(p, NULL, pt[0].x, pt[0].y);
+    for (int i = 1; i < 6; i++) CGPathAddLineToPoint(p, NULL, pt[i].x, pt[i].y);
+    CGPathCloseSubpath(p);
+    return p;
+}
+
 - (instancetype)initWithFrame:(CGRect)frame
 {
     self = [super initWithFrame:frame];
@@ -6395,21 +6414,44 @@ static void mm_cloud_build_info(UIView *page)
         self.backgroundColor = [UIColor clearColor];
         self.opaque = NO;
         self.userInteractionEnabled = NO;
-        CGFloat w = frame.size.width, h = frame.size.height;
+        CGPathRef hp = mm_glyph_hex_path(frame.size.width, frame.size.height);
+
+        /* estela: trazo ancho violeta con glow, corto, para que se lea como
+           energia corriendo por el borde y no como una linea pintada. */
         _arc = [CAShapeLayer layer];
         _arc.frame = self.bounds;
-        _arc.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(w / 2.0, h / 2.0)
-                                                   radius:(w / 2.0) - 5.5
-                                               startAngle:0.0
-                                                 endAngle:(CGFloat)(2.0 * M_PI)
-                                                clockwise:YES].CGPath;
+        _arc.path = hp;
         _arc.fillColor = [UIColor clearColor].CGColor;
-        _arc.strokeColor = [mm_neon_purple() colorWithAlphaComponent:0.95].CGColor;
-        _arc.lineWidth = 2.2;
+        _arc.strokeColor = [mm_neon_purple() colorWithAlphaComponent:0.55].CGColor;
+        _arc.lineWidth = 4.6;
         _arc.lineCap = kCALineCapRound;
+        _arc.lineJoin = kCALineJoinRound;
+        _arc.shadowColor = mm_neon_purple().CGColor;
+        _arc.shadowRadius = 5.0;
+        _arc.shadowOpacity = 0.85f;
+        _arc.shadowOffset = CGSizeZero;
         _arc.strokeStart = 0.0;
-        _arc.strokeEnd = 0.30;
+        _arc.strokeEnd = 0.18;
         [self.layer addSublayer:_arc];
+
+        /* rayo: nucleo casi blanco, mas fino y mas corto, dentro de la estela. */
+        _core = [CAShapeLayer layer];
+        _core.frame = self.bounds;
+        _core.path = hp;
+        _core.fillColor = [UIColor clearColor].CGColor;
+        _core.strokeColor = [UIColor colorWithRed:0.86 green:1.0 blue:0.98 alpha:1.0].CGColor;
+        _core.lineWidth = 1.7;
+        _core.lineCap = kCALineCapRound;
+        _core.lineJoin = kCALineJoinRound;
+        _core.shadowColor = [UIColor colorWithRed:0.55 green:1.0 blue:0.95 alpha:1.0].CGColor;
+        _core.shadowRadius = 3.0;
+        _core.shadowOpacity = 0.95f;
+        _core.shadowOffset = CGSizeZero;
+        _core.strokeStart = 0.0;
+        _core.strokeEnd = 0.10;
+        [self.layer addSublayer:_core];
+
+        CGPathRelease(hp);
     }
     return self;
 }
@@ -6487,18 +6529,40 @@ static void mm_cloud_build_info(UIView *page)
 }
 @end
 
-/* Gira el arco de acento del emblema (se reanuda si iOS lo purgo). */
+/* 2026-11: el rayo recorre el HEXAGONO (strokeStart/End sobre el path), no gira
+   en circulo. Estela y nucleo viajan con un desfase para que parezca descarga. */
 static void mm_btn_spin(MMBtnGlyph *g)
 {
     if (g == nil || g.arc == nil) return;
-    if ([g.arc animationForKey:@"mm_spin"] != nil) return;
-    CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-    sp.fromValue = @0.0;
-    sp.toValue = @(2.0 * M_PI);
-    sp.duration = 6.0;
-    sp.repeatCount = HUGE_VALF;
-    sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-    [g.arc addAnimation:sp forKey:@"mm_spin"];
+    if ([g.arc animationForKey:@"mm_travel"] != nil) return;
+    CAMediaTimingFunction *lin = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+
+    CABasicAnimation *s1 = [CABasicAnimation animationWithKeyPath:@"strokeStart"];
+    s1.fromValue = @0.0; s1.toValue = @1.0; s1.duration = 2.6;
+    s1.repeatCount = HUGE_VALF; s1.timingFunction = lin;
+    [g.arc addAnimation:s1 forKey:@"mm_travel"];
+
+    CABasicAnimation *e1 = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
+    e1.fromValue = @0.18; e1.toValue = @1.0; e1.duration = 2.6;
+    e1.repeatCount = HUGE_VALF; e1.timingFunction = lin;
+    [g.arc addAnimation:e1 forKey:@"mm_travelEnd"];
+
+    if (g.core != nil) {
+        CABasicAnimation *s2 = [CABasicAnimation animationWithKeyPath:@"strokeStart"];
+        s2.fromValue = @0.0; s2.toValue = @1.0; s2.duration = 2.6;
+        s2.repeatCount = HUGE_VALF; s2.timingFunction = lin;
+        [g.core addAnimation:s2 forKey:@"mm_travel"];
+        CABasicAnimation *e2 = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
+        e2.fromValue = @0.10; e2.toValue = @1.0; e2.duration = 2.6;
+        e2.repeatCount = HUGE_VALF; e2.timingFunction = lin;
+        [g.core addAnimation:e2 forKey:@"mm_travelEnd"];
+        /* parpadeo electrico del nucleo */
+        CAKeyframeAnimation *fl = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+        fl.values = @[ @0.55, @1.0, @0.75, @1.0, @0.6 ];
+        fl.duration = 0.9;
+        fl.repeatCount = HUGE_VALF;
+        [g.core addAnimation:fl forKey:@"mm_flicker"];
+    }
 }
 
 /* v0.6.1: pinta el boton Debug segun el estado real de la clave. */
@@ -6776,7 +6840,7 @@ static void mm_build_ui(void)
 
     /* Navegacion horizontal real. g_seg queda oculto solo como estado para
        conservar el swipe y los metodos que ya existian. */
-    NSArray *navTitles = @[ @"COMBATE", @"VISUAL", @"RADAR", @"INFO" ];
+    NSArray *navTitles = @[ @"ESP", @"VISUAL", @"RADAR", @"CONFIG" ];
     CGFloat navW = (MM_PANEL_W - 36.0 - 32.0) / 4.0;
     g_nav_btns = [NSMutableArray array];
     for (NSUInteger i = 0; i < navTitles.count; i++) {
