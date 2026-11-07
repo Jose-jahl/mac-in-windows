@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.4"
+#define MODMENU_VERSION     "0.9.5"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.4";
+const char *modmenu_build_id = "modmenu-glass-0.9.5";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -412,7 +412,7 @@ static void mm_aim_apply(void)
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639ECULL) = g_aim_on ? g_aim_strength : 0.0f;
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639F0ULL) = g_aim_fov;
     *(int   *)((uintptr_t)h + (uintptr_t)0x0DC639F4ULL) =
-        (g_lock_on || (g_aim_key_mode && !g_aim_key_held)) ? 0 : 1;   /* 0.9.4: el lock manda */
+        (g_aim_key_mode && !g_aim_key_held) ? 0 : 1;   /* 0.9.5: el asist nunca se apaga */
     *(float *)((uintptr_t)h + (uintptr_t)0x0DC639FCULL) = 1.0f - g_aim_smooth * 0.98f;
 }
 
@@ -4739,6 +4739,35 @@ static void mm_aim_lock(void)
 
         g_fp_setrot(tr, q);
         memcpy(s_q, q, sizeof(s_q));
+
+        /* 0.9.5: sonda (2 Hz) — calculado vs real, para ver la convencion real */
+        {
+            static double s_lg = 0.0;
+            double nowl = CACurrentMediaTime();
+            if ((nowl - s_lg) > 0.5) {
+                s_lg = nowl;
+                float cq[4] = { 0, 0, 0, 1 };
+                if (g_fp_getrot != NULL) g_fp_getrot(tr, cq);
+                float realYaw = atan2f(2.0f * (cq[3] * cq[1] + cq[0] * cq[2]),
+                                       1.0f - 2.0f * (cq[1] * cq[1] + cq[0] * cq[0]));
+                NSString *docs = mm_docs_dir();
+                if (docs.length > 0) {
+                    NSString *t = [NSString stringWithFormat:
+                        @"build=%s\ncamPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
+                        @"ty=%.4f tp=%.4f (rad)\n"
+                        @"q_written=%.4f,%.4f,%.4f,%.4f\n"
+                        @"q_real=%.4f,%.4f,%.4f,%.4f\nrealYaw=%.4f\nkinds=%d\n",
+                        MODMENU_VERSION, (double)cp[0], (double)cp[1], (double)cp[2],
+                        (double)px, (double)py, (double)pz,
+                        (double)ty, (double)tp,
+                        (double)q[0], (double)q[1], (double)q[2], (double)q[3],
+                        (double)cq[0], (double)cq[1], (double)cq[2], (double)cq[3],
+                        (double)realYaw, kind];
+                    [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
+                        atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+                }
+            }
+        }
     } @catch (NSException *e) {}
 }
 
