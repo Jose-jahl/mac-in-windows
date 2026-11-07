@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.5"
+#define MODMENU_VERSION     "0.8.6"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.5";
+const char *modmenu_build_id = "modmenu-glass-0.8.6";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -5964,8 +5964,11 @@ static void mm_cloud_build_combat(UIView *page)
     ms.frame = CGRectMake(MM_CLOUD_CARD_INNER, 104.0, iw, 24.0);
     [c addSubview:ms];
 
-    mm_cloud_static_row(c, @"No recoil", @"ACTIVO", 150.0);
-    mm_cloud_static_row(c, @"No spread", @"ACTIVO", 178.0);
+    /* 2026-11: tres features fijas (no toggleables: son parches del binario).
+       Filas a 130/158/186 para que entren las tres dentro del cuerpo (214). */
+    mm_cloud_static_row(c, @"No recoil", @"ACTIVO", 130.0);
+    mm_cloud_static_row(c, @"No spread", @"ACTIVO", 158.0);
+    mm_cloud_static_row(c, @"Fast reload", @"ACTIVO", 186.0);
     [page addSubview:c];
 }
 
