@@ -395,6 +395,11 @@ const char *modmenu_build_id = "modmenu-glass-0.9.4";
 static float g_aim_strength = 28.0f;
 static float g_aim_fov = 180.0f;
 static float g_aim_smooth = 0.0f;   /* C-4: 0 = snap, 1 = suave */
+static BOOL g_lock_on = NO;
+static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
+static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
+static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
+static BOOL mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 1.15f;  /* 0.9.4: altura del punto de aim (m sobre el pawn) */
 static BOOL  g_aim_on = YES;
 static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
@@ -415,10 +420,6 @@ static BOOL mm_def_bool(NSString *k, BOOL d);   /* forward: lo usa mm_reload_app
 
 /* 0.9.1: AIM LOCK — seguir al enemigo sin apuntar, con sub-opciones por tipo de
    arma (por defecto solo franco y escopeta, que es donde mas se usa). */
-static BOOL g_lock_on = NO;
-static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
-static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
-static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
 static void mm_lock_opts_sync(void)
 {
     g_lock_on      = mm_def_bool(@"mm_x_aimlock", NO);
