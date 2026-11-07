@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.8"
+#define MODMENU_VERSION     "0.8.9"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.8";
+const char *modmenu_build_id = "modmenu-glass-0.8.9";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
