@@ -1015,30 +1015,6 @@ static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 static void mm_reload_diag(void);      /* 0.8.4: sonda del estado de recarga */
 static void mm_esp_read_diag(void);    /* 0.8.8: sonda de las lecturas nuevas */
-/* 0.9.3: el jugador local esta apuntando (ADS)? Cache 0,2 s. */
-static BOOL mm_local_ads(void)
-{
-    @try {
-        static int s_ads = -1;
-        static double s_ads_t = 0.0;
-        double now = CACurrentMediaTime();
-        if (s_ads >= 0 && (now - s_ads_t) < 0.2) return s_ads ? YES : NO;
-        s_ads_t = now;
-        s_ads = 0;
-        if (g_fp_localpawn == NULL) return NO;
-        void *lp = g_fp_localpawn();
-        if (lp == NULL) return NO;
-        uint64_t inv = 0, wep = 0;
-        if (mm_r64((uintptr_t)lp + OFF_PAWN_INVMGR, &inv) && inv != 0 &&
-            mm_r64((uintptr_t)inv + OFF_INVM_CURWEP, &wep) && wep != 0) {
-            uint8_t a = 0;
-            if (mm_vm_read((uintptr_t)wep + OFF_WEP_AIMING, &a, 1) && (a & 1)) s_ads = 1;
-        }
-        return s_ads ? YES : NO;
-    } @catch (NSException *e) {}
-    return NO;
-}
-
 static void mm_aim_lock(void);          /* 0.9.1: aim lock (seguir sin apuntar) */
 static void mm_lock_opts_sync(void);   /* 0.9.1: opciones del aim lock */
 static void mm_mark_action(const char *a);
@@ -4611,6 +4587,30 @@ static int mm_local_weapon_kind(void)
             strstr(nm, "fus") != NULL) return 1;
     } @catch (NSException *e) {}
     return 0;
+}
+
+/* 0.9.3: el jugador local esta apuntando (ADS)? Cache 0,2 s. */
+static BOOL mm_local_ads(void)
+{
+    @try {
+        static int s_ads = -1;
+        static double s_ads_t = 0.0;
+        double now = CACurrentMediaTime();
+        if (s_ads >= 0 && (now - s_ads_t) < 0.2) return s_ads ? YES : NO;
+        s_ads_t = now;
+        s_ads = 0;
+        if (g_fp_localpawn == NULL) return NO;
+        void *lp = g_fp_localpawn();
+        if (lp == NULL) return NO;
+        uint64_t inv = 0, wep = 0;
+        if (mm_r64((uintptr_t)lp + OFF_PAWN_INVMGR, &inv) && inv != 0 &&
+            mm_r64((uintptr_t)inv + OFF_INVM_CURWEP, &wep) && wep != 0) {
+            uint8_t a = 0;
+            if (mm_vm_read((uintptr_t)wep + OFF_WEP_AIMING, &a, 1) && (a & 1)) s_ads = 1;
+        }
+        return s_ads ? YES : NO;
+    } @catch (NSException *e) {}
+    return NO;
 }
 
 static void mm_aim_lock(void)
