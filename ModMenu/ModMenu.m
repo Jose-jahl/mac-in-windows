@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.7"
+#define MODMENU_VERSION     "0.8.8"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.7";
+const char *modmenu_build_id = "modmenu-glass-0.8.8";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -697,6 +697,22 @@ typedef struct {
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
 
+/* 0.8.8: muestra de lo que devuelven los lectores nuevos (equipo / estado /
+   municion) por caja. La escribe mm_esp_read_diag() en Documents cuando alguno
+   de los tres toggles esta encendido. Sirve para ver donde se corta la cadena
+   sin adivinar. */
+typedef struct {
+    unsigned long long pawn, ent;
+    uint32_t team;
+    int armor, invis, healing, veh;
+    int ammo, ammoMax, ads;
+    int invOk, wepOk, flOk, fcount, ownerOk;
+} MMEspRead;
+#define MM_ESPREAD_N 8
+static MMEspRead    g_read[MM_ESPREAD_N];
+static int          g_read_n = 0;
+static uint32_t     g_team_local = 0;
+
 typedef void *(*MMFindFn)(void *transform, void *nsstring);
 typedef void  (*MMPosFn)(void *transform, float out[3]);
 static MMFindFn     g_fp_find  = NULL;
@@ -971,6 +987,7 @@ static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 static void mm_reload_diag(void);      /* 0.8.4: sonda del estado de recarga */
+static void mm_esp_read_diag(void);    /* 0.8.8: sonda de las lecturas nuevas */
 static void mm_mark_action(const char *a);
 static void mm_boot_check(void);
 static void mm_health_update(void);
@@ -4045,6 +4062,7 @@ static void mm_esp_frame(double t)
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
+            mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
         }
         /* v0.6.2: repintar solo si algo visible cambio. Parado en el lobby o
@@ -4542,6 +4560,39 @@ static void mm_reload_diag(void)
     } @catch (NSException *e) {}
 }
 
+/* 0.8.8: SONDA DE LAS LECTURAS NUEVAS (solo lectura). Con cualquiera de los
+   tres toggles encendido, escribe Documents/fusion_esp_read.txt una vez por
+   segundo con lo que devolvio cada lector para las primeras 8 cajas: equipo,
+   armadura, invisible, curando, vehiculo, y la cadena de municion paso a paso
+   (invm/wep/fl/cnt/owner). Sirve para ver DONDE se corta sin adivinar. */
+static void mm_esp_read_diag(void)
+{
+    @try {
+        static double s_t = 0.0;
+        const MMDrawOpts *o = mm_draw_opts();
+        if (!o->teamFilter && !o->stateTags && !o->ammoTag) return;
+        double now = CACurrentMediaTime();
+        if (s_t > 0.0 && (now - s_t) < 1.0) return;
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) return;
+        s_t = now;
+        NSMutableString *s = [NSMutableString stringWithFormat:
+            @"build=%s\ncajas=%d muestra=%d\nteam_local=%u\nflags: team=%d estado=%d ammo=%d\n",
+            MODMENU_VERSION, g_box_count, g_read_n, (unsigned)g_team_local,
+            (int)o->teamFilter, (int)o->stateTags, (int)o->ammoTag];
+        for (int i = 0; i < g_read_n; i++) {
+            MMEspRead *r = &g_read[i];
+            [s appendFormat:
+                @"#%d pawn=0x%llX ent=0x%llX team=%u armor=%d invis=%d heal=%d veh=%d "
+                @"| ammo=%d/%d ads=%d invm=%d wep=%d fl=%d cnt=%d owner=%d\n",
+                i, r->pawn, r->ent, r->team, r->armor, r->invis, r->healing, r->veh,
+                r->ammo, r->ammoMax, r->ads, r->invOk, r->wepOk, r->flOk, r->fcount, r->ownerOk];
+        }
+        [s writeToFile:[docs stringByAppendingPathComponent:@"fusion_esp_read.txt"]
+            atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    } @catch (NSException *e) {}
+}
+
 /* el puntero cae dentro de la imagen del juego? Acepta dos senales (dladdr
    es read-only): que la base coincida, o que el nombre de la imagen sea el
    del binario del juego (la sonda v0.2.2 comprobo en el equipo que dladdr
@@ -4675,6 +4726,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 static void mm_esp_collect_real(void)
 {
     g_box_count = 0;
+    g_read_n = 0;                          /* 0.8.8: muestra de la sonda */
     g_track_count = 0;                     /* v0.5.0: track mundial */
     g_count_players = 0;
     g_count_bots = 0;
@@ -4765,6 +4817,7 @@ static void mm_esp_collect_real(void)
     }
 
     const MMDrawOpts *opts = mm_draw_opts();
+    g_team_local = teamLocal;              /* 0.8.8: para la sonda */
     /* C-17: localY para el filtro de caidos del relay. Si el toggle esta OFF
        se escribe un valor muy bajo para que la condicion nunca se cumpla. */
     {
@@ -5008,25 +5061,30 @@ static void mm_esp_collect_real(void)
            WeaponFireComponent[] -> m_ClipAmmoCount. Todo con guardas: si algo
            no cuadra se queda en "sin dato" y no se dibuja. --- */
         int ammo = -1, ammoMax = 0, ads = 0;
+        int dInv = 0, dWep = 0, dFl = 0, dCnt = 0, dOwner = -1;
         if (opts->ammoTag) {
             uint64_t invm = 0, wep = 0;
             if (mm_r64((uintptr_t)pawn + OFF_PAWN_INVMGR, &invm) && invm != 0 &&
                 mm_r64((uintptr_t)invm + OFF_INVM_CURWEP, &wep) && wep != 0) {
+                dInv = 1; dWep = 1;
                 uint8_t aim = 0;
                 if (mm_vm_read((uintptr_t)wep + OFF_WEP_AIMING, &aim, 1) && (aim & 1)) ads = 1;
                 uint64_t fl = 0;
                 if (mm_r64((uintptr_t)wep + OFF_WEP_FIRELST, &fl) && fl != 0) {
+                    dFl = 1;
                     int32_t fcount = 0;
                     if (mm_vm_read((uintptr_t)fl + OFF_LIST_SIZE, &fcount, sizeof(fcount)) &&
                         fcount > 0 && fcount <= 8) {
+                        dCnt = fcount;
                         for (int fi = 0; fi < fcount && ammoMax == 0; fi++) {
                             uint64_t fc = 0;
                             if (!mm_r64((uintptr_t)fl + OFF_ARR_DATA + (uintptr_t)fi * 8, &fc) ||
                                 fc == 0)
                                 continue;
                             uint64_t owner = 0;
-                            if (!mm_r64((uintptr_t)fc + OFF_FC_OWNER, &owner) || owner != pawn)
-                                continue;   /* componente de otra arma/dueno */
+                            if (!mm_r64((uintptr_t)fc + OFF_FC_OWNER, &owner)) continue;
+                            dOwner = (owner == pawn) ? 1 : 0;
+                            if (owner != pawn) continue;   /* componente de otra arma/dueno */
                             int clip = -1, cmax = 0;
                             if (mm_vm_read((uintptr_t)fc + OFF_FC_CLIP, &clip, sizeof(clip)) &&
                                 mm_vm_read((uintptr_t)fc + OFF_FC_CLIPMAX, &cmax, sizeof(cmax)) &&
@@ -5040,6 +5098,19 @@ static void mm_esp_collect_real(void)
                 }
             }
             if (ammoMax <= 0) ads = 0;   /* ADS solo si el arma actual valido */
+        }
+
+        /* 0.8.8: muestra para la sonda (primeras MM_ESPREAD_N cajas) */
+        if (g_read_n < MM_ESPREAD_N) {
+            MMEspRead *r = &g_read[g_read_n++];
+            memset(r, 0, sizeof(*r));
+            r->pawn = pawn; r->ent = ent;
+            r->team = teamEnt;
+            r->armor = armor; r->invis = invisible;
+            r->healing = healing; r->veh = inVeh;
+            r->ammo = ammo; r->ammoMax = ammoMax; r->ads = ads;
+            r->invOk = dInv; r->wepOk = dWep; r->flOk = dFl;
+            r->fcount = dCnt; r->ownerOk = dOwner;
         }
 
         /* --- v0.2.4: nombre real (entidad+0x160; string C#: len 1..63) --- */
