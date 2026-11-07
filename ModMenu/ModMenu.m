@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.3"
+#define MODMENU_VERSION     "0.8.4"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.3";
+const char *modmenu_build_id = "modmenu-glass-0.8.4";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -970,6 +970,7 @@ static void mm_probe_run(void);
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
+static void mm_reload_diag(void);      /* 0.8.4: sonda del estado de recarga */
 static void mm_mark_action(const char *a);
 static void mm_boot_check(void);
 static void mm_health_update(void);
@@ -4043,6 +4044,7 @@ static void mm_esp_frame(double t)
         static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
+            mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
         }
         /* v0.6.2: repintar solo si algo visible cambio. Parado en el lobby o
@@ -4492,6 +4494,52 @@ static BOOL mm_r64(uintptr_t addr, uint64_t *out)
     uint64_t v = mm_safe_read64(addr, &ok);
     if (ok && out != NULL) *out = v;
     return ok;
+}
+
+/* 0.8.4: SONDA DEL RELOAD (solo lectura, sin tocar nada del juego).
+   Mientras el estado actual del arma es "cambiando cargador" (elapse > 0),
+   escribe Documents/fusion_reload.txt con los cuatro floats que decide la
+   duracion. Sirve para saber si el parche de GetChangeClipTime realmente
+   llega al vtable:
+     doChangeClipTime ~ 0.125  -> el parche SI esta (el problema es otro)
+     doChangeClipTime ~ 2.x    -> el vtable llama a otro metodo, no al parcheado
+   Throttle 4 Hz; si no hay recarga en curso no escribe nada. */
+static void mm_reload_diag(void)
+{
+    @try {
+        static double s_rd_last = 0.0;
+        if (g_fp_localpawn == NULL) return;
+        double now = CACurrentMediaTime();
+        if (s_rd_last > 0.0 && (now - s_rd_last) < 0.25) return;
+        void *lp = g_fp_localpawn();
+        if (lp == NULL) return;
+        uint64_t inv = 0, wep = 0, sm = 0, st = 0;
+        if (!mm_r64((uintptr_t)lp + OFF_PAWN_INVMGR, &inv) || inv == 0) return;
+        if (!mm_r64((uintptr_t)inv + OFF_INVM_CURWEP, &wep) || wep == 0) return;
+        if (!mm_r64((uintptr_t)wep + OFF_WEP_STATEMACH, &sm) || sm == 0) return;
+        if (!mm_r64((uintptr_t)sm + OFF_SM_CURSTATE, &st) || st == 0) return;
+        float elapse = 0.0f, dur = 0.0f, rate = 0.0f, factor = 0.0f;
+        if (!mm_vm_read((uintptr_t)st + OFF_ST_ELAPSE, &elapse, sizeof(elapse))) return;
+        if (!isfinite(elapse) || elapse <= 0.001f || elapse > 30.0f) return;
+        mm_vm_read((uintptr_t)st + OFF_ST_DOCHANGE, &dur, sizeof(dur));
+        mm_vm_read((uintptr_t)st + OFF_ST_RATE, &rate, sizeof(rate));
+        mm_vm_read((uintptr_t)st + OFF_ST_FACTOR, &factor, sizeof(factor));
+        s_rd_last = now;
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) return;
+        NSString *s = [NSString stringWithFormat:
+            @"build=%s\n"
+            @"elapse=%.4f\n"
+            @"doChangeClipTime=%.4f\n"
+            @"rate=%.4f\n"
+            @"mClipChangingTime=%.4f\n"
+            @"weapon=0x%llX\n"
+            @"state=0x%llX\n",
+            MODMENU_VERSION, (double)elapse, (double)dur, (double)rate, (double)factor,
+            (unsigned long long)wep, (unsigned long long)st];
+        [s writeToFile:[docs stringByAppendingPathComponent:@"fusion_reload.txt"]
+            atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    } @catch (NSException *e) {}
 }
 
 /* el puntero cae dentro de la imagen del juego? Acepta dos senales (dladdr

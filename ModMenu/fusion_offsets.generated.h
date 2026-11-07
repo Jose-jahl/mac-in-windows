@@ -3,7 +3,7 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-07T03:09:20.194Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-07T04:12:41.853Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
@@ -53,6 +53,12 @@
 #define OFF_INVM_CURWEP     0x048  /* invmgr -> Inventory actual (Weapon) */
 #define OFF_WEP_AIMING      0x490  /* Weapon -> bool m_IsAimingOn */
 #define OFF_WEP_FIRELST     0x150  /* Weapon -> WeaponFireComponent[] */
+#define OFF_WEP_STATEMACH   0x170  /* Weapon -> WeaponStateMachine */
+#define OFF_SM_CURSTATE     0x018  /* statemachine -> WeaponState actual */
+#define OFF_ST_ELAPSE       0x02C  /* WeaponState -> float mClipChangeElapseTime */
+#define OFF_ST_FACTOR       0x030  /* WeaponState -> float m_mClipChangingTime */
+#define OFF_ST_RATE         0x038  /* WeaponState -> float m_DoChangeClipTimeRate */
+#define OFF_ST_DOCHANGE     0x03C  /* WeaponState -> float m_DoChangeClipTime (duracion real) */
 #define OFF_FC_OWNER        0x028  /* firecomp -> Pawn m_Owner */
 #define OFF_FC_CLIP         0x0A8  /* firecomp -> int m_ClipAmmoCount */
 #define OFF_FC_CLIPMAX      0x0E4  /* firecomp -> int m_MaxAmmoCount */
