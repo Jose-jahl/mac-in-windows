@@ -3,7 +3,7 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-07T04:12:41.853Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-07T17:06:02.504Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
@@ -23,6 +23,9 @@
 #define VA_PROJ_INJ   0x108BDACF8ULL  /* projectionMatrix_Injected */
 #define VA_TRANSPOS   0x108C63B10ULL  /* Transform.get_position_Injected */
 #define VA_HEALTH     0x1018B5524ULL  /* GetHealth */
+#define VA_GETTRANS   0x108BE1F60ULL  /* Component.get_transform */
+#define VA_SETROT     0x108C6431CULL  /* Transform.INTERNAL_set_rotation */
+#define VA_GETROT     0x108C642ECULL  /* Transform.INTERNAL_get_rotation */
 
 /* --- offsets de struct (pinned por version; validados en runtime) --- */
 #define OFF_GP_LIST         0x178  /* gameplay -> List<Pawn> */
@@ -53,6 +56,8 @@
 #define OFF_INVM_CURWEP     0x048  /* invmgr -> Inventory actual (Weapon) */
 #define OFF_WEP_AIMING      0x490  /* Weapon -> bool m_IsAimingOn */
 #define OFF_WEP_FIRELST     0x150  /* Weapon -> WeaponFireComponent[] */
+#define OFF_WEP_CONFIG      0x280  /* Weapon -> WeaponData (config del arma) */
+#define OFF_WEP_SUBCAT      0x010  /* WeaponData -> string SubCategoryName (tipo de arma) */
 #define OFF_WEP_STATEMACH   0x170  /* Weapon -> WeaponStateMachine */
 #define OFF_SM_CURSTATE     0x018  /* statemachine -> WeaponState actual */
 #define OFF_ST_ELAPSE       0x02C  /* WeaponState -> float mClipChangeElapseTime */
