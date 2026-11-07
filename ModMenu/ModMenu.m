@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.5"
+#define MODMENU_VERSION     "0.9.6"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.5";
+const char *modmenu_build_id = "modmenu-glass-0.9.6";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -4625,12 +4625,56 @@ static BOOL mm_local_ads(void)
     return NO;
 }
 
+/* Helpers de quaternion (Hamilton, x,y,z,w). */
+static void mm_q_mul(const float a[4], const float b[4], float out[4])
+{
+    out[0] = a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1];
+    out[1] = a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0];
+    out[2] = a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3];
+    out[3] = a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2];
+}
+static void mm_q_rotate(const float q[4], const float v[3], float out[3])
+{
+    float u[3] = { q[0], q[1], q[2] };
+    float t[3] = {
+        u[1]*v[2] - u[2]*v[1] + q[3]*v[0],
+        u[2]*v[0] - u[0]*v[2] + q[3]*v[1],
+        u[0]*v[1] - u[1]*v[0] + q[3]*v[2]
+    };
+    out[0] = v[0] + 2.0f*(u[1]*t[2] - u[2]*t[1]);
+    out[1] = v[1] + 2.0f*(u[2]*t[0] - u[0]*t[2]);
+    out[2] = v[2] + 2.0f*(u[0]*t[1] - u[1]*t[0]);
+}
+static void mm_q_norm(float q[4])
+{
+    float n = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+    if (n < 1.0e-6f) { q[0]=q[1]=q[2]=0.0f; q[3]=1.0f; return; }
+    for (int i = 0; i < 4; i++) q[i] /= n;
+}
+/* Interpola entre dos rotaciones por el arco corto. */
+static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out[4])
+{
+    float b[4] = { b_in[0], b_in[1], b_in[2], b_in[3] };
+    float d = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+    if (d < 0.0f) { for (int i = 0; i < 4; i++) b[i] = -b[i]; d = -d; }
+    if (d > 0.9995f) { for (int i = 0; i < 4; i++) out[i] = a[i] + (b[i]-a[i])*t; mm_q_norm(out); return; }
+    float th = acosf(d), st = sinf(th);
+    float wa = sinf((1.0f - t)*th)/st, wb = sinf(t*th)/st;
+    for (int i = 0; i < 4; i++) out[i] = a[i]*wa + b[i]*wb;
+    mm_q_norm(out);
+}
+
+/* 0.9.6: AIM LOCK por ARCO EN ESPACIO DE MUNDO.
+   En vez de inventar yaw/pitch (lo que rompia la camara), se toma la rotacion
+   REAL de la camara, se calcula el vector forward que produce, y se aplica la
+   rotacion minima que lleva ese forward al objetivo. Es independiente de la
+   convencion de ejes que use el motor. */
 static void mm_aim_lock(void)
 {
     @try {
         if (!g_lock_on) return;
         if (g_panel_open || g_esp == nil || g_esp.hidden) return;
-        if (g_fp_gettrans == NULL || g_fp_setrot == NULL ||
+        if (g_fp_gettrans == NULL || g_fp_setrot == NULL || g_fp_getrot == NULL ||
             g_fp_trpos == NULL || g_fp_maincam == NULL) return;
         if (g_box_count <= 0) return;
 
@@ -4648,7 +4692,7 @@ static void mm_aim_lock(void)
                      (kind == 4) ? g_lock_sniper :
                      (g_lock_rifle || g_lock_smg || g_lock_shotgun || g_lock_sniper);
         if (!allow) return;
-        if (g_lock_ads && !mm_local_ads()) return;   /* 0.9.3: solo mientras apunta */
+        if (g_lock_ads && !mm_local_ads()) return;
 
         void *cam = g_fp_maincam();
         if (cam == NULL) return;
@@ -4658,15 +4702,11 @@ static void mm_aim_lock(void)
         g_fp_trpos(tr, cp);
         if (!isfinite(cp[0]) || !isfinite(cp[1]) || !isfinite(cp[2])) return;
 
-        static float s_q[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        static uintptr_t s_tr = 0;
-        if (s_tr != (uintptr_t)tr) {
-            memset(s_q, 0, sizeof(s_q));
-            s_q[3] = 1.0f;
-            s_tr = (uintptr_t)tr;
-        }
-        float cy = atan2f(2.0f * (s_q[3] * s_q[1] + s_q[0] * s_q[2]),
-                          1.0f - 2.0f * (s_q[1] * s_q[1] + s_q[0] * s_q[0]));
+        float cq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        g_fp_getrot(tr, cq);
+        mm_q_norm(cq);
+        float fwd[3];
+        { float f[3] = { 0.0f, 0.0f, 1.0f }; mm_q_rotate(cq, f, fwd); }
 
         float halfFov = g_aim_fov * 0.5f;
         if (halfFov < 6.0f) halfFov = 6.0f;
@@ -4674,95 +4714,95 @@ static void mm_aim_lock(void)
 
         int best = -1;
         float bestAng = 1.0e9f;
+        float bpx = 0.0f, bpy = 0.0f, bpz = 0.0f;
         for (int i = 0; i < g_box_count; i++) {
-            float dx = g_boxes[i].wx - cp[0];
-            float dy = (g_boxes[i].wy + MM_AIM_LOCK_UP) - cp[1];
-            float dz = g_boxes[i].wz - cp[2];
-            float d2 = dx * dx + dy * dy + dz * dz;
+            float px = g_boxes[i].wx;
+            float py = g_boxes[i].wy + g_aim_height;
+            float pz = g_boxes[i].wz;
+            if (g_lock_pred) {
+                float ddx = px - cp[0], ddy = py - cp[1], ddz = pz - cp[2];
+                float dist0 = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
+                float spd = (kind == 4) ? 850.0f : (kind == 3) ? 420.0f : 780.0f;
+                float tof = dist0 / spd;
+                if (tof > 0.012f && tof < 1.2f) {
+                    px += g_boxes[i].vx * tof;
+                    py += g_boxes[i].vy * tof;
+                    pz += g_boxes[i].vz * tof;
+                }
+            }
+            float vx = px - cp[0], vy = py - cp[1], vz = pz - cp[2];
+            float d2 = vx*vx + vy*vy + vz*vz;
             if (d2 < 4.0f) continue;
-            float ty = atan2f(dx, dz);
-            float d = ty - cy;
-            while (d >  (float)M_PI) d -= (float)(2.0 * M_PI);
-            while (d < -(float)M_PI) d += (float)(2.0 * M_PI);
-            float adeg = fabsf(d) * 180.0f / (float)M_PI;
-            if (adeg > halfFov) continue;
-            if (adeg < bestAng) { bestAng = adeg; best = i; }
+            float inv = 1.0f/sqrtf(d2);
+            vx *= inv; vy *= inv; vz *= inv;
+            float dot = fwd[0]*vx + fwd[1]*vy + fwd[2]*vz;
+            if (dot < 0.15f) continue;                 /* detras o muy al borde */
+            float ang = acosf(fminf(1.0f, dot)) * 180.0f / (float)M_PI;
+            if (ang > halfFov) continue;
+            if (ang < bestAng) { bestAng = ang; best = i; bpx = px; bpy = py; bpz = pz; }
         }
         if (best < 0) return;
 
-        /* 0.9.3: PREDICCION. Velocidad estimada por la caja x tiempo de vuelo
-           (constante por familia de arma; se puede afinar por configuracion). */
-        float px = g_boxes[best].wx;
-        float py = g_boxes[best].wy + g_aim_height;   /* 0.9.4: altura ajustable */
-        float pz = g_boxes[best].wz;
-        if (g_lock_pred) {
-            float ddx = px - cp[0], ddy = py - cp[1], ddz = pz - cp[2];
-            float dist0 = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
-            float spd = (kind == 4) ? 850.0f : (kind == 3) ? 420.0f : 780.0f;
-            float tof = dist0 / spd;
-            if (tof > 0.012f && tof < 1.2f) {
-                px += g_boxes[best].vx * tof;
-                py += g_boxes[best].vy * tof;
-                pz += g_boxes[best].vz * tof;
-            }
-        }
-        float dx = px - cp[0];
-        float dy = py - cp[1];
-        float dz = pz - cp[2];
-        float ty = atan2f(dx, dz);
-        float tp = -atan2f(dy, sqrtf(dx * dx + dz * dz));
+        float dv[3] = { bpx - cp[0], bpy - cp[1], bpz - cp[2] };
+        float dl = sqrtf(dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2]);
+        if (dl < 0.5f) return;
+        dv[0] /= dl; dv[1] /= dl; dv[2] /= dl;
 
-        float sy = sinf(ty * 0.5f), yc = cosf(ty * 0.5f);
-        float sp = sinf(tp * 0.5f), pc = cosf(tp * 0.5f);
-        float tq[4] = { yc * sp, sy * pc, -sy * sp, yc * pc };
+        float dot = fwd[0]*dv[0] + fwd[1]*dv[1] + fwd[2]*dv[2];
+        if (dot > 0.99999f) return;
+        dot = fmaxf(-1.0f, fminf(1.0f, dot));
+        float ang = acosf(dot);
+        float angDeg = ang * 180.0f / (float)M_PI;
+        if (angDeg < 0.6f) return;                    /* ya encima */
 
-        float dot = s_q[0] * tq[0] + s_q[1] * tq[1] + s_q[2] * tq[2] + s_q[3] * tq[3];
-        if (dot < 0.0f) { tq[0] = -tq[0]; tq[1] = -tq[1]; tq[2] = -tq[2]; tq[3] = -tq[3]; }
+        /* eje = fwd x dv (si es degenerado, no hay rotacion unica: salir) */
+        float ax[3] = {
+            fwd[1]*dv[2] - fwd[2]*dv[1],
+            fwd[2]*dv[0] - fwd[0]*dv[2],
+            fwd[0]*dv[1] - fwd[1]*dv[0]
+        };
+        float al = sqrtf(ax[0]*ax[0] + ax[1]*ax[1] + ax[2]*ax[2]);
+        if (al < 1.0e-5f) return;
+        ax[0] /= al; ax[1] /= al; ax[2] /= al;
 
-        /* 0.9.2: si ya esta encima no se escribe (evita el tiron/pelea), y el
-           cambio por tick se limita a 12 grados para que no sea un snap brusco. */
-        float angRad = 2.0f * acosf(fminf(1.0f, fabsf(dot)));
-        float angDeg = angRad * 180.0f / (float)M_PI;
-        if (angDeg < 0.6f) return;
+        float sh = sinf(ang * 0.5f), ch = cosf(ang * 0.5f);
+        float qd[4] = { ax[0]*sh, ax[1]*sh, ax[2]*sh, ch };
+        float qtar[4];
+        mm_q_mul(qd, cq, qtar);          /* rotacion en espacio de mundo */
+        mm_q_norm(qtar);
+
         float a = 1.0f - g_aim_smooth * 0.90f;
-        float maxDeg = 2.0f + (1.0f - g_aim_smooth) * 8.0f;   /* 2..10 grados/tick */
+        float maxDeg = 2.0f + (1.0f - g_aim_smooth) * 8.0f;
         if (a * angDeg > maxDeg) a = maxDeg / angDeg;
         if (a < 0.04f) a = 0.04f;
-        /* micro-jitter para que no sea una linea perfecta */
-        tp += ((float)(rand() % 100) - 50.0f) * 0.0022f;
-        ty += ((float)(rand() % 100) - 50.0f) * 0.0022f;
+
         float q[4];
-        for (int i = 0; i < 4; i++) q[i] = s_q[i] + (tq[i] - s_q[i]) * a;
-        float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-        if (n < 1.0e-6f) return;
-        for (int i = 0; i < 4; i++) q[i] /= n;
-
+        mm_q_slerp(cq, qtar, a, q);
         g_fp_setrot(tr, q);
-        memcpy(s_q, q, sizeof(s_q));
 
-        /* 0.9.5: sonda (2 Hz) — calculado vs real, para ver la convencion real */
+        /* sonda 2 Hz: lo que se calculo y lo que quedo en la camara */
         {
             static double s_lg = 0.0;
             double nowl = CACurrentMediaTime();
             if ((nowl - s_lg) > 0.5) {
                 s_lg = nowl;
-                float cq[4] = { 0, 0, 0, 1 };
-                if (g_fp_getrot != NULL) g_fp_getrot(tr, cq);
-                float realYaw = atan2f(2.0f * (cq[3] * cq[1] + cq[0] * cq[2]),
-                                       1.0f - 2.0f * (cq[1] * cq[1] + cq[0] * cq[0]));
+                float rq[4] = { 0, 0, 0, 1 };
+                g_fp_getrot(tr, rq);
                 NSString *docs = mm_docs_dir();
                 if (docs.length > 0) {
                     NSString *t = [NSString stringWithFormat:
                         @"build=%s\ncamPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
-                        @"ty=%.4f tp=%.4f (rad)\n"
-                        @"q_written=%.4f,%.4f,%.4f,%.4f\n"
-                        @"q_real=%.4f,%.4f,%.4f,%.4f\nrealYaw=%.4f\nkinds=%d\n",
+                        @"fwd=%.3f,%.3f,%.3f\ndes=%.3f,%.3f,%.3f\ndot=%.4f angDeg=%.2f\n"
+                        @"q_before=%.4f,%.4f,%.4f,%.4f\nq_after=%.4f,%.4f,%.4f,%.4f\n"
+                        @"tipo=%d alpha=%.3f\n",
                         MODMENU_VERSION, (double)cp[0], (double)cp[1], (double)cp[2],
-                        (double)px, (double)py, (double)pz,
-                        (double)ty, (double)tp,
-                        (double)q[0], (double)q[1], (double)q[2], (double)q[3],
+                        (double)bpx, (double)bpy, (double)bpz,
+                        (double)fwd[0], (double)fwd[1], (double)fwd[2],
+                        (double)dv[0], (double)dv[1], (double)dv[2],
+                        (double)dot, (double)angDeg,
                         (double)cq[0], (double)cq[1], (double)cq[2], (double)cq[3],
-                        (double)realYaw, kind];
+                        (double)rq[0], (double)rq[1], (double)rq[2], (double)rq[3],
+                        kind, (double)a];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
                         atomically:YES encoding:NSUTF8StringEncoding error:NULL];
                 }
