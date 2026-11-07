@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.2"
+#define MODMENU_VERSION     "0.9.3"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.2";
+const char *modmenu_build_id = "modmenu-glass-0.9.3";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -416,6 +416,8 @@ static BOOL mm_def_bool(NSString *k, BOOL d);   /* forward: lo usa mm_reload_app
    arma (por defecto solo franco y escopeta, que es donde mas se usa). */
 static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = NO, g_lock_smg = NO, g_lock_shotgun = YES, g_lock_sniper = YES;
+static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
+static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
 static void mm_lock_opts_sync(void)
 {
     g_lock_on      = mm_def_bool(@"mm_x_aimlock", NO);
@@ -423,6 +425,8 @@ static void mm_lock_opts_sync(void)
     g_lock_smg     = mm_def_bool(@"mm_lock_smg", NO);
     g_lock_shotgun = mm_def_bool(@"mm_lock_shotgun", YES);
     g_lock_sniper  = mm_def_bool(@"mm_lock_sniper", YES);
+    g_lock_pred    = mm_def_bool(@"mm_lock_pred", YES);
+    g_lock_ads     = mm_def_bool(@"mm_lock_ads", NO);
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -706,6 +710,7 @@ typedef struct {
     int     ammo;               /* 2026-11: balas en el cargador (-1 = sin dato) */
     int     ammoMax;            /* 2026-11: cargador maximo (0 = sin dato) */
     int     armor;              /* 2026-11: m_KineticArmorHP (0 = sin armadura) */
+    float   vx, vy, vz;         /* 0.9.3: velocidad estimada (m/s) para prediccion */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
 } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
@@ -1010,6 +1015,30 @@ static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 static void mm_reload_diag(void);      /* 0.8.4: sonda del estado de recarga */
 static void mm_esp_read_diag(void);    /* 0.8.8: sonda de las lecturas nuevas */
+/* 0.9.3: el jugador local esta apuntando (ADS)? Cache 0,2 s. */
+static BOOL mm_local_ads(void)
+{
+    @try {
+        static int s_ads = -1;
+        static double s_ads_t = 0.0;
+        double now = CACurrentMediaTime();
+        if (s_ads >= 0 && (now - s_ads_t) < 0.2) return s_ads ? YES : NO;
+        s_ads_t = now;
+        s_ads = 0;
+        if (g_fp_localpawn == NULL) return NO;
+        void *lp = g_fp_localpawn();
+        if (lp == NULL) return NO;
+        uint64_t inv = 0, wep = 0;
+        if (mm_r64((uintptr_t)lp + OFF_PAWN_INVMGR, &inv) && inv != 0 &&
+            mm_r64((uintptr_t)inv + OFF_INVM_CURWEP, &wep) && wep != 0) {
+            uint8_t a = 0;
+            if (mm_vm_read((uintptr_t)wep + OFF_WEP_AIMING, &a, 1) && (a & 1)) s_ads = 1;
+        }
+        return s_ads ? YES : NO;
+    } @catch (NSException *e) {}
+    return NO;
+}
+
 static void mm_aim_lock(void);          /* 0.9.1: aim lock (seguir sin apuntar) */
 static void mm_lock_opts_sync(void);   /* 0.9.1: opciones del aim lock */
 static void mm_mark_action(const char *a);
@@ -4607,6 +4636,7 @@ static void mm_aim_lock(void)
                      (kind == 4) ? g_lock_sniper :
                      (g_lock_rifle || g_lock_smg || g_lock_shotgun || g_lock_sniper);
         if (!allow) return;
+        if (g_lock_ads && !mm_local_ads()) return;   /* 0.9.3: solo mientras apunta */
 
         void *cam = g_fp_maincam();
         if (cam == NULL) return;
@@ -4648,9 +4678,25 @@ static void mm_aim_lock(void)
         }
         if (best < 0) return;
 
-        float dx = g_boxes[best].wx - cp[0];
-        float dy = (g_boxes[best].wy + MM_AIM_LOCK_UP) - cp[1];
-        float dz = g_boxes[best].wz - cp[2];
+        /* 0.9.3: PREDICCION. Velocidad estimada por la caja x tiempo de vuelo
+           (constante por familia de arma; se puede afinar por configuracion). */
+        float px = g_boxes[best].wx;
+        float py = g_boxes[best].wy + MM_AIM_LOCK_UP;
+        float pz = g_boxes[best].wz;
+        if (g_lock_pred) {
+            float ddx = px - cp[0], ddy = py - cp[1], ddz = pz - cp[2];
+            float dist0 = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
+            float spd = (kind == 4) ? 850.0f : (kind == 3) ? 420.0f : 780.0f;
+            float tof = dist0 / spd;
+            if (tof > 0.012f && tof < 1.2f) {
+                px += g_boxes[best].vx * tof;
+                py += g_boxes[best].vy * tof;
+                pz += g_boxes[best].vz * tof;
+            }
+        }
+        float dx = px - cp[0];
+        float dy = py - cp[1];
+        float dz = pz - cp[2];
         float ty = atan2f(dx, dz);
         float tp = -atan2f(dy, sqrtf(dx * dx + dz * dz));
 
@@ -4667,8 +4713,12 @@ static void mm_aim_lock(void)
         float angDeg = angRad * 180.0f / (float)M_PI;
         if (angDeg < 0.6f) return;
         float a = 1.0f - g_aim_smooth * 0.90f;
-        if (a * angDeg > 12.0f) a = 12.0f / angDeg;
-        if (a < 0.05f) a = 0.05f;
+        float maxDeg = 2.0f + (1.0f - g_aim_smooth) * 8.0f;   /* 2..10 grados/tick */
+        if (a * angDeg > maxDeg) a = maxDeg / angDeg;
+        if (a < 0.04f) a = 0.04f;
+        /* micro-jitter para que no sea una linea perfecta */
+        tp += ((float)(rand() % 100) - 50.0f) * 0.0022f;
+        ty += ((float)(rand() % 100) - 50.0f) * 0.0022f;
         float q[4];
         for (int i = 0; i < 4; i++) q[i] = s_q[i] + (tq[i] - s_q[i]) * a;
         float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
@@ -4998,6 +5048,10 @@ static void mm_esp_collect_real(void)
     BOOL conSalud  = opts->health;   /* v0.2.4 */
     BOOL conJug    = opts->players;  /* v0.2.7: a fabrica */
     BOOL conBots   = opts->bots;     /* v0.2.7: a fabrica */
+    double _col_now = CACurrentMediaTime();
+    static double s_col_prev = 0.0;
+    float col_dt = (s_col_prev > 0.0) ? (float)(_col_now - s_col_prev) : 0.0f;
+    if (col_dt < 0.005f || col_dt > 0.25f) col_dt = 0.0f;
     static int s_heavy = 0;
     BOOL heavy = ((s_heavy++ & 7) == 0);   /* 0.9.2: cadena cara a ~3,75 Hz */
     int drawn = 0;
@@ -5340,6 +5394,14 @@ static void mm_esp_collect_real(void)
            saltaban; cada pawn conserva su caja y se interpola suavemente. */
         for (int q = 0; q < g_box_count; q++) {
             if (g_boxes[q].pawn != pawn || !g_boxes[q].alive) continue;
+            if (col_dt > 0.0f) {   /* 0.9.3: velocidad desde la posicion anterior */
+                nb.vx = (wp[0] - g_boxes[q].wx) / col_dt;
+                nb.vy = (wp[1] - g_boxes[q].wy) / col_dt;
+                nb.vz = (wp[2] - g_boxes[q].wz) / col_dt;
+                if (nb.vx > 15.0f) nb.vx = 15.0f; if (nb.vx < -15.0f) nb.vx = -15.0f;
+                if (nb.vy > 15.0f) nb.vy = 15.0f; if (nb.vy < -15.0f) nb.vy = -15.0f;
+                if (nb.vz > 15.0f) nb.vz = 15.0f; if (nb.vz < -15.0f) nb.vz = -15.0f;
+            }
             if (!heavy) {   /* 0.9.2: conserva municion/armadura del pase anterior */
                 nb.ammo = g_boxes[q].ammo;
                 nb.ammoMax = g_boxes[q].ammoMax;
@@ -5380,6 +5442,7 @@ static void mm_esp_collect_real(void)
     if (opts->trails) mm_trails_update(g_boxes, g_box_count);
     else              mm_trails_clear();
     g_collect_ms = (CACurrentMediaTime() - _col_t0) * 1000.0;   /* v0.4.4: telemetria */
+    s_col_prev = _col_now;
     mm_scene_bump();   /* v0.7.3 (perf): la escena cambio para el skip O(1) */
     g_esp_diag = [NSString stringWithFormat:
                   @"cam=ok lista=%d cajas=%d trk=%d jug=%d bot=%d hp=%s%@",
@@ -6220,37 +6283,34 @@ static void mm_cloud_build_aim(UIView *page)
 
     /* AIM LOCK: seguir al enemigo sin apuntar + que armas lo usan. */
     UIView *a = mm_cloud_card(@"AIM LOCK", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 38.0, NO);
-    mm_cloud_row(a, @"Fusil", @"mm_lock_rifle", NO, 66.0, NO);
-    mm_cloud_row(a, @"Subfusil", @"mm_lock_smg", NO, 94.0, NO);
-    mm_cloud_row(a, @"Escopeta", @"mm_lock_shotgun", YES, 122.0, NO);
-    mm_cloud_row(a, @"Franco", @"mm_lock_sniper", YES, 150.0, NO);
-    UILabel *lkn = mm_cloud_caption(@"Sigue al enemigo mas cercano a la mira, sin apuntar. Solo con las armas tildadas.", iw);
-    lkn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 180.0, iw, 28.0);
-    lkn.numberOfLines = 2;
-    lkn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
-    [a addSubview:lkn];
+    mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 30.0, NO);
+    mm_cloud_row(a, @"Fusil", @"mm_lock_rifle", NO, 58.0, NO);
+    mm_cloud_row(a, @"Subfusil", @"mm_lock_smg", NO, 86.0, NO);
+    mm_cloud_row(a, @"Escopeta", @"mm_lock_shotgun", YES, 114.0, NO);
+    mm_cloud_row(a, @"Franco", @"mm_lock_sniper", YES, 142.0, NO);
+    mm_cloud_row(a, @"Predecir movimiento", @"mm_lock_pred", YES, 170.0, NO);
     [page addSubview:a];
 
     /* Asistencia del juego (relay) + tuning. */
     UIView *b = mm_cloud_card(@"ASISTENCIA", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(b, @"Aimbot (asist)", @"mm_x_aim_on", YES, 34.0, NO);
-    mm_cloud_card_caption(b, @"Fuerza de aim", 62.0);
+    mm_cloud_row(b, @"Aimbot (asist)", @"mm_x_aim_on", YES, 30.0, NO);
+    mm_cloud_card_caption(b, @"Fuerza de aim", 58.0);
     UISlider *as = mm_cloud_slider(0.0f, 28.0f, g_aim_strength, @"mm_x_aim_strength",
                                    @selector(onAimStrength:), iw);
-    as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 74.0, iw, 24.0);
+    as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 68.0, iw, 22.0);
     [b addSubview:as];
-    mm_cloud_card_caption(b, @"FOV de aim", 104.0);
+    mm_cloud_card_caption(b, @"FOV de aim", 92.0);
     UISlider *af = mm_cloud_slider(5.0f, 180.0f, g_aim_fov, @"mm_x_aim_fov",
                                    @selector(onAimFov:), iw);
-    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 116.0, iw, 24.0);
+    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 102.0, iw, 22.0);
     [b addSubview:af];
-    mm_cloud_card_caption(b, @"Suavizado de aim", 146.0);
+    mm_cloud_card_caption(b, @"Suavizado de aim", 126.0);
     UISlider *as2 = mm_cloud_slider(0.0f, 1.0f, g_aim_smooth, @"mm_x_aim_smooth",
                                     @selector(onAimSmooth:), iw);
-    as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 158.0, iw, 24.0);
+    as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 136.0, iw, 22.0);
     [b addSubview:as2];
+    mm_cloud_row(b, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 164.0, NO);
     [page addSubview:b];
 
     /* Mira dibujada. */
