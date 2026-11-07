@@ -399,7 +399,7 @@ static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
 static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
-static BOOL mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
+static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 1.15f;  /* 0.9.4: altura del punto de aim (m sobre el pawn) */
 static BOOL  g_aim_on = YES;
 static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
