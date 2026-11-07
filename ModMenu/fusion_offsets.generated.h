@@ -3,7 +3,7 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-10-25T04:56:49.766Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-07T03:09:20.194Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
@@ -38,6 +38,24 @@
 #define OFF_ENT_NAME        0x160  /* entidad -> string C# nombre */
 #define OFF_STR_LEN         0x10  /* string -> int longitud */
 #define OFF_STR_CHARS       0x14  /* string -> chars UTF-16 */
+#define OFF_ENT_TEAM        0x110  /* entidad -> uint m_TeamID */
+#define OFF_ENT_DEAD        0x0FC  /* entidad -> bool m_IsPlayerDead */
+#define OFF_ENT_BRSTATE     0x078  /* entidad -> int m_BRPlayerState */
+#define OFF_ENT_VEHSET      0x190  /* entidad -> uint VehicleSeatIndex */
+#define OFF_ENT_VEHICLE     0x194  /* entidad -> uint VehicleID */
+#define OFF_ENT_WAR         0x2A8  /* entidad -> bool m_IsInWarStatus */
+#define OFF_ENT_MEDTIME     0x2AC  /* entidad -> float m_MedicineUseTime */
+#define OFF_ENT_INVIS       0x2B0  /* entidad -> bool m_IsInvisible */
+#define OFF_ENT_ARMOR       0x5C4  /* entidad -> uint m_KineticArmorHP */
+#define OFF_ENT_ARMORMAX    0x5C8  /* entidad -> uint m_KineticArmorMaxHP */
+#define OFF_ENT_REVIVE      0x5B4  /* entidad -> float revive (caido) */
+#define OFF_PAWN_INVMGR     0x2A0  /* pawn -> InventoryManager */
+#define OFF_INVM_CURWEP     0x048  /* invmgr -> Inventory actual (Weapon) */
+#define OFF_WEP_AIMING      0x490  /* Weapon -> bool m_IsAimingOn */
+#define OFF_WEP_FIRELST     0x150  /* Weapon -> WeaponFireComponent[] */
+#define OFF_FC_OWNER        0x028  /* firecomp -> Pawn m_Owner */
+#define OFF_FC_CLIP         0x0A8  /* firecomp -> int m_ClipAmmoCount */
+#define OFF_FC_CLIPMAX      0x0E4  /* firecomp -> int m_MaxAmmoCount */
 
 /* --- BR / zona de radiacion (CANDIDATOS; requiere confirmar en device) --- */
 /* ver corpus/1.0.57/br_dump.md para contexto. Gated: #ifdef FUSION_BR_ENABLED */

@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.8.2"
+#define MODMENU_VERSION     "0.8.3"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.8.2";
+const char *modmenu_build_id = "modmenu-glass-0.8.3";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -636,7 +636,6 @@ static inline void mm_dobby_init(void) { /* no-op cuando MM_USE_DOBBY=0 */ }
 
 /* --- ESP: lienzo + cajas + sonda --- */
 #define MM_MAX_BOXES 32
-#define MM_SK_N 20   /* C-23: huesos reales de CODM (b_*) */
 /* C-5: Transform.Find / Transform.get_position (dump 1.0.57, verificados) */
 #ifndef VA_TRFIND
 #define VA_TRFIND 0x108C65B98ULL
@@ -689,53 +688,15 @@ typedef struct {
     int     alive;
     int     hasName;            /* v0.2.4: 1 si name trae nombre real   */
     int     downed;             /* C-19: 1 si esta caido (revive)       */
+    uint32_t tags;              /* 2026-11: 1 curando, 2 invisible, 4 vehiculo, 8 ADS */
+    int     ammo;               /* 2026-11: balas en el cargador (-1 = sin dato) */
+    int     ammoMax;            /* 2026-11: cargador maximo (0 = sin dato) */
+    int     armor;              /* 2026-11: m_KineticArmorHP (0 = sin armadura) */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
-    CGPoint sk[MM_SK_N];        /* C-5: huesos proyectados (skeleton)   */
-    uint32_t skMask;            /* bit i = hueso i proyectado           */
 } MMEspBox;
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
 
-/* --- C-5: skeleton ESP. Huesos del biped 3ds Max (Bip001*) que usa CODM.
-   Se resuelven una vez por pawn con Transform.Find y se cachean; cada frame
-   solo se pide la posicion mundial de cada Transform cacheado. --- */
-/* C-23: nombres REALES de los huesos de CODM (del dump de device):
-   b_Root > Bip01 > b_Hips / b_Spine2 > b_Spine1 > b_Spine > b_Neck > b_Head ... */
-static const char *mm_sk_path[MM_SK_N] = {
-    "b_Hips", "b_Spine2", "b_Spine1", "b_Spine", "b_Neck", "b_Head",
-    "b_LeftClav", "b_LeftArm", "b_LeftForeArm",
-    "b_RightClav", "b_RightArm", "b_RightForeArm",
-    "b_LeftLegUpper", "b_LeftLeg", "b_LeftAnkle", "b_LeftToe",
-    "b_RightLegUpper", "b_RightLeg", "b_RightAnkle", "b_RightToe"
-};
-static const char *mm_sk_suffix[MM_SK_N] = {
-    "b_Hips", "b_Spine2", "b_Spine1", "b_Spine", "b_Neck", "b_Head",
-    "b_LeftClav", "b_LeftArm", "b_LeftForeArm",
-    "b_RightClav", "b_RightArm", "b_RightForeArm",
-    "b_LeftLegUpper", "b_LeftLeg", "b_LeftAnkle", "b_LeftToe",
-    "b_RightLegUpper", "b_RightLeg", "b_RightAnkle", "b_RightToe"
-};
-static const int mm_sk_link[][2] = {
-    {0,1},{1,2},{2,3},{3,4},{4,5},              /* hips -> spine2 -> spine1 -> spine -> neck -> head */
-    {3,6},{6,7},{7,8},                          /* spine -> clav L -> arm L -> forearm L */
-    {3,9},{9,10},{10,11},                       /* spine -> clav R -> arm R -> forearm R */
-    {0,12},{12,13},{13,14},{14,15},             /* hips -> leg L -> ankle L -> toe L */
-    {0,16},{16,17},{17,18},{18,19}              /* hips -> leg R -> ankle R -> toe R */
-};
-#define MM_SK_LINKS ((int)(sizeof(mm_sk_link) / sizeof(mm_sk_link[0])))
-typedef struct {
-    uint64_t pawn;
-    uint64_t root;
-    void    *bn[MM_SK_N];
-    CGPoint  pts[MM_SK_N];   /* C-5c: puntos cacheados (throttle ~10 Hz) */
-    uint32_t mask;
-    double   lastTry;    /* C-5d: throttle de reintento     */
-    int      ok;
-} MMSkelCache;
-static MMSkelCache  g_skel_cache[MM_MAX_BOXES];
-static int          g_skel_budget = 1;   /* C-15: resoluciones por pasada */
-static int          g_bone_fail = 0;    /* C-20: fallos seguidos del walk */
-static double       g_bone_off = 0.0;   /* C-20: pausa el walk si no hay huesos */
 typedef void *(*MMFindFn)(void *transform, void *nsstring);
 typedef void  (*MMPosFn)(void *transform, float out[3]);
 static MMFindFn     g_fp_find  = NULL;
@@ -857,6 +818,34 @@ static NSString *mm_cached_name(uint64_t pawn, const char *nm)
     g_cache_name[k] = s;
     return s;
 }
+/* 2026-11: etiqueta de estado/municion por caja. La clave empaqueta la mascara
+   (5 bits) y los dos enteros de municion, asi que no hay alloc por frame. */
+static NSMutableDictionary *g_cache_tags = nil;
+static NSString *mm_cached_tags(uint32_t mask, int ammo, int ammoMax, int armor)
+{
+    int a = (ammo >= 0 && ammo < 4095) ? ammo : 4095;
+    int m = (ammoMax > 0 && ammoMax < 4095) ? ammoMax : 0;
+    int ar = (armor > 0 && armor < 4095) ? armor : 0;
+    unsigned long long key = ((unsigned long long)(mask & 0x1F) << 48) |
+                             ((unsigned long long)ar << 36) |
+                             ((unsigned long long)a << 12) |
+                             (unsigned long long)m;
+    if (g_cache_tags == nil) g_cache_tags = [NSMutableDictionary dictionary];
+    NSNumber *k = @(key);
+    NSString *s = g_cache_tags[k];
+    if (s != nil) return s;
+    NSMutableString *t = [NSMutableString string];
+    if (mask & 1) [t appendString:@"CUR "];
+    if (mask & 2) [t appendString:@"INV "];
+    if (mask & 4) [t appendString:@"VEH "];
+    if (mask & 8) [t appendString:@"ADS "];
+    if (ar > 0) [t appendFormat:@"A%d ", ar];
+    if (m > 0) [t appendFormat:@"%d/%d", a, m];
+    s = [t copy];
+    if (g_cache_tags.count > 512) [g_cache_tags removeAllObjects];
+    g_cache_tags[k] = s;
+    return s;
+}
 
 /* Fase 1.5: estelas "last seen" en espacio de MUNDO. Cada pawn conserva
    hasta 14 muestras (~2 s a 0.15 s); se proyectan al dibujar para que no se
@@ -918,7 +907,6 @@ static double       g_br_probe_last_run = 0.0; /* 0.7.5: ts (segundos de uptime)
    probe BR lo lee para dumpear el pawn + walk de sus punteros, buscando
    la referencia a GameMode/Match -> SafeZone. Cero riesgo nuevo: la fn
    ya se llama desde el colector en gameplay. */
-static void       *(*g_br_pawn_fn)(void) = NULL;
 
 /* v0.7.0 - Fase 1.11/1.12/1.13/4.5: salud del equipo, arranque sucio y crumbs.
    Todo es estado local; nada de red, nada de llamadas al juego. */
@@ -979,10 +967,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
-static void mm_bones_dump(void);       /* C-16: dump de jerarquia de huesos */
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
-static void mm_br_probe_run(void);     /* 0.6.0: dump de los setters de RadiationZone */
-static void mm_br_zone_read(void);     /* 0.6.3: lee el manager si hay offsets verificados */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
 static void mm_mark_action(const char *a);
@@ -1022,9 +1007,11 @@ typedef struct {
     BOOL targetList;                    /* v0.6.4: lista de objetivos por distancia */
     BOOL players, bots;
     BOOL master, safe_mode;             /* perf: snapshot de los gates por-frame */
-    BOOL skeleton;                      /* C-5: esqueleto del biped */
     BOOL fovCircle;                     /* C-11: circulo del FOV de aim */
     BOOL ignoreDown;                    /* C-17: no asistir a enemigos caidos */
+    BOOL teamFilter;                    /* 2026-11: no dibujar al propio equipo */
+    BOOL stateTags;                     /* 2026-11: curando / invisible / vehiculo */
+    BOOL ammoTag;                       /* 2026-11: municion + ADS del enemigo */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -1062,9 +1049,13 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->targetList= mm_def_bool(@"mm_x_targetlist", NO);
     o->players   = mm_def_bool(@"mm_esp_players", NO);
     o->master    = mm_def_bool(@"mm_esp_master", NO);
-    o->skeleton  = NO;   /* C-24: skeleton ELIMINADO del proyecto */
     o->fovCircle = mm_def_bool(@"mm_x_fov_circle", NO);
     o->ignoreDown = mm_def_bool(@"mm_x_ignore_down", NO);
+    /* 2026-11: lecturas nuevas (team / estado / municion). Apagadas por defecto
+       hasta validarlas en device: ver docs/re-lecturas-1057.md. */
+    o->teamFilter = mm_def_bool(@"mm_x_team_filter", NO);
+    o->stateTags  = mm_def_bool(@"mm_x_state_tags", NO);
+    o->ammoTag    = mm_def_bool(@"mm_x_ammo", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
@@ -2408,7 +2399,6 @@ static int mm_declutter_budget(void)
             CGContextStrokePath(ctx);
         }
 
-
         /* v0.7.0 (1.2): objetivo elegido en la lista -> aro blanco en la caja. */
         if (g_tl_sel_pawn != 0 && b->pawn == g_tl_sel_pawn) {
             CGContextSetLineWidth(ctx, 2.6);
@@ -2533,6 +2523,28 @@ static int mm_declutter_budget(void)
                 drewLabel = YES;
             }
         }
+        /* 2026-11: etiqueta de estado (CUR/INV/VEH/ADS) + municion, debajo de
+           la distancia. Cadena cacheada: cero alloc por frame. */
+        if ((b->tags != 0 || b->ammoMax > 0 || b->armor > 0) && allowLabels) {
+            NSString *ts = mm_cached_tags(b->tags, b->ammo, b->ammoMax, b->armor);
+            if (ts.length > 0) {
+                NSDictionary *tattr = b->robot ? distBot : distJug;
+                CGSize tsz = mm_text_size(ts, tattr, 1);
+                CGFloat tx = CGRectGetMidX(r) - tsz.width / 2.0;
+                tx = MAX(2.0, MIN(bs.size.width - tsz.width - 2.0, tx));
+                CGFloat ty = CGRectGetMaxY(r) + 2.0 + 10.0;
+                if (ty + tsz.height > bs.size.height - 2.0)
+                    ty = MAX(0.0, r.origin.y - tsz.height - 12.0);
+                CGRect lr = CGRectMake(tx - 1.0, ty - 1.0, tsz.width + 2.0, tsz.height + 2.0);
+                BOOL drawT = !conDeclutter ||
+                    mm_label_claim(usedLabels, &usedN,
+                                   (int)(sizeof(usedLabels) / sizeof(usedLabels[0])), lr);
+                if (drawT) {
+                    [ts drawAtPoint:CGPointMake(tx, ty) withAttributes:tattr];
+                    drewLabel = YES;
+                }
+            }
+        }
         if (conDeclutter && drewLabel) labelBudget--;
     }
 
@@ -2642,7 +2654,6 @@ static NSString *mm_tr(NSString *es)
         @"Tema del menu": @"Menu theme",
         @"Opacidad del menu": @"Menu opacity",
         @"Escala del menu": @"Menu scale",
-        @"ESP de esqueleto": @"Skeleton ESP",
         @"ESP de granadas": @"Grenade ESP",
         @"ESP de loot / vehiculos": @"Loot / vehicle ESP",
         @"Prediccion de proxima zona (BR)": @"Next zone prediction (BR)",
@@ -3890,7 +3901,6 @@ static void mm_profile_import(void)
     }
 }
 
-
 static void mm_profile_save(int slot)
 {
     @try {
@@ -4033,7 +4043,6 @@ static void mm_esp_frame(double t)
         static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
-            mm_br_zone_read();              /* v0.6.3: zona BR (2 Hz, si hay offsets) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
         }
         /* v0.6.2: repintar solo si algo visible cambio. Parado en el lobby o
@@ -4120,609 +4129,6 @@ static void mm_probe_run(void)
     } @catch (NSException *e) {
         g_probe = [NSString stringWithFormat:@"excepcion: %@", e.reason];
         g_probe_ok = 0;
-    }
-}
-
-/* ---------------- BR probe (v0.6.0): decodifica el prologo ARM64 ----------------
-   Lee los primeros 16 instrucciones de cada set_RadiationZone* desde la imagen del
-   juego y extrae el offset del campo dentro del BRRadiationZoneMgr (y la direccion
-   estatica para set_RadiationZoneMgr). Cero llamadas al juego: solo lee bytes del
-   segmento __text, mismo tipo de operacion que la sonda de 0.5.
-
-   Patrones ARM64 reconocidos:
-     STR Wt, [X0, #imm*4]   -> 0xB9000000 base   (int32)
-     STR Xt, [X0, #imm*8]   -> 0xF9000000 base   (int64 / ptr)
-     STR St, [X0, #imm*4]   -> 0xBD000000 base   (float32)
-     STR Dt, [X0, #imm*8]   -> 0xFD000000 base   (float64)
-     ADRP Xd + STR Xt, [Xd, #lo12]              (store a direccion estatica)
-   Si no encuentra ninguno en 16 instrucciones, reporta "?". Si el setter copia un
-   struct, registra hasta 6 stores consecutivos (set_RadiationZoneShape).
-
-   El resultado va a g_br_probe y de ahi a modmenu_status.txt (solo con mm_debug ON).
---------------------------------------------------------------------------------*/
-
-typedef struct {
-    uint32_t off;                  /* offset dentro de [x0] */
-    uint32_t size;                 /* 1,2,4,8 */
-    char     kind;                 /* 'w','x','s','d' */
-    char     src;                  /* 'i' = instance ([x0]), 's' = static */
-    uint64_t static_addr_rt;       /* direccion runtime del static (si src=='s') */
-    uint32_t extra_off[6];
-    uint8_t  extra_sz[6];
-    char     extra_kind[6];
-    int      extra_n;
-    int      found;
-} mm_br_decode_t;
-
-static int mm_br_match_str_x0(uint32_t ins, mm_br_decode_t *d, int is_extra)
-{
-    uint32_t Rn = (ins >> 5) & 0x1F;
-    uint32_t Rt = ins & 0x1F;
-    uint32_t imm12 = (ins >> 10) & 0xFFF;
-    if (Rn != 0) return 0;
-    if (!is_extra && Rt != 1) return 0;    /* el primer store es siempre w1/x1/s1/d1 (arg1 del setter) */
-    uint32_t base = ins & 0xFFC00000;
-    uint32_t off, sz; char kind;
-    if      (base == 0xB9000000) { off = imm12 * 4; sz = 4; kind = 'w'; }
-    else if (base == 0xF9000000) { off = imm12 * 8; sz = 8; kind = 'x'; }
-    else if (base == 0xBD000000) { off = imm12 * 4; sz = 4; kind = 's'; }
-    else if (base == 0xFD000000) { off = imm12 * 8; sz = 8; kind = 'd'; }
-    else return 0;
-    if (!is_extra) {
-        d->off = off; d->size = sz; d->kind = kind; d->src = 'i';
-    } else {
-        int i = d->extra_n;
-        if (i < 6) { d->extra_off[i] = off; d->extra_sz[i] = sz; d->extra_kind[i] = kind; d->extra_n++; }
-    }
-    return 1;
-}
-
-/* v0.7.3 (br probe v2): ventana 16 -> 32 instrucciones. il2cpp a menudo
-   inserta antes del store real una comprobacion de init de metadata que
-   puede ocupar 4-8 ins (adrp + ldr + cbnz/tbnz + bl _il2cpp_init). El
-   escaneo lineal sigue siendo seguro: solo recoge STR [X0,#imm] cuando
-   Rt es w1/x1/s1/d1 (arg1 del setter); cualquier otra ins se ignora. Si
-   no se encuentra nada, el probe vuelca los 32 words en hex (ver abajo). */
-#define MM_BR_DECODE_WINDOW 32
-static int mm_br_decode_setter(uint64_t va_rt, mm_br_decode_t *d)
-{
-    memset(d, 0, sizeof(*d));
-    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
-    for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
-        uint32_t w = ins[i];
-        /* RET temprano: fin del cuerpo */
-        if (w == 0xD65F03C0) break;
-
-        /* ADRP + STR a direccion estatica */
-        if ((w & 0x9F000000) == 0x90000000) {
-            uint32_t Rd = w & 0x1F;
-            int64_t immlo = (w >> 29) & 3;
-            int64_t immhi = (w >> 5) & 0x7FFFF;
-            int64_t imm = (immhi << 2) | immlo;
-            if (imm & (1LL << 20)) imm |= ~((1LL << 21) - 1);
-            imm <<= 12;
-            uint64_t pc = va_rt + (uint64_t)i * 4;
-            uint64_t target_page = (pc & ~0xFFFULL) + (uint64_t)imm;
-            for (int j = i + 1; j < i + 8 && j < MM_BR_DECODE_WINDOW; j++) {
-                uint32_t w2 = ins[j];
-                if ((w2 & 0xFFC00000) == 0xF9000000) {
-                    uint32_t Rn2 = (w2 >> 5) & 0x1F;
-                    uint32_t Rt2 = w2 & 0x1F;
-                    uint32_t imm12 = (w2 >> 10) & 0xFFF;
-                    if (Rn2 == Rd && Rt2 == 1) {
-                        d->size = 8; d->kind = 'x'; d->src = 's';
-                        d->static_addr_rt = target_page + (uint64_t)imm12 * 8;
-                        d->found = 1;
-                        return 1;
-                    }
-                }
-            }
-        }
-
-        /* STR primario */
-        if (!d->found && mm_br_match_str_x0(w, d, 0)) {
-            d->found = 1;
-            /* buscar hasta 6 stores adicionales (struct arg) */
-            for (int j = i + 1; j < MM_BR_DECODE_WINDOW; j++) {
-                uint32_t w2 = ins[j];
-                if (w2 == 0xD65F03C0) break;
-                mm_br_match_str_x0(w2, d, 1);
-                if (d->extra_n >= 6) break;
-            }
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* v0.7.3 (br probe v2): fallback hex dump de 32 instrucciones (128 B) desde
-   el VA del setter. Se usa cuando el decoder lineal NO reconoce el patron,
-   para parsear a mano el prologo real (ej. il2cpp con init de metadata).
-   Devuelve "hex=aabbccdd,..." con 32 words little-endian. Sin saltos de
-   linea: todo cabe en la misma linea del setter en br_probe.txt. */
-static NSString *mm_br_hex_dump32(uint64_t va_rt)
-{
-    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
-    NSMutableString *h = [NSMutableString stringWithCapacity:32 * 9 + 8];
-    [h appendString:@"hex="];
-    for (int i = 0; i < 32; i++) {
-        if (i > 0) [h appendString:@","];
-        [h appendFormat:@"%08x", (unsigned)ins[i]];
-    }
-    return h;
-}
-
-/* v0.7.4 (br probe v3): decodifica `b imm26` (branch unconditional, sin
-   link) y devuelve el target absoluto en el espacio runtime. Retorna 1 si
-   la instruccion es un b imm26, 0 si no. */
-static int mm_br_decode_b_imm26(uint32_t ins, uint64_t pc, uint64_t *target)
-{
-    if ((ins & 0xFC000000u) != 0x14000000u) return 0;
-    int64_t imm26 = (int64_t)(ins & 0x03FFFFFFu);
-    if (imm26 & (1LL << 25)) imm26 |= ~((1LL << 26) - 1);
-    *target = pc + imm26 * 4;
-    return 1;
-}
-
-/* v0.7.4 (br probe v3): busca el ULTIMO `b imm26` dentro de la ventana del
-   setter (tail-call de forwarders tipo set_Radius / set_TotalSpr). Retorna
-   1 si lo encontro, con *target_rt listo para dumpear 32 words mas. */
-static int mm_br_find_tail_target(uint64_t va_rt, uint64_t *target_rt)
-{
-    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
-    int found = 0; uint64_t last_tgt = 0;
-    for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
-        uint64_t pc = va_rt + (uint64_t)i * 4;
-        uint64_t t;
-        if (mm_br_decode_b_imm26(ins[i], pc, &t)) { found = 1; last_tgt = t; }
-        if (ins[i] == 0xD65F03C0) break; /* RET corta el escaneo */
-    }
-    if (!found) return 0;
-    *target_rt = last_tgt;
-    return 1;
-}
-
-/* v0.7.4 (br probe v3): busca el PRIMER slot estatico 64-bit cargado por un
-   patron `adrp Rd,page [; add Rd,Rd,#imm12] ; ldr Xt,[Rd,#imm12*8]` dentro
-   de la ventana. Deref: devuelve el VALOR almacenado en ese slot (puntero a
-   la instancia singleton del game-mode). 0 si no hay match o la deref falla.
-   v0.7.7: ademas devuelve en *slot_rt la direccion runtime del slot (para
-   que el probe emita la file-space VA que fusion br promote necesita como
-   mgr_va). Pasa NULL si no te interesa. */
-static uint64_t mm_br_resolve_singleton_ex(uint64_t va_rt, uint64_t *slot_rt_out)
-{
-    const uint32_t *ins = (const uint32_t *)(uintptr_t)va_rt;
-    for (int i = 0; i < MM_BR_DECODE_WINDOW; i++) {
-        uint32_t w = ins[i];
-        if ((w & 0x9F000000u) != 0x90000000u) continue;    /* ADRP */
-        uint32_t Rd = w & 0x1F;
-        int64_t immlo = (w >> 29) & 3;
-        int64_t immhi = (w >> 5) & 0x7FFFF;
-        int64_t imm = (immhi << 2) | immlo;
-        if (imm & (1LL << 20)) imm |= ~((1LL << 21) - 1);
-        imm <<= 12;
-        uint64_t pc = va_rt + (uint64_t)i * 4;
-        uint64_t page = (pc & ~0xFFFULL) + (uint64_t)imm;
-        uint64_t base = page; int has_add = 0;
-        for (int j = i + 1; j < i + 5 && j < MM_BR_DECODE_WINDOW; j++) {
-            uint32_t w2 = ins[j];
-            /* ADD Xd, Xn, #imm12 (64-bit, con sh opcional) */
-            if ((w2 & 0xFF800000u) == 0x91000000u) {
-                uint32_t Rn2 = (w2 >> 5) & 0x1F;
-                uint32_t Rd2 = w2 & 0x1F;
-                uint32_t imm12 = (w2 >> 10) & 0xFFF;
-                uint32_t sh = (w2 >> 22) & 1;
-                if (Rn2 == Rd && Rd2 == Rd) {
-                    base = page + ((uint64_t)imm12 << (sh ? 12 : 0));
-                    has_add = 1;
-                }
-                continue;
-            }
-            /* LDR Xt, [Xn, #imm12*8] 64-bit unsigned offset */
-            if ((w2 & 0xFFC00000u) == 0xF9400000u) {
-                uint32_t Rn2 = (w2 >> 5) & 0x1F;
-                uint32_t imm12 = (w2 >> 10) & 0xFFF;
-                if (Rn2 == Rd) {
-                    uint64_t slot = (has_add ? base : page) + (uint64_t)imm12 * 8;
-                    if (slot_rt_out) *slot_rt_out = slot;
-                    BOOL ok = NO;
-                    uint64_t ptr = mm_safe_read64((uintptr_t)slot, &ok);
-                    if (ok && ptr != 0) return ptr;
-                    return 0;
-                }
-            }
-        }
-    }
-    if (slot_rt_out) *slot_rt_out = 0;
-    return 0;
-}
-
-/* v0.7.4: wrapper original (sin slot_rt) para que compile el camino viejo. */
-static uint64_t mm_br_resolve_singleton(uint64_t va_rt)
-{
-    return mm_br_resolve_singleton_ex(va_rt, NULL);
-}
-
-/* v0.7.8 (br probe v5) + v0.7.9 + v0.7.11: scan Vec3 estricto.
-   v0.7.10 trajo muchos falsos positivos (metadata il2cpp con bytes que
-   interpretan a floats: "mDOC"=207.3, strings de nombres de clase).
-   v0.7.11 endurece: (a) al menos DOS ejes con mag >= 1 (filtra float
-   aislado con dos ceros alrededor como el "mDOC"), (b) radio candidato
-   finito, positivo, en [10, 5000] (BR radii tipicos 50-2500m): eso
-   descarta "r=nan", "r=huge", "r=0" que delataban falsos. */
-static int mm_br_scan_vec3(NSMutableString *s, const char *tag,
-                           const uint32_t *buf, int nwords, uintptr_t src)
-{
-    int hits = 0;
-    for (int i = 0; i <= nwords - 4; i++) {   /* -4: tambien leemos radio */
-        float x, y, z, r;
-        memcpy(&x, buf + i,     sizeof(float));
-        memcpy(&y, buf + i + 1, sizeof(float));
-        memcpy(&z, buf + i + 2, sizeof(float));
-        memcpy(&r, buf + i + 3, sizeof(float));
-        if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(r)) continue;
-        float ax = fabsf(x), ay = fabsf(y), az = fabsf(z);
-        if (ax > 10000.f || ay > 10000.f || az > 10000.f) continue;
-        /* al menos DOS ejes con magnitud >= 1 (filtra float aislado) */
-        int nz = (ax >= 1.0f) + (ay >= 1.0f) + (az >= 1.0f);
-        if (nz < 2) continue;
-        /* radio: finito, positivo, 10..5000 (BR map scale) */
-        if (r < 10.0f || r > 5000.0f) continue;
-        [s appendFormat:@" | vec3@%s+0x%X=(%.1f,%.1f,%.1f) r=%.1f src=0x%llX",
-             tag, i * 4, (double)x, (double)y, (double)z, (double)r,
-             (unsigned long long)src];
-        hits++;
-        if (hits >= 4) break;    /* capeo por region para no inflar la linea */
-    }
-    return hits;
-}
-
-/* v0.7.10: estado de la app al momento del probe. Si durante el usleep
-   de 500 ms la app pasa a background, iOS pausa las writes de memoria
-   del juego y el snapshot B queda IDENTICO al A -> diff=none falso.
-   Retorna: 0=Active, 1=Inactive, 2=Background, -1=na, -2=error. */
-static int mm_br_app_state(void)
-{
-    @try {
-        UIApplication *app = [UIApplication sharedApplication];
-        if (!app) return -1;
-        return (int)app.applicationState;
-    } @catch (NSException *e) {
-        return -2;
-    }
-}
-
-/* v0.7.7 (br probe v4) + v0.7.8 + v0.7.10: dos snapshots de 128 words
-   (512 B), espaciados por 500 ms. Emite:
-     inst=0xADDR app=A>B hex=<128 words> diff=+0xOFF:oldval->newval,...
-   v0.7.10: `app=A>B` = applicationState de iOS antes/despues del
-   snapshot (0=Active, 1=Inactive, 2=Background, -1=na). Si cualquiera
-   no es Active, el diff se marca `skip_bg` (iOS paus las writes del
-   juego -> diff falso) y g_br_probe_saw_diff NO se setea (seguimos
-   reintentando hasta capturar una pasada con la app en foreground). */
-static NSString *mm_br_dump_dynamic(NSMutableString *vec3_out,
-                                    const char *tag, uintptr_t inst)
-{
-    if (inst == 0) return @"inst=0x0";
-    int app_a = mm_br_app_state();
-    uint32_t snap_a[128], snap_b[128];
-    vm_size_t got = 0;
-    g_vm_reads++;
-    if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst,
-                          sizeof(snap_a), (vm_address_t)snap_a,
-                          &got) != KERN_SUCCESS ||
-        got != sizeof(snap_a)) {
-        return [NSString stringWithFormat:@"inst=0x%llX unreadable",
-                (unsigned long long)inst];
-    }
-    usleep(500000);   /* 0.5 s: tiempo tipico para ver cambio durante shrink */
-    int app_b = mm_br_app_state();
-    g_vm_reads++;
-    if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst,
-                          sizeof(snap_b), (vm_address_t)snap_b,
-                          &got) != KERN_SUCCESS ||
-        got != sizeof(snap_b)) {
-        return [NSString stringWithFormat:@"inst=0x%llX unreadable2",
-                (unsigned long long)inst];
-    }
-    int bg = (app_a != 0 || app_b != 0);
-    NSMutableString *h = [NSMutableString stringWithCapacity:128 * 10 + 512];
-    [h appendFormat:@"inst=0x%llX app=%d>%d hex=",
-         (unsigned long long)inst, app_a, app_b];
-    for (int i = 0; i < 128; i++) {
-        if (i > 0) [h appendString:@","];
-        [h appendFormat:@"%08x", (unsigned)snap_b[i]];
-    }
-    [h appendString:@" diff="];
-    int ndiff = 0;
-    for (int i = 0; i < 128; i++) {
-        if (snap_a[i] != snap_b[i]) {
-            if (ndiff > 0) [h appendString:@","];
-            [h appendFormat:@"+0x%X:%08x>%08x", i * 4,
-                 (unsigned)snap_a[i], (unsigned)snap_b[i]];
-            ndiff++;
-            if (ndiff >= 24) { [h appendString:@",..."]; break; }
-        }
-    }
-    if (ndiff == 0) {
-        [h appendString:bg ? @"none(skip_bg)" : @"none"];
-    } else {
-        if (!bg) g_br_probe_saw_diff = 1;
-        else     [h appendString:@" (skip_bg)"];
-    }
-    /* v0.7.8: scan Vec3 sobre snap B (ya reflejado en inst) */
-    if (vec3_out)
-        g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, tag, snap_b, 128, inst);
-    return h;
-}
-
-/* v0.7.10: walk de 32 pointer-slots en [0..0xF8] de la instancia.
-   - Hijos: 16 (como v0.7.9). Dump 128 words (512 B) por hijo (antes 64,
-     256 B) - alcanza mas profundo donde pueda estar el Vec3.
-   - Alineacion: 2-byte (`p & 0x1`). Mono/il2cpp usa a veces low-bit tags;
-     v0.7.8 (8-byte) y v0.7.9 (4-byte) rechazaban 0x123C90E4E (low 0x4E).
-   - Deref: si el deref del ptr exacto falla, retry con bits 2-0 limpios
-     (0x123C90E4E -> 0x123C90E48) por si es tagged pointer. Emito
-     `tag=0xN` cuando la deref untagged tuvo exito. */
-static void mm_br_walk_pointers(NSMutableString *s, NSMutableString *vec3_out,
-                                const char *tag, uintptr_t inst)
-{
-    if (inst == 0) return;
-    uint64_t ptrs[32];
-    vm_size_t got = 0;
-    g_vm_reads++;
-    if (vm_read_overwrite(mach_task_self(), (vm_address_t)inst, sizeof(ptrs),
-                          (vm_address_t)ptrs, &got) != KERN_SUCCESS ||
-        got != sizeof(ptrs))
-        return;
-    int n = 0;
-    for (int i = 0; i < 32 && n < 16; i++) {
-        uint64_t p = ptrs[i];
-        if (p < 0x100000000ULL || p > 0x300000000ULL) continue; /* heuristico */
-        if (p & 0x1ULL) continue;                               /* alineado 2 */
-        if (p == (uint64_t)inst) continue;                      /* auto-ptr */
-        uint32_t sub[128];
-        g_vm_reads++;
-        uint64_t deref_at = p;
-        int tag_bits = 0;
-        kern_return_t kr = vm_read_overwrite(mach_task_self(),
-                                             (vm_address_t)p, sizeof(sub),
-                                             (vm_address_t)sub, &got);
-        if ((kr != KERN_SUCCESS || got != sizeof(sub)) && (p & 0x7ULL)) {
-            /* Retry con low 3 bits limpios: posible tagged pointer. */
-            deref_at = p & ~0x7ULL;
-            tag_bits = (int)(p & 0x7ULL);
-            g_vm_reads++;
-            kr = vm_read_overwrite(mach_task_self(), (vm_address_t)deref_at,
-                                   sizeof(sub), (vm_address_t)sub, &got);
-        }
-        if (kr != KERN_SUCCESS || got != sizeof(sub)) continue;
-        [s appendFormat:@" | %s_child_%d@+0x%X=0x%llX",
-             tag, n, i * 8, (unsigned long long)p];
-        if (tag_bits) [s appendFormat:@" tag=0x%x", tag_bits];
-        [s appendString:@" hex="];
-        for (int j = 0; j < 128; j++) {
-            if (j > 0) [s appendString:@","];
-            [s appendFormat:@"%08x", (unsigned)sub[j]];
-        }
-        /* v0.7.8: scan Vec3 sobre el hijo. v0.7.10: 128 words (512 B). */
-        if (vec3_out) {
-            char subtag[32];
-            snprintf(subtag, sizeof(subtag), "%s_c%d", tag, n);
-            g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, subtag, sub, 128, (uintptr_t)deref_at);
-        }
-        n++;
-    }
-}
-
-/* v0.7.11: dump del pawn local y walk de sus punteros. Los dumps v0.7.5-10
-   revelaron que `R:slot_file_va=0x10D91A0C0` apunta a TYPE METADATA
-   (`Il2CppClass*` o similar) y no a la SafeZone. La SafeZone real pasa
-   como `x0` al set_Radius desde codigo del juego, nunca por un static.
-   Pero el pawn SI es alcanzable via `g_br_pawn_fn` (ya se llama desde
-   el colector ESP, sin ACE adicional); el pawn tiene referencias a su
-   match/gamemode -> SafeZone list. Dumpeamos 128 words del pawn + walk
-   de 32 slots (16 hijos) con scan Vec3. */
-static void mm_br_dump_pawn(NSMutableString *s, NSMutableString *vec3_out)
-{
-    if (!g_br_pawn_fn) {
-        [s appendString:@" | pawn=unresolved"];
-        return;
-    }
-    void *p = NULL;
-    @try { p = g_br_pawn_fn(); } @catch (NSException *e) { p = NULL; }
-    if (!p) {
-        [s appendString:@" | pawn=null"];
-        return;
-    }
-    uint32_t pbuf[128];
-    vm_size_t got = 0;
-    g_vm_reads++;
-    if (vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)p,
-                          sizeof(pbuf), (vm_address_t)pbuf, &got) != KERN_SUCCESS ||
-        got != sizeof(pbuf)) {
-        [s appendFormat:@" | pawn=0x%llX unreadable", (unsigned long long)(uintptr_t)p];
-        return;
-    }
-    [s appendFormat:@" | pawn=0x%llX hex=", (unsigned long long)(uintptr_t)p];
-    for (int i = 0; i < 128; i++) {
-        if (i > 0) [s appendString:@","];
-        [s appendFormat:@"%08x", (unsigned)pbuf[i]];
-    }
-    if (vec3_out)
-        g_br_probe_found_vec3 += mm_br_scan_vec3(vec3_out, "P", pbuf, 128, (uintptr_t)p);
-    mm_br_walk_pointers(s, vec3_out, "P", (uintptr_t)p);
-}
-
-/* v0.7.4 (br probe v3): dump de N palabras de 32 bits desde una direccion
-   arbitraria usando vm_read_overwrite. Si la pagina no es legible devuelve
-   "hex=unreadable" en vez de crashear. N <= 64 (256 B). */
-static NSString *mm_br_hex_dump_at(uintptr_t addr, int words)
-{
-    if (words > 64) words = 64;
-    if (words <= 0) return @"hex=empty";
-    uint32_t buf[64];
-    vm_size_t got = 0;
-    g_vm_reads++;
-    kern_return_t kr = vm_read_overwrite(mach_task_self(),
-                                         (vm_address_t)addr,
-                                         (vm_size_t)(words * 4),
-                                         (vm_address_t)buf,
-                                         &got);
-    if (kr != KERN_SUCCESS || got != (vm_size_t)(words * 4)) {
-        return @"hex=unreadable";
-    }
-    NSMutableString *h = [NSMutableString stringWithCapacity:(NSUInteger)words * 9 + 8];
-    [h appendString:@"hex="];
-    for (int i = 0; i < words; i++) {
-        if (i > 0) [h appendString:@","];
-        [h appendFormat:@"%08x", (unsigned)buf[i]];
-    }
-    return h;
-}
-
-/* v0.6.1: el resultado del probe BR se escribe SIEMPRE en
-   Documents/br_probe.txt, sin depender del toggle Debug. Es el dato que el
-   operador necesita extraer: si el toggle no responde, este archivo sigue
-   existiendo. Formato compatible con kit/br-probe/leer-status.ps1. */
-static void mm_write_br_file(NSString *linea)
-{
-    @try {
-        NSString *docs = mm_docs_dir();
-        if (docs.length == 0 || linea.length == 0) return;
-        NSString *txt = [NSString stringWithFormat:
-            @"build=%s\ndylib=%s\nuptime_s=%d\nbr_probe=%@\n",
-            MODMENU_VERSION, mm_my_path(), (int)mm_uptime(), linea];
-        [txt writeToFile:[docs stringByAppendingPathComponent:@"br_probe.txt"]
-               atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    } @catch (NSException *e) {
-        MM_LOG(@"%s no pude escribir br_probe.txt: %@", MM_TAG, e.reason);
-    }
-}
-
-static void mm_br_probe_run(void)
-{
-    @try {
-        const struct mach_header *hdr = _dyld_get_image_header(0);
-        if (hdr == NULL) {
-            g_br_probe = @"sin imagen principal";
-            mm_write_br_file(g_br_probe);
-            return;
-        }
-        uintptr_t base = (uintptr_t)hdr;
-
-        struct { const char *name; uint64_t va; } setters[] = {
-            { "set_Mgr",       0x107528BB8ULL },
-            { "set_BRMgr",     0x10747071CULL },
-            { "set_Shape",     0x1079D91DCULL },
-            { "set_Radius",    0x1079DB518ULL },
-            { "set_NextBegin", 0x1079DB584ULL },
-            { "set_SpreadEnd", 0x1079DB59CULL },
-            { "set_TotalSpr",  0x1079DC8B0ULL },
-            { "AddZone",       0x107A0B6ECULL },
-            /* IsInBRGame es getter (ldr, no str): no se decodifica, se llama por VA. */
-        };
-        int N = (int)(sizeof(setters) / sizeof(setters[0]));
-
-        /* v0.7.9: estado de match embebido en la primera palabra - al leer
-           br_probe.txt veo al toque si la pasada se hizo en menu/lobby
-           (trk=0 have_local=0) o en gameplay con enemigos cerca. Si todo
-           esta en 0 la geometria del zone no va a aparecer: hay que entrar
-           a BR y repetir. */
-        NSMutableString *s = [NSMutableString stringWithFormat:
-            @"base=0x%lX trk=%d have_local=%d",
-            (unsigned long)base, g_track_count, g_have_local];
-        /* v0.7.7 (br probe v4): los prologos de los 8 setters ya los tengo del
-           volcado de v0.7.4; aqui solo listo nombre+VA para que la linea
-           quede autodescriptiva. El decoder de v0.7.3 queda vivo solo por si
-           alguno llegara a matchear como setter directo (set_X=off=...). */
-        uint64_t rt_radius = 0, rt_shape = 0;
-        for (int i = 0; i < N; i++) {
-            uint64_t rt = base + (uintptr_t)(setters[i].va - FUSION_IMAGE_BASE);
-            if (strcmp(setters[i].name, "set_Radius") == 0) rt_radius = rt;
-            if (strcmp(setters[i].name, "set_Shape")  == 0) rt_shape  = rt;
-            mm_br_decode_t d;
-            if (!mm_br_decode_setter(rt, &d) || !d.found) {
-                /* Solo nombre+VA, sin los 32 words de hex (ya los tenemos del
-                   dump v0.7.4; ahorramos ~2 KB de linea por iteracion). */
-                [s appendFormat:@" | %s=? va=0x%llX",
-                     setters[i].name, (unsigned long long)setters[i].va];
-                continue;
-            }
-            if (d.src == 's') {
-                uint64_t static_va = (uint64_t)FUSION_IMAGE_BASE + (d.static_addr_rt - (uint64_t)base);
-                [s appendFormat:@" | %s=STATIC va=0x%llX static_va=0x%llX",
-                     setters[i].name,
-                     (unsigned long long)setters[i].va,
-                     (unsigned long long)static_va];
-            } else {
-                [s appendFormat:@" | %s=off=0x%X sz=%u kind=%c",
-                     setters[i].name, d.off, d.size, d.kind];
-                for (int k = 0; k < d.extra_n; k++) {
-                    [s appendFormat:@",+0x%X(%u,%c)",
-                         d.extra_off[k], d.extra_sz[k], d.extra_kind[k]];
-                }
-            }
-        }
-        /* v0.7.7 (br probe v4): captura exhaustiva. Para cada setter con
-           singleton:
-             (1) resolve_singleton_ex: puntero a la instancia + runtime slot;
-             (2) emite slot_file_va (lo que mgr_va del contrato espera);
-             (3) dump dinamico 128 words + diff de las palabras que cambiaron
-                 entre dos snapshots a 500 ms (deberia revelar los floats del
-                 centro + radio durante shrink activo);
-             (4) walk de 16 pointer-slots en [0..0x80], deref + 32 words por
-                 hijo (hasta 8 hijos) -> encuentra la SafeZone hija donde
-                 vive el Vec3 (chase de set_Radius escribe `stur q0,[x19,+0xB8]`,
-                 x19 = SafeZone pasado por el llamador, no por el static). */
-        /* v0.7.8: acumulador de candidatos Vec3; se adjunta al final para
-           que todos los `vec3@...` queden juntos y faciles de leer. */
-        NSMutableString *vec3_out = [NSMutableString stringWithCapacity:1024];
-        int got_inst = 0;
-        if (rt_radius) {
-            uint64_t slot_rt = 0;
-            uint64_t inst = mm_br_resolve_singleton_ex(rt_radius, &slot_rt);
-            uint64_t slot_file_va = (slot_rt && slot_rt >= (uint64_t)base)
-                ? ((uint64_t)FUSION_IMAGE_BASE + (slot_rt - (uint64_t)base)) : 0;
-            [s appendFormat:@" | R:slot_file_va=0x%llX slot_rt=0x%llX %@",
-                 (unsigned long long)slot_file_va,
-                 (unsigned long long)slot_rt,
-                 mm_br_dump_dynamic(vec3_out, "R", (uintptr_t)inst)];
-            if (inst) {
-                got_inst = 1;
-                mm_br_walk_pointers(s, vec3_out, "R", (uintptr_t)inst);
-            }
-        }
-        if (rt_shape) {
-            uint64_t slot_rt = 0;
-            uint64_t inst = mm_br_resolve_singleton_ex(rt_shape, &slot_rt);
-            uint64_t slot_file_va = (slot_rt && slot_rt >= (uint64_t)base)
-                ? ((uint64_t)FUSION_IMAGE_BASE + (slot_rt - (uint64_t)base)) : 0;
-            [s appendFormat:@" | S:slot_file_va=0x%llX slot_rt=0x%llX %@",
-                 (unsigned long long)slot_file_va,
-                 (unsigned long long)slot_rt,
-                 mm_br_dump_dynamic(vec3_out, "S", (uintptr_t)inst)];
-            if (inst) {
-                got_inst = 1;
-                mm_br_walk_pointers(s, vec3_out, "S", (uintptr_t)inst);
-            }
-        }
-        /* v0.7.11: ademas del R/S que resuelven a metadata, dumpea el
-           pawn local (via g_br_pawn_fn) y walk sus punteros. El pawn
-           tiene referencias a su gamemode/match -> SafeZone list, que
-           ningun static expone. */
-        mm_br_dump_pawn(s, vec3_out);
-        /* v0.7.8: pego los candidatos Vec3 al final de la linea. */
-        if (vec3_out.length > 0) [s appendString:vec3_out];
-        g_br_probe_got_inst = got_inst;
-        g_br_probe_last_run = mm_uptime();
-        g_br_probe = s;
-        mm_write_br_file(s);
-        mm_write_status(@"br_probe listo");
-        MM_LOG(@"%s br_probe: %@", MM_TAG, s);
-    } @catch (NSException *e) {
-        g_br_probe = [NSString stringWithFormat:@"excepcion: %@", e.reason];
-        mm_write_br_file(g_br_probe);
     }
 }
 
@@ -5088,141 +4494,6 @@ static BOOL mm_r64(uintptr_t addr, uint64_t *out)
     return ok;
 }
 
-/* v0.6.3: lee la zona de radiacion actual del manager BR.
-   Requiere offsets VERIFICADOS en el contrato (el header emite 0 si no hay):
-   - BR_STRUCT_MGR_VA   : direccion del slot estatico que guarda el manager
-   - BR_STRUCT_SHAPE_OFF: 3 floats (x,y,z) del centro
-   - BR_STRUCT_RADIUS_OFF: float del radio
-   Si falta cualquiera, la funcion sale sin tocar nada. Lectura a 2 Hz. */
-#define BR_DMZ_SHAPE   0x3F4
-#define BR_DMZ_CENTER  0x3F8
-#define BR_DMZ_RADIUS  0x404
-#define BR_DMZ_NEXT    0x40C
-#define BR_DMZ_END     0x414
-#define BR_DMZ_CUR     0x418
-#define BR_DMZ_TOTAL   0x41C
-#define BR_DMZ_PROG    0x420
-
-static uint64_t g_br_info = 0;
-
-/* C-6: busca la instancia de DMZGameInfo escaneando los punteros del Gameplay
-   y validando la firma del struct (radio 30..30000, centro en el mundo,
-   total de cierres 0..30, shape -1..4). Se cachea hasta que falle la lectura. */
-static uint64_t mm_br_dmz_probe(uint64_t q)
-{
-    if (q == 0 || (q & 7) != 0) return 0;
-    float rad = 0.0f, c[3] = { 0.0f, 0.0f, 0.0f };
-    int total = 0, shape = 0;
-    if (!mm_vm_read(q + BR_DMZ_RADIUS, &rad, sizeof(rad))) return 0;
-    if (!isfinite(rad) || rad < 30.0f || rad > 30000.0f) return 0;
-    if (!mm_vm_read(q + BR_DMZ_CENTER, c, sizeof(c))) return 0;
-    if (!isfinite(c[0]) || !isfinite(c[2])) return 0;
-    if (fabsf(c[0]) > 20000.0f || fabsf(c[2]) > 20000.0f) return 0;
-    if (!mm_vm_read(q + BR_DMZ_TOTAL, &total, sizeof(total))) return 0;
-    if (total < 0 || total > 30) return 0;
-    if (!mm_vm_read(q + BR_DMZ_SHAPE, &shape, sizeof(shape))) return 0;
-    if (shape < -1 || shape > 4) return 0;
-    return q;
-}
-
-static uint64_t mm_br_dmz_find(void)
-{
-    if (g_br_info != 0) return g_br_info;
-    /* PERF: escaneo caro. Un fallo se reintenta cada 5 s (antes era cada
-       0.5 s y congelaba la pantalla a ratos). */
-    static double s_scan = 0.0;
-    double now = CACurrentMediaTime();
-    if (s_scan > 0.0 && now - s_scan < 5.0) return 0;
-    s_scan = now;
-    if (g_fp_gameplay == NULL) return 0;
-    void *gp = g_fp_gameplay();
-    if (gp == NULL) return 0;
-    /* Nivel 1: punteros directos del Gameplay. Nivel 2: un salto mas (el
-       GameInfo suele colgar del Game/GameMode, no del Gameplay). */
-    for (uintptr_t off = 0x100; off < 0x600; off += 8) {
-        uint64_t q = 0;
-        if (!mm_r64((uintptr_t)gp + off, &q) || q == 0) continue;
-        uint64_t hit = mm_br_dmz_probe(q);
-        if (hit != 0) { g_br_info = hit; return hit; }
-        for (uintptr_t o2 = 0; o2 < 0x80; o2 += 8) {
-            uint64_t r = 0;
-            if (!mm_r64(q + o2, &r) || r == 0) continue;
-            hit = mm_br_dmz_probe(r);
-            if (hit != 0) { g_br_info = hit; return hit; }
-        }
-    }
-    return 0;
-}
-
-static void mm_br_zone_read(void)
-{
-    /* C-8: DESCARTADO. La instancia de DMZGameInfo no es alcanzable desde el
-       Gameplay (ni a 2 niveles) y el escaneo costaba caro. Se deja inerte. */
-    g_br_zone.ok = 0;
-    g_br_zone_info = nil;
-    return;
-    /* codigo viejo (no se ejecuta) */
-    static double s_last = 0.0;
-    double now = CACurrentMediaTime();
-    if (s_last > 0.0 && now - s_last < 0.5) return;
-    s_last = now;
-    @try {
-        uint64_t info = mm_br_dmz_find();
-        if (info == 0) {
-            g_br_zone.ok = 0;
-            g_br_zone_info = @"sin DMZGameInfo";
-            return;
-        }
-        float c[3] = { 0.0f, 0.0f, 0.0f }, rad = 0.0f;
-        if (!mm_vm_read(info + BR_DMZ_CENTER, c, sizeof(c)) ||
-            !mm_vm_read(info + BR_DMZ_RADIUS, &rad, sizeof(rad))) {
-            g_br_zone.ok = 0;
-            g_br_zone_info = @"zona ilegible";
-            g_br_info = 0;
-            return;
-        }
-        if (!isfinite(rad) || rad < 1.0f || rad > 50000.0f) {
-            g_br_zone.ok = 0;
-            g_br_zone_info = @"radio fuera de rango";
-            return;
-        }
-        float nextT = 0.0f, prog = 0.0f;
-        int cur = 0, total = 0;
-        mm_vm_read(info + BR_DMZ_NEXT,  &nextT, sizeof(nextT));
-        mm_vm_read(info + BR_DMZ_PROG,  &prog,  sizeof(prog));
-        mm_vm_read(info + BR_DMZ_CUR,   &cur,   sizeof(cur));
-        mm_vm_read(info + BR_DMZ_TOTAL, &total, sizeof(total));
-        g_br_zone.nextS = 0.0f;
-        if (isfinite(nextT) && nextT > 1.0e9f) {
-            float nowT = (float)[[NSDate date] timeIntervalSince1970];
-            float d = nextT - nowT;
-            if (d > 0.0f && d < 3600.0f) g_br_zone.nextS = d;
-        }
-        g_br_zone.progress = isfinite(prog) ? prog : 0.0f;
-        g_br_zone.cur = cur;
-        g_br_zone.total = total;
-        BOOL changed = (g_br_zone.ok == 0) ||
-                       (g_br_zone.x != c[0]) || (g_br_zone.z != c[2]) ||
-                       (g_br_zone.r != rad);
-        g_br_zone.x = c[0]; g_br_zone.y = c[1]; g_br_zone.z = c[2];
-        g_br_zone.r = rad;
-        g_br_zone.t = now;
-        g_br_zone.ok = 1;
-        if (g_br_zone.nextS > 0.0f) {
-            int s = (int)(g_br_zone.nextS + 0.5f);
-            g_br_zone_info = [NSString stringWithFormat:@"r=%.0f  cierre %d/%d  %d:%02d",
-                              rad, cur, total, s / 60, s % 60];
-        } else {
-            g_br_zone_info = [NSString stringWithFormat:@"r=%.0f  cierre %d/%d",
-                              rad, cur, total];
-        }
-        if (changed) mm_scene_bump();
-    } @catch (NSException *e) {
-        g_br_zone.ok = 0;
-        g_br_zone_info = @"excepcion";
-    }
-}
-
 /* el puntero cae dentro de la imagen del juego? Acepta dos senales (dladdr
    es read-only): que la base coincida, o que el nombre de la imagen sea el
    del binario del juego (la sonda v0.2.2 comprobo en el equipo que dladdr
@@ -5290,7 +4561,6 @@ static void mm_game_resolve(void)
             g_game_base    = b;
             g_fp_gameplay  = fp0;
             g_fp_localpawn = fp1;
-            g_br_pawn_fn   = (void *(*)(void))fp1;   /* v0.7.11: espejo para el probe BR */
             g_fp_maincam   = fp2;
             g_fov_cam_get  = (void *(*)(void))fp2;   /* C-7 */
             g_fp_cam_getfov = (MMGetFovFn)(b + MM_GAME_DELTA(VA_CAM_GETFOV));   /* C-11 */
@@ -5353,242 +4623,9 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
 }
 
 /* Una pasada de ESP real (~15 Hz). Deja el motivo en g_esp_diag. */
-/* C-5: proyecta el esqueleto del pawn en su caja. Los Transform se resuelven
-   UNA vez por pawn con Transform.Find y se cachean; si el model root cambia
-   (pawn reciclado) se vuelven a resolver. Todo falla en silencio. */
-/* C-15: lee un string IL2CPP (len en +0x10, chars UTF-16 en +0x14). */
-static void mm_cs_str(void *str, char *out, size_t cap)
-{
-    if (out == NULL || cap == 0) return;
-    out[0] = '\0';
-    if (str == NULL) return;
-    int len = 0;
-    if (!mm_vm_read((uintptr_t)str + 0x10, &len, sizeof(len))) return;
-    if (len <= 0 || len > 120) return;
-    size_t n = (size_t)len;
-    if (n > cap - 1) n = cap - 1;
-    uint16_t buf[121];
-    if (!mm_vm_read((uintptr_t)str + 0x14, buf, n * 2)) return;
-    for (size_t i = 0; i < n; i++) out[i] = (buf[i] < 128) ? (char)buf[i] : '?';
-    out[n] = '\0';
-}
-
-/* C-15: indice de hueso por sufijo exacto ("Bip001 Head" -> " Head"). */
-static int mm_bone_index(const char *name)
-{
-    if (name == NULL || name[0] == 0) return -1;
-    size_t ln = strlen(name);
-    for (int i = 0; i < MM_SK_N; i++) {
-        size_t sl = strlen(mm_sk_suffix[i]);
-        if (ln < sl) continue;
-        if (strcmp(name + ln - sl, mm_sk_suffix[i]) == 0) return i;
-    }
-    return -1;
-}
-
-/* C-15: recorre la jerarquia (profundidad y nodos acotados) buscando huesos. */
-static void mm_skel_walk(void *t, int depth, MMSkelCache *c, int *found, int *budget)
-{
-    if (t == NULL || depth > 7 || *found >= MM_SK_N || *budget <= 0) return;
-    (*budget)--;
-    void *nm = g_fp_getname ? g_fp_getname(t) : NULL;
-    char name[122];
-    mm_cs_str(nm, name, sizeof(name));
-    int idx = mm_bone_index(name);
-    if (idx >= 0 && c->bn[idx] == NULL) { c->bn[idx] = t; (*found)++; }
-    if (g_fp_childcount == NULL || g_fp_getchild == NULL) return;
-    int n = g_fp_childcount(t);
-    if (n <= 0) return;
-    if (n > 48) n = 48;
-    for (int i = 0; i < n; i++) {
-        if (*found >= MM_SK_N || *budget <= 0) return;
-        void *ch = g_fp_getchild(t, i);
-        mm_skel_walk(ch, depth + 1, c, found, budget);
-    }
-}
-
-/* C-16: volcado de la jerarquia de huesos a Documents/fusion_bones.txt para
-   diagnosticar por que el walk no encuentra los huesos. */
-static void mm_bones_dump_walk(void *t, int depth, NSMutableString *out, int *budget)
-{
-    if (t == NULL || depth > 8 || *budget <= 0) return;
-    (*budget)--;
-    void *nm = g_fp_getname ? g_fp_getname(t) : NULL;
-    char name[122];
-    mm_cs_str(nm, name, sizeof(name));
-    NSMutableString *ind = [NSMutableString string];
-    for (int i = 0; i < depth; i++) [ind appendString:@"  "];
-    [out appendFormat:@"%@%s\n", ind, name];
-    if (g_fp_childcount == NULL || g_fp_getchild == NULL) return;
-    int n = g_fp_childcount(t);
-    if (n > 64) n = 64;
-    for (int i = 0; i < n && *budget > 0; i++)
-        mm_bones_dump_walk(g_fp_getchild(t, i), depth + 1, out, budget);
-}
-
-static void mm_bones_dump(void)
-{
-    @try {
-        NSString *docs = mm_docs_dir();
-        if (docs.length == 0) return;
-        NSMutableString *out = [NSMutableString string];
-        [out appendString:@"# FUSION bones dump\n"];
-        if (g_box_count <= 0) {
-            [out appendString:@"sin cajas (activa el ESP y espera a ver enemigos)\n"];
-        } else {
-            uint64_t pawn = g_boxes[0].pawn;
-            uint64_t root = 0;
-            if (!mm_r64((uintptr_t)pawn + OFF_PAWN_MODELROOT, &root) || root == 0)
-                mm_r64((uintptr_t)pawn + OFF_PAWN_MESH, &root);
-            [out appendFormat:@"pawn=0x%llX root=0x%llX\n",
-                              (unsigned long long)pawn, (unsigned long long)root];
-            if (root != 0) {
-                int budget = 400;
-                mm_bones_dump_walk((void *)(uintptr_t)root, 0, out, &budget);
-            }
-        }
-        [out writeToFile:[docs stringByAppendingPathComponent:@"fusion_bones.txt"]
-              atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    } @catch (NSException *e) { }
-}
-
-static void *mm_skel_find(void *root, const char *name)
-{
-    if (root == NULL || g_fp_find == NULL) return NULL;
-    NSString *p = [NSString stringWithUTF8String:name];
-    if (p == nil) return NULL;
-    return g_fp_find(root, (__bridge void *)p);
-}
-
-/* C-5b: resuelve los 21 huesos probando las raices y las formas de ruta que
-   usa CODM (root = Bip001, root encima de Bip001, o ruta con prefijo). */
-static NSString *s_sk_bare[MM_SK_N];
-static NSString *s_sk_pref[MM_SK_N];
-static void mm_skel_strings(void)
-{
-    static BOOL once = NO;
-    if (once) return;
-    once = YES;
-    for (int i = 0; i < MM_SK_N; i++) {
-        NSString *b = [NSString stringWithUTF8String:mm_sk_path[i]];
-        s_sk_bare[i] = b;
-        NSString *sub = (b.length > 7) ? [b substringFromIndex:7] : b;
-        s_sk_pref[i] = [NSString stringWithFormat:@"Bip001/%@", sub];
-    }
-}
-
-static int mm_skel_resolve(uint64_t root, MMSkelCache *c)
-{
-    if (g_fp_find == NULL) return 0;
-    mm_skel_strings();
-    void *r = (void *)(uintptr_t)root;
-    void *bip = g_fp_find(r, (__bridge void *)s_sk_bare[0]);
-    /* s_sk_bare[0] es "Bip001 Pelvis"; probamos el nodo Bip001 aparte */
-    NSString *bipName = [NSString stringWithUTF8String:"Bip001"];
-    if (bipName != nil) {
-        void *b = g_fp_find(r, (__bridge void *)bipName);
-        if (b != NULL) bip = b;
-    }
-    int found = 0;
-    for (int i = 0; i < MM_SK_N; i++) {
-        void *t = g_fp_find(r, (__bridge void *)s_sk_bare[i]);
-        if (t == NULL && bip != NULL) t = g_fp_find(bip, (__bridge void *)s_sk_bare[i]);
-        if (t == NULL) t = g_fp_find(r, (__bridge void *)s_sk_pref[i]);
-        if (t != NULL) { c->bn[i] = t; found++; }
-    }
-    return found;
-}
-
-static void mm_skel_fill(MMEspBox *nb, const float *view, const float *proj,
-                         CGFloat W, CGFloat H)
-{
-    nb->skMask = 0;
-    if (!g_fp_trpos || !g_fp_getname) return;
-    /* C-20: si el walk ya fallo varias veces, no se sigue gastando CPU. */
-    if (g_bone_off > 0.0 && CACurrentMediaTime() < g_bone_off) return;
-    uint64_t pawn = nb->pawn;
-    uint64_t root = 0;
-    /* C-5b: dos candidatos de raiz (model root / mesh). */
-    if (!mm_r64((uintptr_t)pawn + OFF_PAWN_MODELROOT, &root) || root == 0)
-        mm_r64((uintptr_t)pawn + OFF_PAWN_MESH, &root);
-    if (root == 0) return;
-
-    MMSkelCache *c = NULL;
-    for (int i = 0; i < MM_MAX_BOXES; i++)
-        if (g_skel_cache[i].pawn == pawn) { c = &g_skel_cache[i]; break; }
-    if (c == NULL) {
-        c = &g_skel_cache[0];
-        for (int i = 0; i < MM_MAX_BOXES; i++)
-            if (g_skel_cache[i].pawn == 0) { c = &g_skel_cache[i]; break; }
-    }
-    /* C-5d: sin el "|| !c->ok" esto reintentaba Find 63 veces POR PAWN Y POR
-       FRAME cuando no encontraba huesos (de ahi el congelamiento). Ahora un
-       fallo se reintenta como mucho cada 5 s. */
-    BOOL need = (c->pawn != pawn) || (c->root != root) || (!c->ok);
-    if (need) {
-        double tnow = CACurrentMediaTime();
-        if (!c->ok && c->pawn == pawn && c->root == root &&
-            c->lastTry > 0.0 && tnow - c->lastTry < 5.0) return;
-        memset(c, 0, sizeof(*c));
-        c->pawn = pawn;
-        c->root = root;
-        c->lastTry = tnow;
-        /* C-15: UNA resolucion por pasada del colector. Antes se resolvian
-           todos los pawns de golpe y eso congelaba el juego. */
-        if (g_skel_budget <= 0) return;   /* C-20: conserva el cache */
-        g_skel_budget--;
-        int found = 0, budget = 120;
-        mm_skel_walk((void *)(uintptr_t)root, 0, c, &found, &budget);
-        /* C-20: si la raiz principal no da huesos, probar m_Mesh y el Transform
-           del pawn (el modelo real puede colgar de cualquiera de los tres). */
-        if (found < 6) {
-            uint64_t r2 = 0;
-            if (mm_r64((uintptr_t)pawn + OFF_PAWN_MESH, &r2) && r2 != 0 && r2 != root) {
-                int b2 = 120;
-                mm_skel_walk((void *)(uintptr_t)r2, 0, c, &found, &b2);
-            }
-        }
-        if (found < 6) {
-            uint64_t r3 = 0;
-            if (mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &r3) && r3 != 0 && r3 != root) {
-                int b3 = 160;
-                mm_skel_walk((void *)(uintptr_t)r3, 0, c, &found, &b3);
-            }
-        }
-        c->ok = (found >= 6) ? 1 : 0;
-        if (!c->ok) {
-            g_bone_fail++;
-            if (g_bone_fail >= 6) { g_bone_off = CACurrentMediaTime() + 60.0; g_bone_fail = 0; }
-            return;
-        }
-        g_bone_fail = 0;
-    }
-    /* C-5c: los 21 huesos se proyectan cada 3 pasadas (~10 Hz) y se reusan;
-       proyectar 21 huesos x N pawns a 30-60 Hz era parte del peso. */
-    static unsigned s_tick = 0;
-    if (c->mask == 0 || (s_tick++ % 3) == 0) {
-        c->mask = 0;
-        for (int i = 0; i < MM_SK_N; i++) {
-            if (c->bn[i] == NULL) continue;
-            float bp[3] = { 0.0f, 0.0f, 0.0f };
-            g_fp_trpos(c->bn[i], bp);
-            if (!isfinite(bp[0]) || !isfinite(bp[1]) || !isfinite(bp[2])) continue;
-            CGPoint p;
-            int det = 0;
-            float vx = 0.0f, vy = 0.0f;
-            if (mm_w2s(view, proj, bp, NO, W, H, &p, &det, &vx, &vy)) {
-                c->pts[i] = p;
-                c->mask |= (1u << i);
-            }
-        }
-    }
-    memcpy(nb->sk, c->pts, sizeof(nb->sk));
-    nb->skMask = c->mask;
-}
 
 static void mm_esp_collect_real(void)
 {
-    g_skel_budget = 1;   /* C-15: una resolucion de huesos por pasada */
     g_box_count = 0;
     g_track_count = 0;                     /* v0.5.0: track mundial */
     g_count_players = 0;
@@ -5666,6 +4703,19 @@ static void mm_esp_collect_real(void)
     memcpy(g_local_pos, lpos, sizeof(g_local_pos));   /* v0.4.4: radar/altura */
     g_have_local = haveLocal ? 1 : 0;
 
+    /* 2026-11: equipo del jugador local (PlayerInfo.m_TeamID). 0 = sin dato y
+       en ese caso el filtro de equipo NO se aplica (nunca esconder a todos). */
+    uint32_t teamLocal = 0;
+    if (localPawn != NULL) {
+        uint64_t lent = 0;
+        if (mm_r64((uintptr_t)localPawn + OFF_PAWN_ENTITY, &lent) && lent != 0) {
+            uint32_t tv = 0;
+            if (mm_vm_read((uintptr_t)lent + OFF_ENT_TEAM, &tv, sizeof(tv)) &&
+                tv > 0 && tv < 100000)
+                teamLocal = tv;
+        }
+    }
+
     const MMDrawOpts *opts = mm_draw_opts();
     /* C-17: localY para el filtro de caidos del relay. Si el toggle esta OFF
        se escribe un valor muy bajo para que la condicion nunca se cumpla. */
@@ -5725,17 +4775,53 @@ static void mm_esp_collect_real(void)
 
         int robot = 0;
         int downed = 0;   /* C-19 */
+        int invisible = 0, healing = 0, inVeh = 0;
+        int armor = 0;
+        uint32_t teamEnt = 0;
         if (ent != 0) {
-            uint64_t rb = 0;
-            if (mm_r64((uintptr_t)ent + OFF_ENT_ROBOT, &rb)) robot = (int)(rb & 0xFF);
+            /* 2026-11: una sola lectura (PlayerInfo 0x70..0x2B4) trae robot,
+               equipo, invisible, curando y vehiculo. Si el bloque falla se cae
+               a la lectura individual de robot de siempre. */
+            enum { MM_ENT_A = 0x70, MM_ENT_B = 0x2B4 };
+            uint8_t eb[MM_ENT_B - MM_ENT_A];
+            if (mm_vm_read((uintptr_t)ent + MM_ENT_A, eb, sizeof(eb))) {
+                robot     = eb[OFF_ENT_ROBOT - MM_ENT_A] & 0xFF;
+                invisible = eb[OFF_ENT_INVIS - MM_ENT_A] & 0xFF;
+                memcpy(&teamEnt, eb + (OFF_ENT_TEAM - MM_ENT_A), sizeof(teamEnt));
+                float mt = 0.0f;
+                memcpy(&mt, eb + (OFF_ENT_MEDTIME - MM_ENT_A), sizeof(mt));
+                if (isfinite(mt) && mt > 0.0f) healing = 1;
+                uint32_t vid = 0;
+                memcpy(&vid, eb + (OFF_ENT_VEHICLE - MM_ENT_A), sizeof(vid));
+                if (vid != 0 && vid < 1000000) inVeh = 1;
+            } else {
+                uint64_t rb = 0;
+                if (mm_r64((uintptr_t)ent + OFF_ENT_ROBOT, &rb)) robot = (int)(rb & 0xFF);
+            }
             float rt = 0.0f;
             if (mm_vm_read((uintptr_t)ent + OFF_ENT_REVIVE, &rt, sizeof(rt)) &&
                 isfinite(rt) && rt > 0.5f) downed = 1;
+            /* 2026-11: armadura cinetica (PlayerInfo 0x5C4/0x5C8). Fuera del
+               bloque de arriba: solo se pide si el operador quiere etiquetas. */
+            if (opts->stateTags) {
+                uint32_t ar = 0, armax = 0;
+                if (mm_vm_read((uintptr_t)ent + OFF_ENT_ARMOR, &ar, sizeof(ar)) &&
+                    mm_vm_read((uintptr_t)ent + OFF_ENT_ARMORMAX, &armax, sizeof(armax)) &&
+                    ar > 0 && ar <= 9999 && armax >= ar && armax <= 9999)
+                    armor = (int)ar;
+            }
         }
 
         /* v0.2.4: filtros por tipo */
         if (robot && !conBots) continue;
         if (!robot && !conJug) continue;
+
+        /* 2026-11: filtro de equipo. Solo actua si AMBOS lados traen un team
+           valido: con un 0 de cualquiera de los dos no se filtra nada. */
+        if (opts->teamFilter && teamLocal != 0 && teamEnt != 0 && teamEnt == teamLocal)
+            continue;
+        /* fuera de las etiquetas si el operador no las pidio */
+        if (!opts->stateTags) { invisible = 0; healing = 0; inVeh = 0; armor = 0; }
 
         uint64_t tchk = 0;
         if (tr == 0) continue;
@@ -5869,6 +4955,45 @@ static void mm_esp_collect_real(void)
                              (unsigned)hp_i, (double)hp_f, (double)hpMax];
         }
 
+        /* --- 2026-11: municion + ADS del enemigo (toggle propio, apagado por
+           defecto). Cadena: pawn -> InventoryManager -> arma actual ->
+           WeaponFireComponent[] -> m_ClipAmmoCount. Todo con guardas: si algo
+           no cuadra se queda en "sin dato" y no se dibuja. --- */
+        int ammo = -1, ammoMax = 0, ads = 0;
+        if (opts->ammoTag) {
+            uint64_t invm = 0, wep = 0;
+            if (mm_r64((uintptr_t)pawn + OFF_PAWN_INVMGR, &invm) && invm != 0 &&
+                mm_r64((uintptr_t)invm + OFF_INVM_CURWEP, &wep) && wep != 0) {
+                uint8_t aim = 0;
+                if (mm_vm_read((uintptr_t)wep + OFF_WEP_AIMING, &aim, 1) && (aim & 1)) ads = 1;
+                uint64_t fl = 0;
+                if (mm_r64((uintptr_t)wep + OFF_WEP_FIRELST, &fl) && fl != 0) {
+                    int32_t fcount = 0;
+                    if (mm_vm_read((uintptr_t)fl + OFF_LIST_SIZE, &fcount, sizeof(fcount)) &&
+                        fcount > 0 && fcount <= 8) {
+                        for (int fi = 0; fi < fcount && ammoMax == 0; fi++) {
+                            uint64_t fc = 0;
+                            if (!mm_r64((uintptr_t)fl + OFF_ARR_DATA + (uintptr_t)fi * 8, &fc) ||
+                                fc == 0)
+                                continue;
+                            uint64_t owner = 0;
+                            if (!mm_r64((uintptr_t)fc + OFF_FC_OWNER, &owner) || owner != pawn)
+                                continue;   /* componente de otra arma/dueno */
+                            int clip = -1, cmax = 0;
+                            if (mm_vm_read((uintptr_t)fc + OFF_FC_CLIP, &clip, sizeof(clip)) &&
+                                mm_vm_read((uintptr_t)fc + OFF_FC_CLIPMAX, &cmax, sizeof(cmax)) &&
+                                clip >= 0 && clip <= 9999 && cmax > 0 && cmax <= 9999 &&
+                                clip <= cmax) {
+                                ammo = clip;
+                                ammoMax = cmax;
+                            }
+                        }
+                    }
+                }
+            }
+            if (ammoMax <= 0) ads = 0;   /* ADS solo si el arma actual valido */
+        }
+
         /* --- v0.2.4: nombre real (entidad+0x160; string C#: len 1..63) --- */
         char nm[64] = { 0 };
         if (ent != 0) {
@@ -5913,6 +5038,11 @@ static void mm_esp_collect_real(void)
         nb.hpMax = hpMax;
         nb.robot = robot;
         nb.downed = downed;
+        nb.tags = (uint32_t)((healing ? 1u : 0u) | (invisible ? 2u : 0u) |
+                             (inVeh ? 4u : 0u) | (ads ? 8u : 0u));
+        nb.ammo = ammo;
+        nb.ammoMax = ammoMax;
+        nb.armor = armor;
         nb.alive = 1;
         nb.hasName = (nm[0] != 0) ? 1 : 0;
         memcpy(nb.name, nm, sizeof(nb.name));
@@ -6876,7 +6006,12 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
+    /* 2026-11: lecturas RE nuevas (team / estado / municion). Default OFF hasta
+       validar en device (docs/re-lecturas-1057.md). */
+    mm_cloud_row(c, @"Filtrar equipo", @"mm_x_team_filter", NO, 94.0, YES);
     mm_cloud_row(c, @"Ignorar caidos (aim)", @"mm_x_ignore_down", NO, 122.0, NO);
+    mm_cloud_row(c, @"Estado (cura/invisible/veh)", @"mm_x_state_tags", NO, 154.0, YES);
+    mm_cloud_row(c, @"Municion + ADS", @"mm_x_ammo", NO, 182.0, YES);
     [page addSubview:c];
 }
 
@@ -7345,6 +6480,7 @@ static void mm_build_ui(void)
         g_esp = [[MMCanvasView alloc] initWithFrame:CGRectZero];
         g_esp.backgroundColor = [UIColor clearColor];
         g_esp.opaque = NO;   /* v0.2.7: sin fondo opaco (evita restos/parpadeo) */
+        @try { [g_esp.layer setValue:@((1<<1)|(1<<4)) forKey:@"disableUpdateMask"]; } @catch (NSException *e) {}
         /* v0.7.0: el hitTest del lienzo solo acepta el rect de la lista. */
         g_esp.userInteractionEnabled = YES;
         UITapGestureRecognizer *tlt = [[UITapGestureRecognizer alloc]

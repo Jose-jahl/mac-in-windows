@@ -8,9 +8,19 @@ name: ModMenu
 # COMPLETO, el hash del workflow, el hash del fuente y el sha256 del binario.
 # `fusion build --fetch` lo cruza contra la API de GitHub y `fusion promote`
 # se niega a promover sin ese registro.
+#
+# 0.13 (ADR 0006 - Fase B): soporte OPCIONAL para linkear Dobby estatico.
+# Push normal a main compila sin Dobby (comportamiento igual a 0.12).
+# workflow_dispatch con enable_dobby=true clona + buildea + linkea Dobby
+# y define MM_USE_DOBBY=1 para activar el bloque de hooking en el fuente.
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_dobby:
+        description: 'Buildear Dobby static y linkear (gated por MM_USE_DOBBY)'
+        type: boolean
+        default: false
   push:
     branches: [ main, master ]
     paths:
@@ -25,20 +35,59 @@ jobs:
       - name: Descargar el codigo
         uses: actions/checkout@v4
 
+      - name: Clone + build Dobby (opcional, solo si enable_dobby=true)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.enable_dobby == 'true'
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/jmpews/Dobby.git vendor/dobby
+          cd vendor/dobby
+          mkdir -p build && cd build
+          # iOS arm64, static library.
+          cmake .. -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DDOBBY_BUILD_SHARED_LIBRARY=OFF \
+            -DDOBBY_BUILD_STATIC_LIBRARY=ON \
+            -DDOBBY_GENERATE_SYMBOLS=OFF
+          cmake --build . --config Release --target dobby_static
+          # Localizar el .a (Xcode genera en Release-iphoneos/)
+          find . -name 'libdobby.a' | head -1
+          echo "DOBBY_LIB=$(find "$(pwd)" -name 'libdobby.a' | head -1)" >> "$GITHUB_ENV"
+          echo "DOBBY_INC=${{ github.workspace }}/vendor/dobby/include" >> "$GITHUB_ENV"
+
       - name: Compilar ModMenu.dylib
         run: |
           set -e
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK: $SDK"
-          # -fobjc-arc es obligatorio: el fuente usa bloques y ARC.
-          # install_name = el del framework que reemplazamos: si algo mira la
-          # identidad del binario en runtime, ve la ruta que espera el juego.
+          # Flags base. -fobjc-arc obligatorio (ARC + bloques en el fuente).
+          # install_name = framework que reemplazamos (identidad en runtime).
+          EXTRA_INCS=""
+          EXTRA_LIBS=""
+          EXTRA_DEFS=""
+          if [ -n "$DOBBY_LIB" ] && [ -f "$DOBBY_LIB" ]; then
+            echo "Linkeando Dobby desde $DOBBY_LIB"
+            EXTRA_INCS="-I$DOBBY_INC"
+            EXTRA_LIBS="$DOBBY_LIB -lc++"
+            EXTRA_DEFS="-DMM_USE_DOBBY=1"
+          else
+            echo "Build sin Dobby (MM_USE_DOBBY no definido)"
+          fi
+          # -Oz: optimizar por tamano (el dylib viaja dentro del IPA).
+          # -Wl,-dead_strip: el linker tira el codigo muerto (probe BR, arrays
+          # del skeleton) en vez de dejarlo en __text.
           clang -dynamiclib \
                 -arch arm64 \
                 -isysroot "$SDK" \
                 -miphoneos-version-min=15.0 \
                 -fobjc-arc \
                 -Wall \
+                -Oz \
+                -Wl,-dead_strip \
+                $EXTRA_INCS \
+                $EXTRA_DEFS \
                 -install_name "@rpath/MSDKPolicy.framework/MSDKPolicy" \
                 -framework UIKit \
                 -framework Foundation \
@@ -46,7 +95,8 @@ jobs:
                 -framework CoreGraphics \
                 -framework Security \
                 -o ModMenu.dylib \
-                ModMenu/ModMenu.m
+                ModMenu/ModMenu.m \
+                $EXTRA_LIBS
           echo "compilado"
 
       - name: Verificar que es una dylib arm64 con constructor
