@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.1"
+#define MODMENU_VERSION     "0.9.2"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.1";
+const char *modmenu_build_id = "modmenu-glass-0.9.2";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -4084,10 +4084,10 @@ static void mm_esp_frame(double t)
         }
         s_lastT = t;
 
-        mm_aim_lock();                     /* 0.9.1: lock por frame */
         static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
+            mm_aim_lock();                  /* 0.9.2: lock a ~30 Hz, no por frame */
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
@@ -4593,7 +4593,14 @@ static void mm_aim_lock(void)
             g_fp_trpos == NULL || g_fp_maincam == NULL) return;
         if (g_box_count <= 0) return;
 
-        int kind = mm_local_weapon_kind();
+        static int s_kind = -1;
+        static double s_kind_t = 0.0;
+        double nowk = CACurrentMediaTime();
+        if (s_kind < 0 || (nowk - s_kind_t) > 0.75) {
+            s_kind = mm_local_weapon_kind();
+            s_kind_t = nowk;
+        }
+        int kind = s_kind;
         BOOL allow = (kind == 1) ? g_lock_rifle :
                      (kind == 2) ? g_lock_smg :
                      (kind == 3) ? g_lock_shotgun :
@@ -4654,8 +4661,14 @@ static void mm_aim_lock(void)
         float dot = s_q[0] * tq[0] + s_q[1] * tq[1] + s_q[2] * tq[2] + s_q[3] * tq[3];
         if (dot < 0.0f) { tq[0] = -tq[0]; tq[1] = -tq[1]; tq[2] = -tq[2]; tq[3] = -tq[3]; }
 
+        /* 0.9.2: si ya esta encima no se escribe (evita el tiron/pelea), y el
+           cambio por tick se limita a 12 grados para que no sea un snap brusco. */
+        float angRad = 2.0f * acosf(fminf(1.0f, fabsf(dot)));
+        float angDeg = angRad * 180.0f / (float)M_PI;
+        if (angDeg < 0.6f) return;
         float a = 1.0f - g_aim_smooth * 0.90f;
-        if (a < 0.06f) a = 0.06f;
+        if (a * angDeg > 12.0f) a = 12.0f / angDeg;
+        if (a < 0.05f) a = 0.05f;
         float q[4];
         for (int i = 0; i < 4; i++) q[i] = s_q[i] + (tq[i] - s_q[i]) * a;
         float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
@@ -4678,6 +4691,7 @@ static void mm_aim_lock(void)
 static void mm_reload_diag(void)
 {
     @try {
+        if (!mm_def_bool(@"mm_debug", NO)) return;   /* 0.9.2: sondas solo con debug */
         static double s_rd_last = 0.0;
         if (g_fp_localpawn == NULL) return;
         double now = CACurrentMediaTime();
@@ -4721,6 +4735,7 @@ static void mm_reload_diag(void)
 static void mm_esp_read_diag(void)
 {
     @try {
+        if (!mm_def_bool(@"mm_debug", NO)) return;   /* 0.9.2: sondas solo con debug */
         static double s_t = 0.0;
         const MMDrawOpts *o = mm_draw_opts();
         if (!o->teamFilter && !o->stateTags && !o->ammoTag) return;
@@ -4983,6 +4998,8 @@ static void mm_esp_collect_real(void)
     BOOL conSalud  = opts->health;   /* v0.2.4 */
     BOOL conJug    = opts->players;  /* v0.2.7: a fabrica */
     BOOL conBots   = opts->bots;     /* v0.2.7: a fabrica */
+    static int s_heavy = 0;
+    BOOL heavy = ((s_heavy++ & 7) == 0);   /* 0.9.2: cadena cara a ~3,75 Hz */
     int drawn = 0;
     MMEspBox nuevos[MM_MAX_BOXES];
     memset(nuevos, 0, sizeof(nuevos));
@@ -5057,7 +5074,7 @@ static void mm_esp_collect_real(void)
                 isfinite(rt) && rt > 0.5f) downed = 1;
             /* 2026-11: armadura cinetica (PlayerInfo 0x5C4/0x5C8). Fuera del
                bloque de arriba: solo se pide si el operador quiere etiquetas. */
-            if (opts->stateTags) {
+            if (heavy && opts->stateTags) {
                 uint32_t ar = 0, armax = 0;
                 if (mm_vm_read((uintptr_t)ent + OFF_ENT_ARMOR, &ar, sizeof(ar)) &&
                     mm_vm_read((uintptr_t)ent + OFF_ENT_ARMORMAX, &armax, sizeof(armax)) &&
@@ -5215,7 +5232,7 @@ static void mm_esp_collect_real(void)
            no cuadra se queda en "sin dato" y no se dibuja. --- */
         int ammo = -1, ammoMax = 0, ads = 0;
         int dInv = 0, dWep = 0, dFl = 0, dCnt = 0, dOwner = -1;
-        if (opts->ammoTag) {
+        if (heavy && opts->ammoTag) {
             uint64_t invm = 0, wep = 0;
             if (mm_r64((uintptr_t)pawn + OFF_PAWN_INVMGR, &invm) && invm != 0 &&
                 mm_r64((uintptr_t)invm + OFF_INVM_CURWEP, &wep) && wep != 0) {
@@ -5323,6 +5340,12 @@ static void mm_esp_collect_real(void)
            saltaban; cada pawn conserva su caja y se interpola suavemente. */
         for (int q = 0; q < g_box_count; q++) {
             if (g_boxes[q].pawn != pawn || !g_boxes[q].alive) continue;
+            if (!heavy) {   /* 0.9.2: conserva municion/armadura del pase anterior */
+                nb.ammo = g_boxes[q].ammo;
+                nb.ammoMax = g_boxes[q].ammoMax;
+                nb.armor = g_boxes[q].armor;
+                nb.tags = (uint32_t)((nb.tags & 8u) | (g_boxes[q].tags & 7u));
+            }
             nb.x = g_boxes[q].x * 0.55 + nb.x * 0.45;
             nb.y = g_boxes[q].y * 0.55 + nb.y * 0.45;
             nb.w = g_boxes[q].w * 0.55 + nb.w * 0.45;
