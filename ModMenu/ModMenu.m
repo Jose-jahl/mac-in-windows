@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.7"
+#define MODMENU_VERSION     "0.9.8"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.7";
+const char *modmenu_build_id = "modmenu-glass-0.9.8";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -755,8 +755,11 @@ static MMGetRotFn    g_fp_getrot   = NULL;
 /* 0.9.7: silent aim — Pawn.set_AimRotation(Quaternion) (HFA s0..s3). Es el mismo
    camino que usa el mod de referencia (SP3CTERIOS): no escribe el campo, llama
    al setter del juego. */
-typedef void (*MMSetAimRotFn)(void *pawn, float qx, float qy, float qz, float qw);
+typedef struct { float x, y, z, w; } MMQuat;
+typedef void   (*MMSetAimRotFn)(void *pawn, MMQuat q);
+typedef MMQuat (*MMGetAimRotFn)(void *pawn);
 static MMSetAimRotFn g_fp_setaimrot = NULL;
+static MMGetAimRotFn g_fp_getaimrot = NULL;
 #define MM_AIM_LOCK_UP 1.15f   /* metros sobre la posicion del pawn (pecho) */
 typedef float (*MMGetFovFn)(void *cam);
 static MMGetFovFn   g_fp_cam_getfov = NULL;   /* C-11 */
@@ -4687,13 +4690,21 @@ static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out
    REAL de la camara, se calcula el vector forward que produce, y se aplica la
    rotacion minima que lleva ese forward al objetivo. Es independiente de la
    convencion de ejes que use el motor. */
+/* 0.9.8: AIM LOCK igual que los mods de referencia (SP3CTERIOS y StarCodm).
+   StarCodm, desensamblado, hace literalmente:
+     q0 = getAimRotation(pawn)
+     dir = normalize(objetivo - posPawn)
+     from-to -> qTarget = qDelta * q0
+     slerp(q0, qTarget, aim_speed)
+     setAimRotation(pawn, q)
+   Nosotros hacemos lo mismo; la camara es opcional (apagada por defecto). */
 static void mm_aim_lock(void)
 {
     @try {
         if (!g_lock_on) return;
         if (g_panel_open || g_esp == nil || g_esp.hidden) return;
-        if (g_fp_gettrans == NULL || g_fp_setrot == NULL || g_fp_getrot == NULL ||
-            g_fp_trpos == NULL || g_fp_maincam == NULL) return;
+        if (g_fp_setaimrot == NULL || g_fp_getaimrot == NULL ||
+            g_fp_trpos == NULL || g_fp_localpawn == NULL) return;
         if (g_box_count <= 0) return;
 
         static int s_kind = -1;
@@ -4712,19 +4723,28 @@ static void mm_aim_lock(void)
         if (!allow) return;
         if (g_lock_ads && !mm_local_ads()) return;
 
-        void *cam = g_fp_maincam();
-        if (cam == NULL) return;
-        void *tr = g_fp_gettrans(cam);
-        if (tr == NULL) return;
-        float cp[3] = { 0.0f, 0.0f, 0.0f };
-        g_fp_trpos(tr, cp);
-        if (!isfinite(cp[0]) || !isfinite(cp[1]) || !isfinite(cp[2])) return;
+        void *lp = g_fp_localpawn();
+        if (lp == NULL) return;
 
-        float cq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        g_fp_getrot(tr, cq);
-        mm_q_norm(cq);
+        /* origen: posicion del pawn local (no la camara) */
+        float o[3] = { 0.0f, 0.0f, 0.0f };
+        uint64_t ptr = 0;
+        if (mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &ptr) && ptr != 0) {
+            g_fp_trpos((void *)(uintptr_t)ptr, o);
+        } else if (g_fp_maincam != NULL && g_fp_gettrans != NULL) {
+            void *cam = g_fp_maincam();
+            void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
+            if (ctr == NULL) return;
+            g_fp_trpos(ctr, o);
+        } else return;
+        if (!isfinite(o[0]) || !isfinite(o[1]) || !isfinite(o[2])) return;
+
+        /* base: rotacion de aim ACTUAL del pawn (lo que hace StarCodm) */
+        MMQuat bq = g_fp_getaimrot(lp);
+        float base[4] = { bq.x, bq.y, bq.z, bq.w };
+        mm_q_norm(base);
         float fwd[3];
-        { float f[3] = { 0.0f, 0.0f, 1.0f }; mm_q_rotate(cq, f, fwd); }
+        { float f[3] = { 0.0f, 0.0f, 1.0f }; mm_q_rotate(base, f, fwd); }
 
         float halfFov = g_aim_fov * 0.5f;
         if (halfFov < 6.0f) halfFov = 6.0f;
@@ -4738,7 +4758,7 @@ static void mm_aim_lock(void)
             float py = g_boxes[i].wy + g_aim_height;
             float pz = g_boxes[i].wz;
             if (g_lock_pred) {
-                float ddx = px - cp[0], ddy = py - cp[1], ddz = pz - cp[2];
+                float ddx = px - o[0], ddy = py - o[1], ddz = pz - o[2];
                 float dist0 = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
                 float spd = (kind == 4) ? 850.0f : (kind == 3) ? 420.0f : 780.0f;
                 float tof = dist0 / spd;
@@ -4748,32 +4768,30 @@ static void mm_aim_lock(void)
                     pz += g_boxes[i].vz * tof;
                 }
             }
-            float vx = px - cp[0], vy = py - cp[1], vz = pz - cp[2];
+            float vx = px - o[0], vy = py - o[1], vz = pz - o[2];
             float d2 = vx*vx + vy*vy + vz*vz;
             if (d2 < 4.0f) continue;
             float inv = 1.0f/sqrtf(d2);
             vx *= inv; vy *= inv; vz *= inv;
             float dot = fwd[0]*vx + fwd[1]*vy + fwd[2]*vz;
-            if (dot < 0.15f) continue;                 /* detras o muy al borde */
+            if (dot < 0.15f) continue;
             float ang = acosf(fminf(1.0f, dot)) * 180.0f / (float)M_PI;
             if (ang > halfFov) continue;
             if (ang < bestAng) { bestAng = ang; best = i; bpx = px; bpy = py; bpz = pz; }
         }
         if (best < 0) return;
 
-        float dv[3] = { bpx - cp[0], bpy - cp[1], bpz - cp[2] };
+        float dv[3] = { bpx - o[0], bpy - o[1], bpz - o[2] };
         float dl = sqrtf(dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2]);
         if (dl < 0.5f) return;
         dv[0] /= dl; dv[1] /= dl; dv[2] /= dl;
 
         float dot = fwd[0]*dv[0] + fwd[1]*dv[1] + fwd[2]*dv[2];
-        if (dot > 0.99999f) return;
         dot = fmaxf(-1.0f, fminf(1.0f, dot));
         float ang = acosf(dot);
         float angDeg = ang * 180.0f / (float)M_PI;
-        if (angDeg < 0.6f) return;                    /* ya encima */
+        if (angDeg < 0.35f) return;
 
-        /* eje = fwd x dv (si es degenerado, no hay rotacion unica: salir) */
         float ax[3] = {
             fwd[1]*dv[2] - fwd[2]*dv[1],
             fwd[2]*dv[0] - fwd[0]*dv[2],
@@ -4786,67 +4804,52 @@ static void mm_aim_lock(void)
         float sh = sinf(ang * 0.5f), ch = cosf(ang * 0.5f);
         float qd[4] = { ax[0]*sh, ax[1]*sh, ax[2]*sh, ch };
         float qtar[4];
-        mm_q_mul(qd, cq, qtar);          /* rotacion en espacio de mundo */
+        mm_q_mul(qd, base, qtar);
         mm_q_norm(qtar);
 
         float a = 1.0f - g_aim_smooth * 0.90f;
-        float maxDeg = 2.0f + (1.0f - g_aim_smooth) * 8.0f;
+        float maxDeg = 3.0f + (1.0f - g_aim_smooth) * 9.0f;
         if (a * angDeg > maxDeg) a = maxDeg / angDeg;
-        if (a < 0.04f) a = 0.04f;
+        if (a < 0.05f) a = 0.05f;
 
         float q[4];
-        mm_q_slerp(cq, qtar, a, q);
+        mm_q_slerp(base, qtar, a, q);
+        MMQuat out = { q[0], q[1], q[2], q[3] };
 
-        /* 0.9.7: dos vias de aplicacion.
-           - camara: rotacion del Transform (se ve en pantalla)
-           - silent: quaternion de aim del pawn local (la bala sale hacia ahi
-             aunque la camara no se mueva) */
-        if (g_lock_cam) g_fp_setrot(tr, q);
-        if (g_lock_silent && g_fp_localpawn != NULL) {
-            void *lp = g_fp_localpawn();
-            if (lp != NULL) {
-                if (g_fp_setaimrot != NULL) {
-                    /* mismo mecanismo que el mod de referencia: setter del juego */
-                    g_fp_setaimrot(lp, q[0], q[1], q[2], q[3]);
-                } else {
-                    mm_vm_write((uintptr_t)lp + OFF_PAWN_AIMROT, q, sizeof(q));
-                    mm_vm_write((uintptr_t)lp + OFF_PAWN_SIMAIMROT, q, sizeof(q));
-                }
-            }
+        /* silent aim: el camino del mod de referencia */
+        g_fp_setaimrot(lp, out);
+
+        /* opcional: mover tambien la camara */
+        if (g_lock_cam && g_fp_maincam != NULL && g_fp_gettrans != NULL && g_fp_setrot != NULL) {
+            void *cam = g_fp_maincam();
+            void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
+            if (ctr != NULL) g_fp_setrot(ctr, q);
         }
 
-        /* sonda 2 Hz: calculado, escrito, leido y si el juego lo PISO */
+        /* sonda 2 Hz */
         {
-            static float s_last[4] = { 0, 0, 0, 1 };
-            static int s_had = 0;
-            float persistDeg = -1.0f;
-            if (s_had) {
-                float d0 = fabsf(cq[0]*s_last[0] + cq[1]*s_last[1] + cq[2]*s_last[2] + cq[3]*s_last[3]);
-                persistDeg = 2.0f * acosf(fminf(1.0f, d0)) * 180.0f / (float)M_PI;
-            }
-            for (int i = 0; i < 4; i++) s_last[i] = q[i];
-            s_had = 1;
             static double s_lg = 0.0;
             double nowl = CACurrentMediaTime();
             if ((nowl - s_lg) > 0.5) {
                 s_lg = nowl;
-                float rq[4] = { 0, 0, 0, 1 };
-                g_fp_getrot(tr, rq);
+                MMQuat rb = g_fp_getaimrot(lp);
                 NSString *docs = mm_docs_dir();
                 if (docs.length > 0) {
                     NSString *t = [NSString stringWithFormat:
-                        @"build=%s\ncamPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
-                        @"fwd=%.3f,%.3f,%.3f\ndes=%.3f,%.3f,%.3f\ndot=%.4f angDeg=%.2f\n"
-                        @"q_before=%.4f,%.4f,%.4f,%.4f\nq_after=%.4f,%.4f,%.4f,%.4f\n"
-                        @"tipo=%d alpha=%.3f\npersistioDeg=%.3f (0 = el juego respeta el write)\n",
-                        MODMENU_VERSION, (double)cp[0], (double)cp[1], (double)cp[2],
+                        @"build=%s\npawnPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
+                        @"fwd=%.3f,%.3f,%.3f\ndes=%.3f,%.3f,%.3f\n"
+                        @"dot=%.4f angDeg=%.2f\n"
+                        @"q_base=%.4f,%.4f,%.4f,%.4f\nq_written=%.4f,%.4f,%.4f,%.4f\n"
+                        @"q_readback=%.4f,%.4f,%.4f,%.4f\ntipo=%d alpha=%.3f\n",
+                        MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2],
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
                         (double)dot, (double)angDeg,
-                        (double)cq[0], (double)cq[1], (double)cq[2], (double)cq[3],
-                        (double)rq[0], (double)rq[1], (double)rq[2], (double)rq[3],
-                        kind, (double)a, (double)persistDeg];
+                        (double)base[0], (double)base[1], (double)base[2], (double)base[3],
+                        (double)q[0], (double)q[1], (double)q[2], (double)q[3],
+                        (double)rb.x, (double)rb.y, (double)rb.z, (double)rb.w,
+                        kind, (double)a];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
                         atomically:YES encoding:NSUTF8StringEncoding error:NULL];
                 }
@@ -5023,6 +5026,7 @@ static void mm_game_resolve(void)
             g_fp_setrot    = (MMSetRotFn)(b + MM_GAME_DELTA(VA_SETROT));
             g_fp_getrot    = (MMGetRotFn)(b + MM_GAME_DELTA(VA_GETROT));
             g_fp_setaimrot = (MMSetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_SET));
+            g_fp_getaimrot = (MMGetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_GET));
             MM_LOG(@"%s aimrot setter=%p", MM_TAG, (void *)g_fp_setaimrot);
             g_fp_cam_setfov = mm_ptr_en_imagen((const void *)fp9, b) ? fp9 : NULL;
             g_fp_state     = 1;
