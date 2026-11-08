@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.6"
+#define MODMENU_VERSION     "0.9.7"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.6";
+const char *modmenu_build_id = "modmenu-glass-0.9.7";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -399,6 +399,8 @@ static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
 static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
+static BOOL g_lock_cam  = NO;    /* 0.9.7: mover la camara (OFF = silent puro) */
+static BOOL g_lock_silent = YES; /* 0.9.7: escribir la rotacion de aim del pawn */
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 1.15f;  /* 0.9.4: altura del punto de aim (m sobre el pawn) */
 static BOOL  g_aim_on = YES;
@@ -430,6 +432,8 @@ static void mm_lock_opts_sync(void)
     g_aim_height   = mm_def_float(@"mm_aim_height", 1.15f);
     g_lock_pred    = mm_def_bool(@"mm_lock_pred", YES);
     g_lock_ads     = mm_def_bool(@"mm_lock_ads", NO);
+    g_lock_cam     = mm_def_bool(@"mm_lock_cam", NO);
+    g_lock_silent  = mm_def_bool(@"mm_lock_silent", YES);
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -748,6 +752,11 @@ typedef void  (*MMGetRotFn)(void *transform, float q[4]);
 static MMCompTransFn g_fp_gettrans = NULL;
 static MMSetRotFn    g_fp_setrot   = NULL;
 static MMGetRotFn    g_fp_getrot   = NULL;
+/* 0.9.7: silent aim — Pawn.set_AimRotation(Quaternion) (HFA s0..s3). Es el mismo
+   camino que usa el mod de referencia (SP3CTERIOS): no escribe el campo, llama
+   al setter del juego. */
+typedef void (*MMSetAimRotFn)(void *pawn, float qx, float qy, float qz, float qw);
+static MMSetAimRotFn g_fp_setaimrot = NULL;
 #define MM_AIM_LOCK_UP 1.15f   /* metros sobre la posicion del pawn (pecho) */
 typedef float (*MMGetFovFn)(void *cam);
 static MMGetFovFn   g_fp_cam_getfov = NULL;   /* C-11 */
@@ -4550,6 +4559,15 @@ static BOOL mm_vm_read(uintptr_t addr, void *dst, size_t n)
     return (kr == KERN_SUCCESS && outsz == (vm_size_t)n);
 }
 
+/* 0.9.7: escritura de memoria (para el silent aim sobre el pawn). */
+static BOOL mm_vm_write(uintptr_t addr, const void *src, size_t n)
+{
+    /* vm_write esta en <mach/vm_map.h>; mach_vm.h no existe en el SDK de iOS. */
+    kern_return_t kr = vm_write(mach_task_self(), (vm_address_t)addr,
+                                (vm_offset_t)src, (mach_msg_type_number_t)n);
+    return kr == KERN_SUCCESS;
+}
+
 static BOOL mm_r64(uintptr_t addr, uint64_t *out)
 {
     BOOL ok = NO;
@@ -4778,10 +4796,36 @@ static void mm_aim_lock(void)
 
         float q[4];
         mm_q_slerp(cq, qtar, a, q);
-        g_fp_setrot(tr, q);
 
-        /* sonda 2 Hz: lo que se calculo y lo que quedo en la camara */
+        /* 0.9.7: dos vias de aplicacion.
+           - camara: rotacion del Transform (se ve en pantalla)
+           - silent: quaternion de aim del pawn local (la bala sale hacia ahi
+             aunque la camara no se mueva) */
+        if (g_lock_cam) g_fp_setrot(tr, q);
+        if (g_lock_silent && g_fp_localpawn != NULL) {
+            void *lp = g_fp_localpawn();
+            if (lp != NULL) {
+                if (g_fp_setaimrot != NULL) {
+                    /* mismo mecanismo que el mod de referencia: setter del juego */
+                    g_fp_setaimrot(lp, q[0], q[1], q[2], q[3]);
+                } else {
+                    mm_vm_write((uintptr_t)lp + OFF_PAWN_AIMROT, q, sizeof(q));
+                    mm_vm_write((uintptr_t)lp + OFF_PAWN_SIMAIMROT, q, sizeof(q));
+                }
+            }
+        }
+
+        /* sonda 2 Hz: calculado, escrito, leido y si el juego lo PISO */
         {
+            static float s_last[4] = { 0, 0, 0, 1 };
+            static int s_had = 0;
+            float persistDeg = -1.0f;
+            if (s_had) {
+                float d0 = fabsf(cq[0]*s_last[0] + cq[1]*s_last[1] + cq[2]*s_last[2] + cq[3]*s_last[3]);
+                persistDeg = 2.0f * acosf(fminf(1.0f, d0)) * 180.0f / (float)M_PI;
+            }
+            for (int i = 0; i < 4; i++) s_last[i] = q[i];
+            s_had = 1;
             static double s_lg = 0.0;
             double nowl = CACurrentMediaTime();
             if ((nowl - s_lg) > 0.5) {
@@ -4794,7 +4838,7 @@ static void mm_aim_lock(void)
                         @"build=%s\ncamPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
                         @"fwd=%.3f,%.3f,%.3f\ndes=%.3f,%.3f,%.3f\ndot=%.4f angDeg=%.2f\n"
                         @"q_before=%.4f,%.4f,%.4f,%.4f\nq_after=%.4f,%.4f,%.4f,%.4f\n"
-                        @"tipo=%d alpha=%.3f\n",
+                        @"tipo=%d alpha=%.3f\npersistioDeg=%.3f (0 = el juego respeta el write)\n",
                         MODMENU_VERSION, (double)cp[0], (double)cp[1], (double)cp[2],
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
@@ -4802,7 +4846,7 @@ static void mm_aim_lock(void)
                         (double)dot, (double)angDeg,
                         (double)cq[0], (double)cq[1], (double)cq[2], (double)cq[3],
                         (double)rq[0], (double)rq[1], (double)rq[2], (double)rq[3],
-                        kind, (double)a];
+                        kind, (double)a, (double)persistDeg];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
                         atomically:YES encoding:NSUTF8StringEncoding error:NULL];
                 }
@@ -4978,6 +5022,8 @@ static void mm_game_resolve(void)
             g_fp_gettrans  = (MMCompTransFn)(b + MM_GAME_DELTA(VA_GETTRANS));
             g_fp_setrot    = (MMSetRotFn)(b + MM_GAME_DELTA(VA_SETROT));
             g_fp_getrot    = (MMGetRotFn)(b + MM_GAME_DELTA(VA_GETROT));
+            g_fp_setaimrot = (MMSetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_SET));
+            MM_LOG(@"%s aimrot setter=%p", MM_TAG, (void *)g_fp_setaimrot);
             g_fp_cam_setfov = mm_ptr_en_imagen((const void *)fp9, b) ? fp9 : NULL;
             g_fp_state     = 1;
             MM_LOG(@"%s ESP cadena lista: base=0x%lX imagen=%d cam=%p gp=%p pawn=%p tr=%p cams=%p/%p hp=%s",
@@ -6378,11 +6424,8 @@ static void mm_cloud_build_aim(UIView *page)
                                    @selector(onAimHeight:), iw);
     ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 128.0, iw, 24.0);
     [a addSubview:ah];
-    UILabel *ahn = mm_cloud_caption(@"1.15 = pecho. Subi si apunta a los pies, baja si apunta alto.", iw);
-    ahn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 158.0, iw, 26.0);
-    ahn.numberOfLines = 2;
-    ahn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
-    [a addSubview:ahn];
+    mm_cloud_row(a, @"Mover camara", @"mm_lock_cam", NO, 156.0, NO);
+    mm_cloud_row(a, @"Silent aim (pawn)", @"mm_lock_silent", YES, 184.0, NO);
     [page addSubview:a];
 
     /* 2) ARMAS: con cuales actua el lock. */

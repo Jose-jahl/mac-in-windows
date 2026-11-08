@@ -3,7 +3,7 @@
  *  NO EDITAR A MANO: se regenera desde corpus/1.0.57/offsets.json
  *  (y anchors.resolved.json si se uso --from-resolved).
  *
- *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-07T17:06:02.504Z
+ *  Juego 1.0.57  ·  base 0x100000000  ·  build verificado modmenu-glass-0.3.5  ·  generado 2026-11-08T01:05:47.264Z
  * ========================================================================= */
 #ifndef FUSION_OFFSETS_GENERATED_H
 #define FUSION_OFFSETS_GENERATED_H
@@ -16,16 +16,18 @@
 #define FUSION_IMAGE_BASE       0x100000000ULL
 
 /* --- funciones del juego (VA absolutas) --- */
-#define VA_GAMEPLAY   0x1023DD388ULL  /* GetGameplayInstance */
-#define VA_LOCALPAWN  0x1023DE550ULL  /* getLocalPawn */
-#define VA_MAINCAM    0x108BDBE98ULL  /* Camera.get_main */
-#define VA_W2C_INJ    0x108BDABC0ULL  /* worldToCameraMatrix_Injected */
-#define VA_PROJ_INJ   0x108BDACF8ULL  /* projectionMatrix_Injected */
-#define VA_TRANSPOS   0x108C63B10ULL  /* Transform.get_position_Injected */
-#define VA_HEALTH     0x1018B5524ULL  /* GetHealth */
-#define VA_GETTRANS   0x108BE1F60ULL  /* Component.get_transform */
-#define VA_SETROT     0x108C6431CULL  /* Transform.INTERNAL_set_rotation */
-#define VA_GETROT     0x108C642ECULL  /* Transform.INTERNAL_get_rotation */
+#define VA_GAMEPLAY    0x1023DD388ULL  /* GetGameplayInstance */
+#define VA_LOCALPAWN   0x1023DE550ULL  /* getLocalPawn */
+#define VA_MAINCAM     0x108BDBE98ULL  /* Camera.get_main */
+#define VA_W2C_INJ     0x108BDABC0ULL  /* worldToCameraMatrix_Injected */
+#define VA_PROJ_INJ    0x108BDACF8ULL  /* projectionMatrix_Injected */
+#define VA_TRANSPOS    0x108C63B10ULL  /* Transform.get_position_Injected */
+#define VA_HEALTH      0x1018B5524ULL  /* GetHealth */
+#define VA_GETTRANS    0x108BE1F60ULL  /* Component.get_transform */
+#define VA_SETROT      0x108C6431CULL  /* Transform.INTERNAL_set_rotation */
+#define VA_GETROT      0x108C642ECULL  /* Transform.INTERNAL_get_rotation */
+#define VA_AIMROT_SET  0x1018B5634ULL  /* Pawn.set_AimRotation */
+#define VA_AIMROT_GET  0x1018B555CULL  /* Pawn.get_AimRotation */
 
 /* --- offsets de struct (pinned por version; validados en runtime) --- */
 #define OFF_GP_LIST         0x178  /* gameplay -> List<Pawn> */
@@ -67,6 +69,8 @@
 #define OFF_FC_OWNER        0x028  /* firecomp -> Pawn m_Owner */
 #define OFF_FC_CLIP         0x0A8  /* firecomp -> int m_ClipAmmoCount */
 #define OFF_FC_CLIPMAX      0x0E4  /* firecomp -> int m_MaxAmmoCount */
+#define OFF_PAWN_AIMROT     0x380  /* pawn -> Quaternion m_AimRotation */
+#define OFF_PAWN_SIMAIMROT  0x3C0  /* pawn -> Quaternion m_SimulatedAimRotation */
 
 /* --- BR / zona de radiacion (CANDIDATOS; requiere confirmar en device) --- */
 /* ver corpus/1.0.57/br_dump.md para contexto. Gated: #ifdef FUSION_BR_ENABLED */
