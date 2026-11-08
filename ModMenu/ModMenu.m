@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.9"
+#define MODMENU_VERSION     "0.10.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.9";
+const char *modmenu_build_id = "modmenu-glass-0.10.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -399,7 +399,6 @@ static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
 static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
-static BOOL g_lock_cam  = NO;    /* 0.9.7: mover la camara (OFF = silent puro) */
 static BOOL g_lock_silent = YES; /* 0.9.7: escribir la rotacion de aim del pawn */
 static BOOL g_lock_bone = NO;   /* 0.9.9: apuntar a la cabeza (ignora el slider) */
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
@@ -433,7 +432,6 @@ static void mm_lock_opts_sync(void)
     g_aim_height   = mm_def_float(@"mm_aim_height", 0.0f);
     g_lock_pred    = mm_def_bool(@"mm_lock_pred", YES);
     g_lock_ads     = mm_def_bool(@"mm_lock_ads", NO);
-    g_lock_cam     = mm_def_bool(@"mm_lock_cam", NO);
     g_lock_silent  = mm_def_bool(@"mm_lock_silent", YES);
     g_lock_bone    = mm_def_bool(@"mm_lock_bone", NO);
 }
@@ -4115,10 +4113,10 @@ static void mm_esp_frame(double t)
         }
         s_lastT = t;
 
+        mm_aim_lock();                     /* 0.10.0: cada frame (60 Hz) */
         static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
-            mm_aim_lock();                  /* 0.9.2: lock a ~30 Hz, no por frame */
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
@@ -4728,18 +4726,21 @@ static void mm_aim_lock(void)
         void *lp = g_fp_localpawn();
         if (lp == NULL) return;
 
-        /* origen: posicion del pawn local (no la camara) */
+        /* 0.10.0: origen = posicion de la CAMARA (es la que el ESP ya usa y
+           siempre lee bien). El pawn local devolvia (0,0,0) en BR, y desde el
+           origen del mundo el angulo sale basura -> la camara enloquecia. */
         float o[3] = { 0.0f, 0.0f, 0.0f };
-        uint64_t ptr = 0;
-        if (mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &ptr) && ptr != 0) {
-            g_fp_trpos((void *)(uintptr_t)ptr, o);
-        } else if (g_fp_maincam != NULL && g_fp_gettrans != NULL) {
+        BOOL haveO = NO;
+        if (g_fp_maincam != NULL && g_fp_gettrans != NULL) {
             void *cam = g_fp_maincam();
             void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
-            if (ctr == NULL) return;
-            g_fp_trpos(ctr, o);
-        } else return;
-        if (!isfinite(o[0]) || !isfinite(o[1]) || !isfinite(o[2])) return;
+            if (ctr != NULL && g_fp_trpos(ctr, o)) {
+                if (isfinite(o[0]) && isfinite(o[1]) && isfinite(o[2]) &&
+                    (fabsf(o[0]) + fabsf(o[1]) + fabsf(o[2])) > 1.0f)
+                    haveO = YES;
+            }
+        }
+        if (!haveO) return;   /* sin origen valido no se toca NADA */
 
         /* base: rotacion de aim ACTUAL del pawn (lo que hace StarCodm) */
         MMQuat bq = g_fp_getaimrot(lp);
@@ -4793,7 +4794,7 @@ static void mm_aim_lock(void)
         dot = fmaxf(-1.0f, fminf(1.0f, dot));
         float ang = acosf(dot);
         float angDeg = ang * 180.0f / (float)M_PI;
-        if (angDeg < 0.35f) return;
+        if (angDeg < 0.10f) return;
 
         float ax[3] = {
             fwd[1]*dv[2] - fwd[2]*dv[1],
@@ -4822,12 +4823,6 @@ static void mm_aim_lock(void)
         /* silent aim: el camino del mod de referencia */
         g_fp_setaimrot(lp, out);
 
-        /* opcional: mover tambien la camara */
-        if (g_lock_cam && g_fp_maincam != NULL && g_fp_gettrans != NULL && g_fp_setrot != NULL) {
-            void *cam = g_fp_maincam();
-            void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
-            if (ctr != NULL) g_fp_setrot(ctr, q);
-        }
 
         /* sonda 2 Hz */
         {
@@ -6421,36 +6416,30 @@ static void mm_cloud_build_aim(UIView *page)
 {
     CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
 
-    /* 1) AIMBOT: el lock (escribe la rotacion de la camara). */
+    /* 1) AIMBOT — tres switches y la altura. Nada mas. */
     UIView *a = mm_cloud_card(@"AIMBOT", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 30.0, NO);
-    mm_cloud_row(a, @"Predecir movimiento", @"mm_lock_pred", YES, 58.0, NO);
-    mm_cloud_row(a, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 86.0, NO);
-    mm_cloud_card_caption(a, @"Altura vs cabeza (m)", 116.0);
+    mm_cloud_row(a, @"Silent aim (pawn)", @"mm_lock_silent", YES, 58.0, NO);
+    mm_cloud_row(a, @"Predecir movimiento", @"mm_lock_pred", YES, 86.0, NO);
+    mm_cloud_row(a, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 114.0, NO);
+    mm_cloud_card_caption(a, @"Altura vs cabeza (m)", 144.0);
     UISlider *ah = mm_cloud_slider(-0.6f, 0.3f, g_aim_height, @"mm_aim_height",
                                    @selector(onAimHeight:), iw);
-    ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 128.0, iw, 24.0);
+    ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 156.0, iw, 24.0);
     [a addSubview:ah];
-    mm_cloud_row(a, @"Mover camara", @"mm_lock_cam", NO, 156.0, NO);
-    mm_cloud_row(a, @"Silent aim (pawn)", @"mm_lock_silent", YES, 184.0, NO);
     [page addSubview:a];
 
-    /* 2) ARMAS: con cuales actua el lock. */
+    /* 2) ARMAS — con cuales actua el lock. */
     UIView *b = mm_cloud_card(@"ARMAS", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(b, @"Fusil", @"mm_lock_rifle", YES, 30.0, NO);
     mm_cloud_row(b, @"Subfusil", @"mm_lock_smg", YES, 58.0, NO);
     mm_cloud_row(b, @"Escopeta", @"mm_lock_shotgun", YES, 86.0, NO);
     mm_cloud_row(b, @"Franco", @"mm_lock_sniper", YES, 114.0, NO);
-    mm_cloud_row(b, @"Auto bone (cabeza)", @"mm_lock_bone", NO, 150.0, NO);
-    UILabel *bn = mm_cloud_caption(@"Con Auto bone apunta a la cabeza; si no, usa el slider.", iw);
-    bn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 180.0, iw, 24.0);
-    bn.numberOfLines = 2;
-    bn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
-    [b addSubview:bn];
+    mm_cloud_row(b, @"Auto bone (cabeza)", @"mm_lock_bone", NO, 142.0, NO);
     [page addSubview:b];
 
-    /* 3) ASISTENCIA: la del propio juego (relay). El lock la desactiva mientras actua. */
+    /* 3) ASISTENCIA — la del juego. NO depende del lock. */
     UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Aimbot (asist)", @"mm_x_aim_on", YES, 30.0, NO);
@@ -6469,8 +6458,9 @@ static void mm_cloud_build_aim(UIView *page)
                                     @selector(onAimSmooth:), iw);
     as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 136.0, iw, 22.0);
     [c addSubview:as2];
-    UILabel *cn = mm_cloud_caption(@"El lock usa FOV y Suavizado.", iw);
-    cn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 164.0, iw, 20.0);
+    UILabel *cn = mm_cloud_caption(@"El lock usa FOV y Suavizado. El asist va siempre.", iw);
+    cn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 166.0, iw, 20.0);
+    cn.numberOfLines = 2;
     cn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
     [c addSubview:cn];
     [page addSubview:c];
