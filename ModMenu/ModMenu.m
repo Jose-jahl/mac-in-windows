@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.10.0"
+#define MODMENU_VERSION     "0.10.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.10.0";
+const char *modmenu_build_id = "modmenu-glass-0.10.1";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -1074,6 +1074,7 @@ typedef struct {
     BOOL teamFilter;                    /* 2026-11: no dibujar al propio equipo */
     BOOL stateTags;                     /* 2026-11: curando / invisible / vehiculo */
     BOOL ammoTag;                       /* 2026-11: municion + ADS del enemigo */
+    BOOL skelLine;                      /* 0.10.1: esqueleto ligero (caja) */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -1118,6 +1119,7 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->teamFilter = mm_def_bool(@"mm_x_team_filter", NO);
     o->stateTags  = mm_def_bool(@"mm_x_state_tags", NO);
     o->ammoTag    = mm_def_bool(@"mm_x_ammo", NO);
+    o->skelLine   = mm_def_bool(@"mm_x_skel", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
@@ -2293,6 +2295,7 @@ static int mm_declutter_budget(void)
     /* Fase 1: brujula, estelas y anti-solape (cero lecturas nuevas). */
     BOOL conBearings = o->bearings;
     BOOL conTrails   = o->trails;
+    BOOL conSkel = o->skelLine;   /* 0.10.1: esqueleto */
     BOOL conDeclutter = o->declutter;
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
@@ -2510,6 +2513,58 @@ static int mm_declutter_budget(void)
             if (drawH) {
                 [hhs drawAtPoint:CGPointMake(hx, hy) withAttributes:hha];
                 drewLabel = YES;
+            }
+        }
+
+        /* 0.10.1: ESQUELETO LIGERO (cabeza / pecho / caderas).
+           No lee memoria extra: usa la MISMA caja proyectada del enemigo.
+           Tres puntos sobre el eje vertical + hombros y cadera. */
+        if (conSkel) {
+            CGFloat top = r.origin.y;
+            CGFloat bot = CGRectGetMaxY(r);
+            CGFloat hgt = bot - top;
+            if (hgt > 12.0) {
+                CGFloat cx = CGRectGetMidX(r);
+                CGFloat hw = r.size.width;
+                if (hw < 6.0) hw = 6.0;
+                CGPoint pHead   = CGPointMake(cx, top + hgt * 0.08);
+                CGPoint pNeck   = CGPointMake(cx, top + hgt * 0.16);
+                CGPoint pChest  = CGPointMake(cx, top + hgt * 0.32);
+                CGPoint pHip    = CGPointMake(cx, top + hgt * 0.56);
+                CGFloat shW = hw * 0.55, hipW = hw * 0.40;
+
+                CGContextSetLineWidth(ctx, 1.4);
+                CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.45);
+                CGContextBeginPath(ctx);
+                CGContextMoveToPoint(ctx, pHead.x, pHead.y);
+                CGContextAddLineToPoint(ctx, pHip.x, pHip.y);
+                CGContextMoveToPoint(ctx, pChest.x - shW, pChest.y);
+                CGContextAddLineToPoint(ctx, pChest.x + shW, pChest.y);
+                CGContextMoveToPoint(ctx, pHip.x - hipW, pHip.y);
+                CGContextAddLineToPoint(ctx, pHip.x + hipW, pHip.y);
+                CGContextStrokePath(ctx);
+
+                CGContextSetLineWidth(ctx, 0.9);
+                CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.92);
+                CGContextBeginPath(ctx);
+                CGContextMoveToPoint(ctx, pHead.x, pHead.y);
+                CGContextAddLineToPoint(ctx, pNeck.x, pNeck.y);
+                CGContextAddLineToPoint(ctx, pChest.x, pChest.y);
+                CGContextMoveToPoint(ctx, pChest.x - shW, pChest.y);
+                CGContextAddLineToPoint(ctx, pChest.x + shW, pChest.y);
+                CGContextMoveToPoint(ctx, pChest.x, pChest.y);
+                CGContextAddLineToPoint(ctx, pHip.x, pHip.y);
+                CGContextMoveToPoint(ctx, pHip.x - hipW, pHip.y);
+                CGContextAddLineToPoint(ctx, pHip.x + hipW, pHip.y);
+                CGContextStrokePath(ctx);
+
+                /* cabeza: punto lleno */
+                CGFloat hr = hw * 0.13;
+                if (hr < 1.4) hr = 1.4;
+                if (hr > 4.0) hr = 4.0;
+                CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.95);
+                CGContextFillEllipseInRect(ctx,
+                    CGRectMake(pHead.x - hr, pHead.y - hr, hr * 2.0, hr * 2.0));
             }
         }
 
@@ -6372,6 +6427,7 @@ static void mm_cloud_build_combat(UIView *page)
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
+    mm_cloud_row(b, @"Esqueleto (linea)", @"mm_x_skel", NO, 150.0, YES);
     [page addSubview:b];
 
     /* Alcance y features fijas del binario. */
