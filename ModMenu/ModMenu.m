@@ -731,6 +731,7 @@ typedef struct {
     uint64_t parItems;  /* int[]         */
     int      parN;
 } MMSkelSlot;
+static BOOL mm_r64(uintptr_t addr, uint64_t *out);   /* forward 0.12.0 */
 static BOOL mm_skel_resolve(uint64_t pawn);
 static MMSkelSlot *mm_skel_get(uint64_t pawn);
 
