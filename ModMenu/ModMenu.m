@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.13.0"
+#define MODMENU_VERSION     "0.13.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.13.0";
+const char *modmenu_build_id = "modmenu-glass-0.13.1";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -769,6 +769,11 @@ static volatile int g_lock_active = 0;
 static volatile long g_lock_calls = 0;   /* 0.13.0: prueba de que el detour corre */
 static volatile uint64_t g_lock_pawn = 0;
 
+static void   mm_patch_install(void);
+static void   mm_patch_remove(void);
+static volatile int g_patch_on = 0;
+static uint32_t     g_patch_orig[4];
+static void        *g_patch_addr = NULL;
 static MMQuat mm_getaimrot_detour(void *pawn);
 static BOOL   mm_patch_jump(void *fn, void *dest);
 #define MM_AIM_LOCK_UP 1.15f   /* metros sobre la posicion del pawn (pecho) */
@@ -3031,6 +3036,10 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
+    if ([k isEqualToString:@"mm_x_aimlock"]) {   /* 0.13.1 */
+        g_lock_on = s.on;
+        if (s.on) mm_patch_install(); else mm_patch_remove();
+    }
     if ([k isEqualToString:@"mm_x_aimlock"] || [k hasPrefix:@"mm_lock_"]) mm_lock_opts_sync();
     if ([k isEqualToString:@"mm_x_fast_reload"]) mm_reload_apply();   /* C-18 */
     if ([k isEqualToString:@"mm_x_aim_key"]) {
@@ -4716,6 +4725,42 @@ static MMQuat mm_getaimrot_detour(void *pawn)
     return v;
 }
 
+/* 0.13.1: instala el detour solo cuando el lock esta encendido y lo restaura
+   al apagarlo. Con el lock OFF el juego corre con sus bytes originales. */
+static void mm_patch_install(void)
+{
+    if (g_patch_on) return;
+    uintptr_t base = (uintptr_t)_dyld_get_image_header(0);
+    if (base == 0) return;
+    void *fn = (void *)(base + MM_GAME_DELTA(VA_AIMROT_GET));
+    if (fn == NULL) return;
+    memcpy(g_patch_orig, fn, sizeof(g_patch_orig));
+    if (!mm_patch_jump(fn, (void *)mm_getaimrot_detour)) {
+        MM_LOG(@"%s aimlock detour FALLO", MM_TAG);
+        return;
+    }
+    g_patch_addr = fn;
+    g_patch_on = 1;
+    MM_LOG(@"%s aimlock detour instalado", MM_TAG);
+}
+
+static void mm_patch_remove(void)
+{
+    if (!g_patch_on || g_patch_addr == NULL) return;
+    uintptr_t page = (uintptr_t)g_patch_addr & ~(uintptr_t)0x3FFF;
+    if (vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
+                   FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
+        memcpy(g_patch_addr, g_patch_orig, sizeof(g_patch_orig));
+        sys_icache_invalidate(g_patch_addr, sizeof(g_patch_orig));
+        vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
+                   FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    }
+    g_patch_on = 0;
+    g_patch_addr = NULL;
+    g_lock_active = 0;
+    MM_LOG(@"%s aimlock detour quitado", MM_TAG);
+}
+
 /* 0.13.0: escribe un salto absoluto en la entrada de una funcion del juego.
    ldr x16,#8 ; br x16 ; <direccion de 8 bytes>. Requiere pagina privada (COW). */
 static BOOL mm_patch_jump(void *fn, void *dest)
@@ -4864,13 +4909,13 @@ static void mm_aim_lock(void)
                         @"build=%s\nmodo=detour-getAimRotation\n"
                         @"camPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
                         @"fwd=%.3f,%.3f,%.3f des=%.3f,%.3f,%.3f\n"
-                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d llamadasGetter=%ld\n"
+                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d llamadasGetter=%ld patch=%d\n"
                         @"q_base=%.4f,%.4f,%.4f,%.4f\nq_lock=%.4f,%.4f,%.4f,%.4f\n",
                         MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2],
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
-                        (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_calls,
+                        (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_calls, (int)g_patch_on,
                         (double)base[0], (double)base[1], (double)base[2], (double)base[3],
                         (double)q[0], (double)q[1], (double)q[2], (double)q[3]];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
@@ -5050,15 +5095,6 @@ static void mm_game_resolve(void)
             g_fp_getrot    = (MMGetRotFn)(b + MM_GAME_DELTA(VA_GETROT));
             g_fp_setaimrot = (MMSetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_SET));
             g_fp_getaimrot = (MMGetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_GET));
-            /* 0.13.0: el lock vive aca — se reemplaza el getter del juego. */
-            {
-                static BOOL s_patched = NO;
-                if (!s_patched) {
-                    void *fn = (void *)(b + MM_GAME_DELTA(VA_AIMROT_GET));
-                    s_patched = mm_patch_jump(fn, (void *)mm_getaimrot_detour);
-                    MM_LOG(@"%s aimlock detour %s", MM_TAG, s_patched ? "OK" : "FALLO");
-                }
-            }
             MM_LOG(@"%s aimrot setter=%p", MM_TAG, (void *)g_fp_setaimrot);
             g_fp_cam_setfov = mm_ptr_en_imagen((const void *)fp9, b) ? fp9 : NULL;
             g_fp_state     = 1;
