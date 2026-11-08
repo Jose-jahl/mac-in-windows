@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.11.0"
+#define MODMENU_VERSION     "0.12.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.11.0";
+const char *modmenu_build_id = "modmenu-glass-0.12.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -722,6 +722,18 @@ typedef struct {
     float   vx, vy, vz;         /* 0.9.3: velocidad estimada (m/s) para prediccion */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
 } MMEspBox;
+/* 0.12.0: esqueleto real (definido aca porque lo usa el dibujo, que va antes) */
+#define MM_SKEL_SLOTS 24
+typedef struct {
+    uint64_t pawn;
+    uint64_t items;     /* Transform*[]  */
+    int      n;
+    uint64_t parItems;  /* int[]         */
+    int      parN;
+} MMSkelSlot;
+static BOOL mm_skel_resolve(uint64_t pawn);
+static MMSkelSlot *mm_skel_get(uint64_t pawn);
+
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
 
@@ -754,6 +766,15 @@ typedef void  (*MMGetRotFn)(void *transform, float q[4]);
 static MMCompTransFn g_fp_gettrans = NULL;
 static MMSetRotFn    g_fp_setrot   = NULL;
 static MMGetRotFn    g_fp_getrot   = NULL;
+/* 0.12.0: esqueleto REAL. AnimationPostProcessor (MonoBehaviour) tiene
+   `Bones` (List<Transform>) en +0x28 con la jerarquia en AnimationSkeleton
+   (AvatarRoot 0x10, Bones 0x18, ParentIndex 0x20). Para llegar hay que pedir el
+   componente por nombre: se fabrica un Il2CppString falso copiando la klass de
+   un string real (Object.get_name). */
+typedef void *(*MMGetGObjFn)(void *comp);
+typedef void *(*MMGetCompStrFn)(void *go, void *csString);
+static MMGetGObjFn    g_fp_getgo   = NULL;
+static MMGetCompStrFn g_fp_getcname = NULL;
 /* 0.9.7: silent aim — Pawn.set_AimRotation(Quaternion) (HFA s0..s3). Es el mismo
    camino que usa el mod de referencia (SP3CTERIOS): no escribe el campo, llama
    al setter del juego. */
@@ -1023,6 +1044,97 @@ static void mm_profile_export(void);
 static void mm_profile_import(void);
 static BOOL mm_place_ui(void);
 static void mm_esp_collect_real(void);
+/* ===== 0.12.0: resolutor del esqueleto real =============================== */
+static MMSkelSlot g_skel[MM_SKEL_SLOTS];
+static int        g_skel_rr = 0;
+
+static BOOL mm_ptr_ok(const void *p)
+{
+    uintptr_t v = (uintptr_t)p;
+    if (v < 0x100000000ULL || v > 0x4000000000ULL) return NO;
+    if ((v & 7) != 0) return NO;
+    return YES;
+}
+
+/* Il2CppString falso: [klass][monitor][len][utf16 chars]. Memoria fuera del GC
+   (malloc) para que Boehm no lo escanee; el juego solo lo lee durante la llamada. */
+static void *mm_fake_csstr(const char *utf8, void *klass)
+{
+    size_t n = strlen(utf8);
+    uint8_t *m = (uint8_t *)malloc(0x14 + (n + 1) * 2);
+    if (m == NULL) return NULL;
+    *(void **)(m + 0x00) = klass;
+    *(void **)(m + 0x08) = NULL;
+    *(int32_t *)(m + 0x10) = (int32_t)n;
+    uint16_t *ch = (uint16_t *)(m + 0x14);
+    for (size_t i = 0; i < n; i++) ch[i] = (uint16_t)(uint8_t)utf8[i];
+    ch[n] = 0;
+    return m;
+}
+
+/* resuelve (una vez por pawn) la lista de huesos; NO llama nada si ya esta */
+static BOOL mm_skel_resolve(uint64_t pawn)
+{
+    if (pawn == 0) return NO;
+    if (g_fp_getgo == NULL || g_fp_getcname == NULL || g_fp_getname == NULL) return NO;
+    if (g_fp_trpos == NULL) return NO;
+
+    uint64_t tr = 0;
+    if (!mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &tr) || tr == 0) return NO;
+    void *headTr = (void *)(uintptr_t)tr;
+
+    void *go = g_fp_getgo(headTr);
+    if (!mm_ptr_ok(go)) return NO;
+
+    void *nm = g_fp_getname(headTr);       /* Il2CppString* */
+    if (!mm_ptr_ok(nm)) return NO;
+    uint64_t klass = 0;
+    if (!mm_r64((uintptr_t)nm, &klass) || klass == 0) return NO;
+
+    void *fake = mm_fake_csstr("AnimationPostProcessor", (void *)(uintptr_t)klass);
+    if (fake == NULL) return NO;
+    void *comp = g_fp_getcname(go, fake);
+    free(fake);
+    if (!mm_ptr_ok(comp)) return NO;
+
+    uint64_t skel = 0;
+    if (!mm_r64((uintptr_t)comp + 0x28, &skel) || skel == 0) return NO;
+    uint64_t bonesList = 0, parList = 0, items = 0, sz64 = 0;
+    if (!mm_r64((uintptr_t)skel + 0x18, &bonesList) || bonesList == 0) return NO;
+    mm_r64((uintptr_t)skel + 0x20, &parList);
+    if (!mm_r64((uintptr_t)bonesList + 0x10, &items) || items == 0) return NO;
+    if (!mm_r64((uintptr_t)bonesList + 0x18, &sz64)) return NO;
+    int n = (int)(sz64 & 0xFFFFFFFF);
+    if (n < 2 || n > 220) return NO;
+    int parN = 0; uint64_t parItems = 0;
+    if (parList != 0) {
+        uint64_t ps = 0;
+        mm_r64((uintptr_t)parList + 0x10, &parItems);
+        if (mm_r64((uintptr_t)parList + 0x18, &ps)) parN = (int)(ps & 0xFFFFFFFF);
+    }
+    if (!mm_ptr_ok((void *)(uintptr_t)items)) return NO;
+
+    /* guardar en cache (reemplaza el slot de este pawn o usa round-robin) */
+    int slot = -1;
+    for (int i = 0; i < MM_SKEL_SLOTS; i++) if (g_skel[i].pawn == pawn) { slot = i; break; }
+    if (slot < 0) {
+        for (int i = 0; i < MM_SKEL_SLOTS; i++) if (g_skel[i].pawn == 0) { slot = i; break; }
+    }
+    if (slot < 0) { slot = g_skel_rr; g_skel_rr = (g_skel_rr + 1) % MM_SKEL_SLOTS; }
+    g_skel[slot].pawn = pawn;
+    g_skel[slot].items = items;
+    g_skel[slot].n = n;
+    g_skel[slot].parItems = parItems;
+    g_skel[slot].parN = parN;
+    return YES;
+}
+
+static MMSkelSlot *mm_skel_get(uint64_t pawn)
+{
+    for (int i = 0; i < MM_SKEL_SLOTS; i++) if (g_skel[i].pawn == pawn) return &g_skel[i];
+    return NULL;
+}
+
 static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
@@ -2518,77 +2630,108 @@ static int mm_declutter_budget(void)
             }
         }
 
-        /* 0.10.3: ESQUELETO HUMANO (cabeza, brazos y piernas).
-           Se calcula desde la MISMA caja proyectada: cero lecturas extra.
-           Proporciones de figura humana para que se lea como una persona. */
+        /* 0.12.0: ESQUELETO REAL (huesos de AnimationPostProcessor).
+           Si el resolutor todavia no tiene este pawn, cae a la figura geometrica
+           de la caja para no dejar el enemigo sin marcar. */
         if (conSkel) {
-            CGFloat top = r.origin.y;
-            CGFloat bot = CGRectGetMaxY(r);
-            CGFloat hgt = bot - top;
-            CGFloat wdt = r.size.width;
-            if (wdt < 8.0) wdt = 8.0;
-            if (hgt > 14.0) {
-                CGFloat cx = CGRectGetMidX(r);
-                CGFloat P[9][2] = {
-                    { cx,                  top + hgt * 0.150 },  /* 0 cuello     */
-                    { cx,                  top + hgt * 0.215 },  /* 1 pecho      */
-                    { cx,                  top + hgt * 0.520 },  /* 2 cadera     */
-                    { cx - wdt * 0.30,     top + hgt * 0.200 },  /* 3 hombro izq */
-                    { cx + wdt * 0.30,     top + hgt * 0.200 },  /* 4 hombro der */
-                    { cx - wdt * 0.38,     top + hgt * 0.460 },  /* 5 mano izq   */
-                    { cx + wdt * 0.38,     top + hgt * 0.460 },  /* 6 mano der   */
-                    { cx - wdt * 0.15,     bot },                /* 7 pie izq    */
-                    { cx + wdt * 0.15,     bot }                 /* 8 pie der    */
-                };
-                CGPoint headC = CGPointMake(cx, top + hgt * 0.085);
-                CGFloat headR = wdt * 0.115;
-                if (headR < 1.8) headR = 1.8;
-                if (headR > 6.0) headR = 6.0;
-
-                /* dos pasadas: contorno negro y luego color */
-                for (int pass = 0; pass < 2; pass++) {
-                    BOOL outline = (pass == 0);
-                    if (outline) {
-                        CGContextSetLineWidth(ctx, 2.4);
-                        CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
-                    } else {
-                        CGContextSetLineWidth(ctx, 1.1);
-                        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+            MMSkelSlot *sk = mm_skel_get(b->pawn);
+            if (sk == NULL && b->dist < 90.0f) {
+                static int s_try = 0;
+                if ((s_try % 15) == 0 && mm_skel_resolve(b->pawn)) sk = mm_skel_get(b->pawn);
+                s_try++;
+            }
+            BOOL drewReal = NO;
+            if (sk != NULL && sk->n >= 2 && b->dist < 120.0f) {
+                int nb = sk->n > 48 ? 48 : sk->n;
+                CGPoint pt[48];
+                BOOL okp[48];
+                int par[48];
+                CGFloat W2 = bs.size.width, H2 = bs.size.height;
+                int validos = 0;
+                for (int i = 0; i < nb; i++) {
+                    uint64_t bt = 0;
+                    okp[i] = NO; par[i] = -1;
+                    if (!mm_r64((uintptr_t)sk->items + (uintptr_t)(i * 8), &bt) || bt == 0) continue;
+                    float p[3] = { 0.0f, 0.0f, 0.0f };
+                    g_fp_trpos((void *)(uintptr_t)bt, p);
+                    CGPoint sp = CGPointZero;
+                    if (!mm_w2s(g_view_mtx, g_proj_mtx, p, NO, W2, H2, &sp, NULL, NULL, NULL)) continue;
+                    pt[i] = sp; okp[i] = YES; validos++;
+                    if (sk->parItems != 0 && i < sk->parN) {
+                        uint64_t pv = 0;
+                        if (mm_r64((uintptr_t)sk->parItems + (uintptr_t)(i * 4), &pv))
+                            par[i] = (int)(pv & 0xFFFFFFFF);
                     }
-                    CGContextBeginPath(ctx);
-                    /* cuello -> cadera (tronco) */
-                    CGContextMoveToPoint(ctx, P[0][0], P[0][1]);
-                    CGContextAddLineToPoint(ctx, P[2][0], P[2][1]);
-                    /* hombros */
-                    CGContextMoveToPoint(ctx, P[3][0], P[3][1]);
-                    CGContextAddLineToPoint(ctx, P[4][0], P[4][1]);
-                    /* brazos (hombro -> codo -> mano) */
+                }
+                if (validos >= 3) {
+                    drewReal = YES;
+                    for (int pass = 0; pass < 2; pass++) {
+                        if (pass == 0) {
+                            CGContextSetLineWidth(ctx, 2.3);
+                            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.5);
+                        } else {
+                            CGContextSetLineWidth(ctx, 1.0);
+                            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+                        }
+                        CGContextBeginPath(ctx);
+                        for (int i = 0; i < nb; i++) {
+                            if (!okp[i]) continue;
+                            int pi = par[i];
+                            if (pi < 0 || pi >= nb || pi == i || !okp[pi]) continue;
+                            CGContextMoveToPoint(ctx, pt[pi].x, pt[pi].y);
+                            CGContextAddLineToPoint(ctx, pt[i].x, pt[i].y);
+                        }
+                        CGContextStrokePath(ctx);
+                    }
+                    /* punto en la cabeza (indice 0 suele ser la raiz) */
+                    if (okp[0]) {
+                        CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.95);
+                        CGContextFillEllipseInRect(ctx, CGRectMake(pt[0].x - 1.6, pt[0].y - 1.6, 3.2, 3.2));
+                    }
+                }
+            }
+            if (!drewReal) {
+                /* fallback geometrico (0.10.3) */
+                CGFloat top = r.origin.y;
+                CGFloat bot = CGRectGetMaxY(r);
+                CGFloat hgt = bot - top;
+                CGFloat wdt = r.size.width;
+                if (wdt < 8.0) wdt = 8.0;
+                if (hgt > 14.0) {
+                    CGFloat cx = CGRectGetMidX(r);
+                    CGPoint headC = CGPointMake(cx, top + hgt * 0.085);
+                    CGFloat headR = wdt * 0.115;
+                    if (headR < 1.8) headR = 1.8;
+                    if (headR > 6.0) headR = 6.0;
                     CGFloat elbowY = top + hgt * 0.335;
-                    CGContextMoveToPoint(ctx, P[3][0], P[3][1]);
-                    CGContextAddLineToPoint(ctx, cx - wdt * 0.34, elbowY);
-                    CGContextAddLineToPoint(ctx, P[5][0], P[5][1]);
-                    CGContextMoveToPoint(ctx, P[4][0], P[4][1]);
-                    CGContextAddLineToPoint(ctx, cx + wdt * 0.34, elbowY);
-                    CGContextAddLineToPoint(ctx, P[6][0], P[6][1]);
-                    /* piernas (cadera -> rodilla -> pie) */
                     CGFloat kneeY = top + hgt * 0.760;
-                    CGContextMoveToPoint(ctx, P[2][0], P[2][1]);
-                    CGContextAddLineToPoint(ctx, cx - wdt * 0.16, kneeY);
-                    CGContextAddLineToPoint(ctx, P[7][0], P[7][1]);
-                    CGContextMoveToPoint(ctx, P[2][0], P[2][1]);
-                    CGContextAddLineToPoint(ctx, cx + wdt * 0.16, kneeY);
-                    CGContextAddLineToPoint(ctx, P[8][0], P[8][1]);
-                    CGContextStrokePath(ctx);
-
-                    /* cabeza */
-                    if (outline) {
-                        CGContextSetLineWidth(ctx, 2.4);
-                        CGContextStrokeEllipseInRect(ctx,
-                            CGRectMake(headC.x - headR, headC.y - headR, headR * 2.0, headR * 2.0));
-                    } else {
-                        CGContextSetLineWidth(ctx, 1.1);
-                        CGContextStrokeEllipseInRect(ctx,
-                            CGRectMake(headC.x - headR, headC.y - headR, headR * 2.0, headR * 2.0));
+                    for (int pass = 0; pass < 2; pass++) {
+                        if (pass == 0) {
+                            CGContextSetLineWidth(ctx, 2.4);
+                            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
+                        } else {
+                            CGContextSetLineWidth(ctx, 1.1);
+                            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+                        }
+                        CGContextBeginPath(ctx);
+                        CGContextMoveToPoint(ctx, cx, top + hgt * 0.150);
+                        CGContextAddLineToPoint(ctx, cx, top + hgt * 0.520);
+                        CGContextMoveToPoint(ctx, cx - wdt * 0.30, top + hgt * 0.200);
+                        CGContextAddLineToPoint(ctx, cx + wdt * 0.30, top + hgt * 0.200);
+                        CGContextMoveToPoint(ctx, cx - wdt * 0.30, top + hgt * 0.200);
+                        CGContextAddLineToPoint(ctx, cx - wdt * 0.34, elbowY);
+                        CGContextAddLineToPoint(ctx, cx - wdt * 0.38, top + hgt * 0.460);
+                        CGContextMoveToPoint(ctx, cx + wdt * 0.30, top + hgt * 0.200);
+                        CGContextAddLineToPoint(ctx, cx + wdt * 0.34, elbowY);
+                        CGContextAddLineToPoint(ctx, cx + wdt * 0.38, top + hgt * 0.460);
+                        CGContextMoveToPoint(ctx, cx, top + hgt * 0.520);
+                        CGContextAddLineToPoint(ctx, cx - wdt * 0.16, kneeY);
+                        CGContextAddLineToPoint(ctx, cx - wdt * 0.15, bot);
+                        CGContextMoveToPoint(ctx, cx, top + hgt * 0.520);
+                        CGContextAddLineToPoint(ctx, cx + wdt * 0.16, kneeY);
+                        CGContextAddLineToPoint(ctx, cx + wdt * 0.15, bot);
+                        CGContextStrokePath(ctx);
+                        CGContextStrokeEllipseInRect(ctx, CGRectMake(headC.x - headR, headC.y - headR, headR * 2.0, headR * 2.0));
                     }
                 }
             }
@@ -5128,6 +5271,8 @@ static void mm_game_resolve(void)
             g_fp_getrot    = (MMGetRotFn)(b + MM_GAME_DELTA(VA_GETROT));
             g_fp_setaimrot = (MMSetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_SET));
             g_fp_getaimrot = (MMGetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_GET));
+            g_fp_getgo     = (MMGetGObjFn)(b + MM_GAME_DELTA(VA_GET_GAMEOBJECT));
+            g_fp_getcname  = (MMGetCompStrFn)(b + MM_GAME_DELTA(VA_GETCOMP_BYNAME));
             MM_LOG(@"%s aimrot setter=%p", MM_TAG, (void *)g_fp_setaimrot);
             g_fp_cam_setfov = mm_ptr_en_imagen((const void *)fp9, b) ? fp9 : NULL;
             g_fp_state     = 1;
