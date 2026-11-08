@@ -4734,7 +4734,8 @@ static void mm_aim_lock(void)
         if (g_fp_maincam != NULL && g_fp_gettrans != NULL) {
             void *cam = g_fp_maincam();
             void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
-            if (ctr != NULL && g_fp_trpos(ctr, o)) {
+            if (ctr != NULL) {
+                g_fp_trpos(ctr, o);
                 if (isfinite(o[0]) && isfinite(o[1]) && isfinite(o[2]) &&
                     (fabsf(o[0]) + fabsf(o[1]) + fabsf(o[2])) > 1.0f)
                     haveO = YES;
