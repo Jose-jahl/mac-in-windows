@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.9.8"
+#define MODMENU_VERSION     "0.9.9"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.9.8";
+const char *modmenu_build_id = "modmenu-glass-0.9.9";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -401,8 +401,9 @@ static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
 static BOOL g_lock_cam  = NO;    /* 0.9.7: mover la camara (OFF = silent puro) */
 static BOOL g_lock_silent = YES; /* 0.9.7: escribir la rotacion de aim del pawn */
+static BOOL g_lock_bone = NO;   /* 0.9.9: apuntar a la cabeza (ignora el slider) */
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
-static float g_aim_height = 1.15f;  /* 0.9.4: altura del punto de aim (m sobre el pawn) */
+static float g_aim_height = 0.0f;   /* 0.9.9: offset vertical DESDE LA CABEZA (0 = cabeza) */
 static BOOL  g_aim_on = YES;
 static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
 static BOOL  g_aim_key_held = NO;
@@ -429,11 +430,12 @@ static void mm_lock_opts_sync(void)
     g_lock_smg     = mm_def_bool(@"mm_lock_smg", YES);
     g_lock_shotgun = mm_def_bool(@"mm_lock_shotgun", YES);
     g_lock_sniper  = mm_def_bool(@"mm_lock_sniper", YES);
-    g_aim_height   = mm_def_float(@"mm_aim_height", 1.15f);
+    g_aim_height   = mm_def_float(@"mm_aim_height", 0.0f);
     g_lock_pred    = mm_def_bool(@"mm_lock_pred", YES);
     g_lock_ads     = mm_def_bool(@"mm_lock_ads", NO);
     g_lock_cam     = mm_def_bool(@"mm_lock_cam", NO);
     g_lock_silent  = mm_def_bool(@"mm_lock_silent", YES);
+    g_lock_bone    = mm_def_bool(@"mm_lock_bone", NO);
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -4754,8 +4756,9 @@ static void mm_aim_lock(void)
         float bestAng = 1.0e9f;
         float bpx = 0.0f, bpy = 0.0f, bpz = 0.0f;
         for (int i = 0; i < g_box_count; i++) {
+            float off = g_lock_bone ? 0.0f : g_aim_height;   /* 0.9.9: 0x308 = m_HeadBone */
             float px = g_boxes[i].wx;
-            float py = g_boxes[i].wy + g_aim_height;
+            float py = g_boxes[i].wy + off;
             float pz = g_boxes[i].wz;
             if (g_lock_pred) {
                 float ddx = px - o[0], ddy = py - o[1], ddz = pz - o[2];
@@ -6423,8 +6426,8 @@ static void mm_cloud_build_aim(UIView *page)
     mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 30.0, NO);
     mm_cloud_row(a, @"Predecir movimiento", @"mm_lock_pred", YES, 58.0, NO);
     mm_cloud_row(a, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 86.0, NO);
-    mm_cloud_card_caption(a, @"Altura del punto de aim (m)", 116.0);
-    UISlider *ah = mm_cloud_slider(0.4f, 1.8f, g_aim_height, @"mm_aim_height",
+    mm_cloud_card_caption(a, @"Altura vs cabeza (m)", 116.0);
+    UISlider *ah = mm_cloud_slider(-0.6f, 0.3f, g_aim_height, @"mm_aim_height",
                                    @selector(onAimHeight:), iw);
     ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 128.0, iw, 24.0);
     [a addSubview:ah];
@@ -6439,8 +6442,9 @@ static void mm_cloud_build_aim(UIView *page)
     mm_cloud_row(b, @"Subfusil", @"mm_lock_smg", YES, 58.0, NO);
     mm_cloud_row(b, @"Escopeta", @"mm_lock_shotgun", YES, 86.0, NO);
     mm_cloud_row(b, @"Franco", @"mm_lock_sniper", YES, 114.0, NO);
-    UILabel *bn = mm_cloud_caption(@"El lock solo actua con las armas tildadas aca.", iw);
-    bn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 150.0, iw, 26.0);
+    mm_cloud_row(b, @"Auto bone (cabeza)", @"mm_lock_bone", NO, 150.0, NO);
+    UILabel *bn = mm_cloud_caption(@"Con Auto bone apunta a la cabeza; si no, usa el slider.", iw);
+    bn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 180.0, iw, 24.0);
     bn.numberOfLines = 2;
     bn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
     [b addSubview:bn];
