@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.10.1"
+#define MODMENU_VERSION     "0.10.2"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.10.1";
+const char *modmenu_build_id = "modmenu-glass-0.10.2";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -403,7 +403,7 @@ static BOOL g_lock_silent = YES; /* 0.9.7: escribir la rotacion de aim del pawn 
 static BOOL g_lock_bone = NO;   /* 0.9.9: apuntar a la cabeza (ignora el slider) */
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 0.0f;   /* 0.9.9: offset vertical DESDE LA CABEZA (0 = cabeza) */
-static BOOL  g_aim_on = YES;
+static BOOL  g_aim_on = NO;   /* 0.10.2: default OFF (el relay necesita re-aplicarse) */
 static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
 static BOOL  g_aim_key_held = NO;
 static void mm_aim_apply(void)
@@ -4170,6 +4170,9 @@ static void mm_esp_frame(double t)
 
         mm_aim_lock();                     /* 0.10.0: cada frame (60 Hz) */
         static int s_tick = 0;              /* datos ~30 Hz, pintado a 60 fps */
+        /* 0.10.2: el relay se pierde si se escribe antes de que el juego este
+           listo. Re-aplicarlo cada ~30 frames evita tener que tocar el switch. */
+        if ((s_tick % 30) == 0) mm_aim_apply();
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
@@ -6499,7 +6502,7 @@ static void mm_cloud_build_aim(UIView *page)
     /* 3) ASISTENCIA — la del juego. NO depende del lock. */
     UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(c, @"Aimbot (asist)", @"mm_x_aim_on", YES, 30.0, NO);
+    mm_cloud_row(c, @"Aimbot (asist)", @"mm_x_aim_on", g_aim_on, 30.0, NO);
     mm_cloud_card_caption(c, @"Fuerza de aim", 58.0);
     UISlider *as = mm_cloud_slider(0.0f, 28.0f, g_aim_strength, @"mm_x_aim_strength",
                                    @selector(onAimStrength:), iw);
