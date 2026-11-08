@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.12.0"
+#define MODMENU_VERSION     "0.13.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.12.0";
+const char *modmenu_build_id = "modmenu-glass-0.13.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -397,11 +397,7 @@ static float g_aim_fov = 180.0f;
 static float g_aim_smooth = 0.0f;   /* C-4: 0 = snap, 1 = suave */
 static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
-static BOOL g_lock_pred = YES;   /* 0.9.3: predecir el movimiento del enemigo */
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
-static BOOL g_lock_cam = YES;    /* 0.11.0: mover la camara (sirve para TODAS las armas) */
-static BOOL g_lock_silent = NO;  /* 0.11.0: silent aim (solo armas que lean el pawn) */
-static BOOL g_lock_bone = NO;   /* 0.9.9: apuntar a la cabeza (ignora el slider) */
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 0.0f;   /* 0.9.9: offset vertical DESDE LA CABEZA (0 = cabeza) */
 static BOOL  g_aim_on = NO;   /* 0.10.2: default OFF (el relay necesita re-aplicarse) */
@@ -431,11 +427,7 @@ static void mm_lock_opts_sync(void)
     g_lock_shotgun = mm_def_bool(@"mm_lock_shotgun", YES);
     g_lock_sniper  = mm_def_bool(@"mm_lock_sniper", YES);
     g_aim_height   = mm_def_float(@"mm_aim_height", 0.0f);
-    g_lock_pred    = mm_def_bool(@"mm_lock_pred", YES);
     g_lock_ads     = mm_def_bool(@"mm_lock_ads", NO);
-    g_lock_cam     = mm_def_bool(@"mm_lock_cam", YES);
-    g_lock_silent  = mm_def_bool(@"mm_lock_silent", NO);
-    g_lock_bone    = mm_def_bool(@"mm_lock_bone", NO);
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -722,19 +714,6 @@ typedef struct {
     float   vx, vy, vz;         /* 0.9.3: velocidad estimada (m/s) para prediccion */
     char    name[64];           /* v0.2.4: nombre UTF-8 del jugador     */
 } MMEspBox;
-/* 0.12.0: esqueleto real (definido aca porque lo usa el dibujo, que va antes) */
-#define MM_SKEL_SLOTS 24
-typedef struct {
-    uint64_t pawn;
-    uint64_t items;     /* Transform*[]  */
-    int      n;
-    uint64_t parItems;  /* int[]         */
-    int      parN;
-} MMSkelSlot;
-static BOOL mm_r64(uintptr_t addr, uint64_t *out);   /* forward 0.12.0 */
-static BOOL mm_skel_resolve(uint64_t pawn);
-static MMSkelSlot *mm_skel_get(uint64_t pawn);
-
 static MMEspBox     g_boxes[MM_MAX_BOXES];
 static int          g_box_count = 0;  /* cajas listas para pintar         */
 
@@ -767,15 +746,7 @@ typedef void  (*MMGetRotFn)(void *transform, float q[4]);
 static MMCompTransFn g_fp_gettrans = NULL;
 static MMSetRotFn    g_fp_setrot   = NULL;
 static MMGetRotFn    g_fp_getrot   = NULL;
-/* 0.12.0: esqueleto REAL. AnimationPostProcessor (MonoBehaviour) tiene
-   `Bones` (List<Transform>) en +0x28 con la jerarquia en AnimationSkeleton
-   (AvatarRoot 0x10, Bones 0x18, ParentIndex 0x20). Para llegar hay que pedir el
-   componente por nombre: se fabrica un Il2CppString falso copiando la klass de
-   un string real (Object.get_name). */
-typedef void *(*MMGetGObjFn)(void *comp);
-typedef void *(*MMGetCompStrFn)(void *go, void *csString);
-static MMGetGObjFn    g_fp_getgo   = NULL;
-static MMGetCompStrFn g_fp_getcname = NULL;
+
 /* 0.9.7: silent aim — Pawn.set_AimRotation(Quaternion) (HFA s0..s3). Es el mismo
    camino que usa el mod de referencia (SP3CTERIOS): no escribe el campo, llama
    al setter del juego. */
@@ -784,6 +755,22 @@ typedef void   (*MMSetAimRotFn)(void *pawn, MMQuat q);
 typedef MMQuat (*MMGetAimRotFn)(void *pawn);
 static MMSetAimRotFn g_fp_setaimrot = NULL;
 static MMGetAimRotFn g_fp_getaimrot = NULL;
+
+/* ===== 0.13.0: AIM LOCK POR DETOUR DEL GETTER ============================
+   El juego reescribe la rotacion de aim desde el input en cada frame, asi que
+   escribir la camara o el campo del pawn por timer SIEMPRE llega tarde. Lo que
+   manda es lo que el juego LEE: se reemplaza `Pawn.get_AimRotation` por una
+   funcion nuestra que devuelve la rotacion calculada cuando el lock tiene
+   objetivo, y el valor real del campo cuando no. Invisible para el juego.
+   - get_AimRotation es virtual -> cubre llamadas directas y de vtable.
+   - Con el lock apagado devuelve exactamente lo mismo que el original. */
+static MMQuat g_lock_q = { 0.0f, 0.0f, 0.0f, 1.0f };
+static volatile int g_lock_active = 0;
+static volatile long g_lock_calls = 0;   /* 0.13.0: prueba de que el detour corre */
+static volatile uint64_t g_lock_pawn = 0;
+
+static MMQuat mm_getaimrot_detour(void *pawn);
+static BOOL   mm_patch_jump(void *fn, void *dest);
 #define MM_AIM_LOCK_UP 1.15f   /* metros sobre la posicion del pawn (pecho) */
 typedef float (*MMGetFovFn)(void *cam);
 static MMGetFovFn   g_fp_cam_getfov = NULL;   /* C-11 */
@@ -1045,97 +1032,6 @@ static void mm_profile_export(void);
 static void mm_profile_import(void);
 static BOOL mm_place_ui(void);
 static void mm_esp_collect_real(void);
-/* ===== 0.12.0: resolutor del esqueleto real =============================== */
-static MMSkelSlot g_skel[MM_SKEL_SLOTS];
-static int        g_skel_rr = 0;
-
-static BOOL mm_ptr_ok(const void *p)
-{
-    uintptr_t v = (uintptr_t)p;
-    if (v < 0x100000000ULL || v > 0x4000000000ULL) return NO;
-    if ((v & 7) != 0) return NO;
-    return YES;
-}
-
-/* Il2CppString falso: [klass][monitor][len][utf16 chars]. Memoria fuera del GC
-   (malloc) para que Boehm no lo escanee; el juego solo lo lee durante la llamada. */
-static void *mm_fake_csstr(const char *utf8, void *klass)
-{
-    size_t n = strlen(utf8);
-    uint8_t *m = (uint8_t *)malloc(0x14 + (n + 1) * 2);
-    if (m == NULL) return NULL;
-    *(void **)(m + 0x00) = klass;
-    *(void **)(m + 0x08) = NULL;
-    *(int32_t *)(m + 0x10) = (int32_t)n;
-    uint16_t *ch = (uint16_t *)(m + 0x14);
-    for (size_t i = 0; i < n; i++) ch[i] = (uint16_t)(uint8_t)utf8[i];
-    ch[n] = 0;
-    return m;
-}
-
-/* resuelve (una vez por pawn) la lista de huesos; NO llama nada si ya esta */
-static BOOL mm_skel_resolve(uint64_t pawn)
-{
-    if (pawn == 0) return NO;
-    if (g_fp_getgo == NULL || g_fp_getcname == NULL || g_fp_getname == NULL) return NO;
-    if (g_fp_trpos == NULL) return NO;
-
-    uint64_t tr = 0;
-    if (!mm_r64((uintptr_t)pawn + OFF_PAWN_TRANSFORM, &tr) || tr == 0) return NO;
-    void *headTr = (void *)(uintptr_t)tr;
-
-    void *go = g_fp_getgo(headTr);
-    if (!mm_ptr_ok(go)) return NO;
-
-    void *nm = g_fp_getname(headTr);       /* Il2CppString* */
-    if (!mm_ptr_ok(nm)) return NO;
-    uint64_t klass = 0;
-    if (!mm_r64((uintptr_t)nm, &klass) || klass == 0) return NO;
-
-    void *fake = mm_fake_csstr("AnimationPostProcessor", (void *)(uintptr_t)klass);
-    if (fake == NULL) return NO;
-    void *comp = g_fp_getcname(go, fake);
-    free(fake);
-    if (!mm_ptr_ok(comp)) return NO;
-
-    uint64_t skel = 0;
-    if (!mm_r64((uintptr_t)comp + 0x28, &skel) || skel == 0) return NO;
-    uint64_t bonesList = 0, parList = 0, items = 0, sz64 = 0;
-    if (!mm_r64((uintptr_t)skel + 0x18, &bonesList) || bonesList == 0) return NO;
-    mm_r64((uintptr_t)skel + 0x20, &parList);
-    if (!mm_r64((uintptr_t)bonesList + 0x10, &items) || items == 0) return NO;
-    if (!mm_r64((uintptr_t)bonesList + 0x18, &sz64)) return NO;
-    int n = (int)(sz64 & 0xFFFFFFFF);
-    if (n < 2 || n > 220) return NO;
-    int parN = 0; uint64_t parItems = 0;
-    if (parList != 0) {
-        uint64_t ps = 0;
-        mm_r64((uintptr_t)parList + 0x10, &parItems);
-        if (mm_r64((uintptr_t)parList + 0x18, &ps)) parN = (int)(ps & 0xFFFFFFFF);
-    }
-    if (!mm_ptr_ok((void *)(uintptr_t)items)) return NO;
-
-    /* guardar en cache (reemplaza el slot de este pawn o usa round-robin) */
-    int slot = -1;
-    for (int i = 0; i < MM_SKEL_SLOTS; i++) if (g_skel[i].pawn == pawn) { slot = i; break; }
-    if (slot < 0) {
-        for (int i = 0; i < MM_SKEL_SLOTS; i++) if (g_skel[i].pawn == 0) { slot = i; break; }
-    }
-    if (slot < 0) { slot = g_skel_rr; g_skel_rr = (g_skel_rr + 1) % MM_SKEL_SLOTS; }
-    g_skel[slot].pawn = pawn;
-    g_skel[slot].items = items;
-    g_skel[slot].n = n;
-    g_skel[slot].parItems = parItems;
-    g_skel[slot].parN = parN;
-    return YES;
-}
-
-static MMSkelSlot *mm_skel_get(uint64_t pawn)
-{
-    for (int i = 0; i < MM_SKEL_SLOTS; i++) if (g_skel[i].pawn == pawn) return &g_skel[i];
-    return NULL;
-}
-
 static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
@@ -1189,7 +1085,6 @@ typedef struct {
     BOOL teamFilter;                    /* 2026-11: no dibujar al propio equipo */
     BOOL stateTags;                     /* 2026-11: curando / invisible / vehiculo */
     BOOL ammoTag;                       /* 2026-11: municion + ADS del enemigo */
-    BOOL skelLine;                      /* 0.10.1: esqueleto ligero (caja) */
     int  boxStyle, theme, crossStyle, maxN;
     float range;
 } MMDrawOpts;
@@ -1234,7 +1129,6 @@ static const MMDrawOpts *mm_draw_opts(void)
     o->teamFilter = mm_def_bool(@"mm_x_team_filter", NO);
     o->stateTags  = mm_def_bool(@"mm_x_state_tags", NO);
     o->ammoTag    = mm_def_bool(@"mm_x_ammo", NO);
-    o->skelLine   = mm_def_bool(@"mm_x_skel", NO);
     o->safe_mode = mm_def_bool(@"mm_safe_mode", NO);
     o->bots      = mm_def_bool(@"mm_esp_bots", NO);
     o->boxStyle  = (int)mm_def_float(@"mm_esp_box_style", 0.0f);
@@ -2410,7 +2304,6 @@ static int mm_declutter_budget(void)
     /* Fase 1: brujula, estelas y anti-solape (cero lecturas nuevas). */
     BOOL conBearings = o->bearings;
     BOOL conTrails   = o->trails;
-    BOOL conSkel = o->skelLine;   /* 0.10.1: esqueleto */
     BOOL conDeclutter = o->declutter;
 
     CGContextSetLineCap(ctx, kCGLineCapRound);
@@ -2628,113 +2521,6 @@ static int mm_declutter_budget(void)
             if (drawH) {
                 [hhs drawAtPoint:CGPointMake(hx, hy) withAttributes:hha];
                 drewLabel = YES;
-            }
-        }
-
-        /* 0.12.0: ESQUELETO REAL (huesos de AnimationPostProcessor).
-           Si el resolutor todavia no tiene este pawn, cae a la figura geometrica
-           de la caja para no dejar el enemigo sin marcar. */
-        if (conSkel) {
-            MMSkelSlot *sk = mm_skel_get(b->pawn);
-            if (sk == NULL && b->dist < 90.0f) {
-                static int s_try = 0;
-                if ((s_try % 15) == 0 && mm_skel_resolve(b->pawn)) sk = mm_skel_get(b->pawn);
-                s_try++;
-            }
-            BOOL drewReal = NO;
-            if (sk != NULL && sk->n >= 2 && b->dist < 120.0f) {
-                int nb = sk->n > 48 ? 48 : sk->n;
-                CGPoint pt[48];
-                BOOL okp[48];
-                int par[48];
-                CGFloat W2 = bs.size.width, H2 = bs.size.height;
-                int validos = 0;
-                for (int i = 0; i < nb; i++) {
-                    uint64_t bt = 0;
-                    okp[i] = NO; par[i] = -1;
-                    if (!mm_r64((uintptr_t)sk->items + (uintptr_t)(i * 8), &bt) || bt == 0) continue;
-                    float p[3] = { 0.0f, 0.0f, 0.0f };
-                    g_fp_trpos((void *)(uintptr_t)bt, p);
-                    CGPoint sp = CGPointZero;
-                    if (!mm_w2s(g_view_mtx, g_proj_mtx, p, NO, W2, H2, &sp, NULL, NULL, NULL)) continue;
-                    pt[i] = sp; okp[i] = YES; validos++;
-                    if (sk->parItems != 0 && i < sk->parN) {
-                        uint64_t pv = 0;
-                        if (mm_r64((uintptr_t)sk->parItems + (uintptr_t)(i * 4), &pv))
-                            par[i] = (int)(pv & 0xFFFFFFFF);
-                    }
-                }
-                if (validos >= 3) {
-                    drewReal = YES;
-                    for (int pass = 0; pass < 2; pass++) {
-                        if (pass == 0) {
-                            CGContextSetLineWidth(ctx, 2.3);
-                            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.5);
-                        } else {
-                            CGContextSetLineWidth(ctx, 1.0);
-                            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
-                        }
-                        CGContextBeginPath(ctx);
-                        for (int i = 0; i < nb; i++) {
-                            if (!okp[i]) continue;
-                            int pi = par[i];
-                            if (pi < 0 || pi >= nb || pi == i || !okp[pi]) continue;
-                            CGContextMoveToPoint(ctx, pt[pi].x, pt[pi].y);
-                            CGContextAddLineToPoint(ctx, pt[i].x, pt[i].y);
-                        }
-                        CGContextStrokePath(ctx);
-                    }
-                    /* punto en la cabeza (indice 0 suele ser la raiz) */
-                    if (okp[0]) {
-                        CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.95);
-                        CGContextFillEllipseInRect(ctx, CGRectMake(pt[0].x - 1.6, pt[0].y - 1.6, 3.2, 3.2));
-                    }
-                }
-            }
-            if (!drewReal) {
-                /* fallback geometrico (0.10.3) */
-                CGFloat top = r.origin.y;
-                CGFloat bot = CGRectGetMaxY(r);
-                CGFloat hgt = bot - top;
-                CGFloat wdt = r.size.width;
-                if (wdt < 8.0) wdt = 8.0;
-                if (hgt > 14.0) {
-                    CGFloat cx = CGRectGetMidX(r);
-                    CGPoint headC = CGPointMake(cx, top + hgt * 0.085);
-                    CGFloat headR = wdt * 0.115;
-                    if (headR < 1.8) headR = 1.8;
-                    if (headR > 6.0) headR = 6.0;
-                    CGFloat elbowY = top + hgt * 0.335;
-                    CGFloat kneeY = top + hgt * 0.760;
-                    for (int pass = 0; pass < 2; pass++) {
-                        if (pass == 0) {
-                            CGContextSetLineWidth(ctx, 2.4);
-                            CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
-                        } else {
-                            CGContextSetLineWidth(ctx, 1.1);
-                            CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
-                        }
-                        CGContextBeginPath(ctx);
-                        CGContextMoveToPoint(ctx, cx, top + hgt * 0.150);
-                        CGContextAddLineToPoint(ctx, cx, top + hgt * 0.520);
-                        CGContextMoveToPoint(ctx, cx - wdt * 0.30, top + hgt * 0.200);
-                        CGContextAddLineToPoint(ctx, cx + wdt * 0.30, top + hgt * 0.200);
-                        CGContextMoveToPoint(ctx, cx - wdt * 0.30, top + hgt * 0.200);
-                        CGContextAddLineToPoint(ctx, cx - wdt * 0.34, elbowY);
-                        CGContextAddLineToPoint(ctx, cx - wdt * 0.38, top + hgt * 0.460);
-                        CGContextMoveToPoint(ctx, cx + wdt * 0.30, top + hgt * 0.200);
-                        CGContextAddLineToPoint(ctx, cx + wdt * 0.34, elbowY);
-                        CGContextAddLineToPoint(ctx, cx + wdt * 0.38, top + hgt * 0.460);
-                        CGContextMoveToPoint(ctx, cx, top + hgt * 0.520);
-                        CGContextAddLineToPoint(ctx, cx - wdt * 0.16, kneeY);
-                        CGContextAddLineToPoint(ctx, cx - wdt * 0.15, bot);
-                        CGContextMoveToPoint(ctx, cx, top + hgt * 0.520);
-                        CGContextAddLineToPoint(ctx, cx + wdt * 0.16, kneeY);
-                        CGContextAddLineToPoint(ctx, cx + wdt * 0.15, bot);
-                        CGContextStrokePath(ctx);
-                        CGContextStrokeEllipseInRect(ctx, CGRectMake(headC.x - headR, headC.y - headR, headR * 2.0, headR * 2.0));
-                    }
-                }
             }
         }
 
@@ -4918,6 +4704,39 @@ static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out
    REAL de la camara, se calcula el vector forward que produce, y se aplica la
    rotacion minima que lleva ese forward al objetivo. Es independiente de la
    convencion de ejes que use el motor. */
+/* 0.13.0: reemplazo de Pawn.get_AimRotation. ABI: x0 = pawn, retorna HFA s0..s3. */
+static MMQuat mm_getaimrot_detour(void *pawn)
+{
+    MMQuat ident = { 0.0f, 0.0f, 0.0f, 1.0f };
+    g_lock_calls++;
+    if (pawn == NULL) return ident;
+    if (g_lock_active && (uint64_t)(uintptr_t)pawn == g_lock_pawn) return g_lock_q;
+    MMQuat v = ident;
+    memcpy(&v, (const void *)((uintptr_t)pawn + OFF_PAWN_AIMROT), sizeof(v));
+    return v;
+}
+
+/* 0.13.0: escribe un salto absoluto en la entrada de una funcion del juego.
+   ldr x16,#8 ; br x16 ; <direccion de 8 bytes>. Requiere pagina privada (COW). */
+static BOOL mm_patch_jump(void *fn, void *dest)
+{
+    if (fn == NULL || dest == NULL) return NO;
+    uintptr_t page = (uintptr_t)fn & ~(uintptr_t)0x3FFF;
+    if (vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
+                   FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS)
+        return NO;
+    uint32_t code[4];
+    code[0] = 0x58000050u;   /* ldr x16, #8 */
+    code[1] = 0xD61F0200u;   /* br  x16   */
+    uint64_t d = (uint64_t)(uintptr_t)dest;
+    memcpy(&code[2], &d, 8);
+    memcpy(fn, code, sizeof(code));
+    sys_icache_invalidate(fn, sizeof(code));
+    vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
+               FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    return YES;
+}
+
 /* 0.9.8: AIM LOCK igual que los mods de referencia (SP3CTERIOS y StarCodm).
    StarCodm, desensamblado, hace literalmente:
      q0 = getAimRotation(pawn)
@@ -4929,11 +4748,11 @@ static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out
 static void mm_aim_lock(void)
 {
     @try {
-        if (!g_lock_on) return;
-        if (g_panel_open || g_esp == nil || g_esp.hidden) return;
-        if (g_fp_setaimrot == NULL || g_fp_getaimrot == NULL ||
-            g_fp_trpos == NULL || g_fp_localpawn == NULL) return;
-        if (g_box_count <= 0) return;
+        if (!g_lock_on) { g_lock_active = 0; return; }
+        if (g_panel_open || g_esp == nil || g_esp.hidden) { g_lock_active = 0; return; }
+        if (g_fp_trpos == NULL || g_fp_localpawn == NULL ||
+            g_fp_maincam == NULL || g_fp_gettrans == NULL) { g_lock_active = 0; return; }
+        if (g_box_count <= 0) { g_lock_active = 0; return; }
 
         static int s_kind = -1;
         static double s_kind_t = 0.0;
@@ -4948,50 +4767,28 @@ static void mm_aim_lock(void)
                      (kind == 3) ? g_lock_shotgun :
                      (kind == 4) ? g_lock_sniper :
                      (g_lock_rifle || g_lock_smg || g_lock_shotgun || g_lock_sniper);
-        if (!allow) return;
-        if (g_lock_ads && !mm_local_ads()) return;
+        if (!allow) { g_lock_active = 0; return; }
+        if (g_lock_ads && !mm_local_ads()) { g_lock_active = 0; return; }
 
         void *lp = g_fp_localpawn();
-        if (lp == NULL) return;
+        if (lp == NULL) { g_lock_active = 0; return; }
 
-        /* 0.10.0: origen = posicion de la CAMARA (es la que el ESP ya usa y
-           siempre lee bien). El pawn local devolvia (0,0,0) en BR, y desde el
-           origen del mundo el angulo sale basura -> la camara enloquecia. */
+        /* origen = posicion de la camara (validada; si sale basura no se toca nada) */
         float o[3] = { 0.0f, 0.0f, 0.0f };
         BOOL haveO = NO;
-        if (g_fp_maincam != NULL && g_fp_gettrans != NULL) {
-            void *cam = g_fp_maincam();
-            void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
-            if (ctr != NULL) {
-                g_fp_trpos(ctr, o);
-                if (isfinite(o[0]) && isfinite(o[1]) && isfinite(o[2]) &&
-                    (fabsf(o[0]) + fabsf(o[1]) + fabsf(o[2])) > 1.0f)
-                    haveO = YES;
-            }
+        void *cam = g_fp_maincam();
+        void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
+        if (ctr != NULL) {
+            g_fp_trpos(ctr, o);
+            if (isfinite(o[0]) && isfinite(o[1]) && isfinite(o[2]) &&
+                (fabsf(o[0]) + fabsf(o[1]) + fabsf(o[2])) > 1.0f) haveO = YES;
         }
-        if (!haveO) return;   /* sin origen valido no se toca NADA */
+        if (!haveO) { g_lock_active = 0; return; }
 
-        /* 0.11.0: dos caminos.
-           - camara: base = rotacion de la camara -> sirve para TODAS las armas
-             (fusil/subfusil disparan con la direccion de la vista)
-           - silent: base = rotacion de aim del pawn (solo algunas armas) */
+        /* base = rotacion de aim ACTUAL del pawn (su forward manda) */
         float base[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        BOOL haveBase = NO;
-        void *camTr = NULL;
-        if (g_lock_cam && g_fp_maincam != NULL && g_fp_gettrans != NULL && g_fp_getrot != NULL) {
-            void *cam = g_fp_maincam();
-            camTr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
-            if (camTr != NULL) {
-                g_fp_getrot(camTr, base);
-                mm_q_norm(base);
-                haveBase = YES;
-            }
-        }
-        if (!haveBase) {
-            MMQuat bq = g_fp_getaimrot(lp);
-            base[0] = bq.x; base[1] = bq.y; base[2] = bq.z; base[3] = bq.w;
-            mm_q_norm(base);
-        }
+        memcpy(base, (const void *)((uintptr_t)lp + OFF_PAWN_AIMROT), sizeof(base));
+        mm_q_norm(base);
         float fwd[3];
         { float f[3] = { 0.0f, 0.0f, 1.0f }; mm_q_rotate(base, f, fwd); }
 
@@ -5003,21 +4800,9 @@ static void mm_aim_lock(void)
         float bestAng = 1.0e9f;
         float bpx = 0.0f, bpy = 0.0f, bpz = 0.0f;
         for (int i = 0; i < g_box_count; i++) {
-            float off = g_lock_bone ? 0.0f : g_aim_height;   /* 0.9.9: 0x308 = m_HeadBone */
             float px = g_boxes[i].wx;
-            float py = g_boxes[i].wy + off;
+            float py = g_boxes[i].wy + g_aim_height;
             float pz = g_boxes[i].wz;
-            if (g_lock_pred) {
-                float ddx = px - o[0], ddy = py - o[1], ddz = pz - o[2];
-                float dist0 = sqrtf(ddx*ddx + ddy*ddy + ddz*ddz);
-                float spd = (kind == 4) ? 850.0f : (kind == 3) ? 420.0f : 780.0f;
-                float tof = dist0 / spd;
-                if (tof > 0.012f && tof < 1.2f) {
-                    px += g_boxes[i].vx * tof;
-                    py += g_boxes[i].vy * tof;
-                    pz += g_boxes[i].vz * tof;
-                }
-            }
             float vx = px - o[0], vy = py - o[1], vz = pz - o[2];
             float d2 = vx*vx + vy*vy + vz*vz;
             if (d2 < 4.0f) continue;
@@ -5029,18 +4814,18 @@ static void mm_aim_lock(void)
             if (ang > halfFov) continue;
             if (ang < bestAng) { bestAng = ang; best = i; bpx = px; bpy = py; bpz = pz; }
         }
-        if (best < 0) return;
+        if (best < 0) { g_lock_active = 0; return; }
 
         float dv[3] = { bpx - o[0], bpy - o[1], bpz - o[2] };
         float dl = sqrtf(dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2]);
-        if (dl < 0.5f) return;
+        if (dl < 0.5f) { g_lock_active = 0; return; }
         dv[0] /= dl; dv[1] /= dl; dv[2] /= dl;
 
         float dot = fwd[0]*dv[0] + fwd[1]*dv[1] + fwd[2]*dv[2];
         dot = fmaxf(-1.0f, fminf(1.0f, dot));
         float ang = acosf(dot);
         float angDeg = ang * 180.0f / (float)M_PI;
-        if (angDeg < 0.10f) return;
+        if (angDeg < 0.10f) { g_lock_active = 0; return; }
 
         float ax[3] = {
             fwd[1]*dv[2] - fwd[2]*dv[1],
@@ -5048,7 +4833,7 @@ static void mm_aim_lock(void)
             fwd[0]*dv[1] - fwd[1]*dv[0]
         };
         float al = sqrtf(ax[0]*ax[0] + ax[1]*ax[1] + ax[2]*ax[2]);
-        if (al < 1.0e-5f) return;
+        if (al < 1.0e-5f) { g_lock_active = 0; return; }
         ax[0] /= al; ax[1] /= al; ax[2] /= al;
 
         float sh = sinf(ang * 0.5f), ch = cosf(ang * 0.5f);
@@ -5058,49 +4843,42 @@ static void mm_aim_lock(void)
         mm_q_norm(qtar);
 
         float a = 1.0f - g_aim_smooth * 0.90f;
-        float maxDeg = 6.0f + (1.0f - g_aim_smooth) * 14.0f;   /* 6..20 grados/tick */
+        float maxDeg = 6.0f + (1.0f - g_aim_smooth) * 14.0f;
         if (a * angDeg > maxDeg) a = maxDeg / angDeg;
         if (a < 0.05f) a = 0.05f;
 
         float q[4];
         mm_q_slerp(base, qtar, a, q);
-        MMQuat out = { q[0], q[1], q[2], q[3] };
+        g_lock_q.x = q[0]; g_lock_q.y = q[1]; g_lock_q.z = q[2]; g_lock_q.w = q[3];
+        g_lock_pawn = (uint64_t)(uintptr_t)lp;
+        g_lock_active = 1;
 
-        /* 0.11.0: escribir los dos caminos segun los toggles */
-        if (g_lock_cam && camTr != NULL && g_fp_setrot != NULL) g_fp_setrot(camTr, q);
-        if (g_lock_silent) g_fp_setaimrot(lp, out);
-
-
-        /* sonda 2 Hz */
-        {
+        {   /* sonda 2 Hz */
             static double s_lg = 0.0;
             double nowl = CACurrentMediaTime();
             if ((nowl - s_lg) > 0.5) {
                 s_lg = nowl;
-                MMQuat rb = g_fp_getaimrot(lp);
                 NSString *docs = mm_docs_dir();
                 if (docs.length > 0) {
                     NSString *t = [NSString stringWithFormat:
-                        @"build=%s\npawnPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
-                        @"fwd=%.3f,%.3f,%.3f\ndes=%.3f,%.3f,%.3f\n"
-                        @"dot=%.4f angDeg=%.2f\n"
-                        @"q_base=%.4f,%.4f,%.4f,%.4f\nq_written=%.4f,%.4f,%.4f,%.4f\n"
-                        @"q_readback=%.4f,%.4f,%.4f,%.4f\ntipo=%d alpha=%.3f\n",
+                        @"build=%s\nmodo=detour-getAimRotation\n"
+                        @"camPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
+                        @"fwd=%.3f,%.3f,%.3f des=%.3f,%.3f,%.3f\n"
+                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d llamadasGetter=%ld\n"
+                        @"q_base=%.4f,%.4f,%.4f,%.4f\nq_lock=%.4f,%.4f,%.4f,%.4f\n",
                         MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2],
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
-                        (double)dot, (double)angDeg,
+                        (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_calls,
                         (double)base[0], (double)base[1], (double)base[2], (double)base[3],
-                        (double)q[0], (double)q[1], (double)q[2], (double)q[3],
-                        (double)rb.x, (double)rb.y, (double)rb.z, (double)rb.w,
-                        kind, (double)a];
+                        (double)q[0], (double)q[1], (double)q[2], (double)q[3]];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
                         atomically:YES encoding:NSUTF8StringEncoding error:NULL];
                 }
             }
         }
-    } @catch (NSException *e) {}
+    } @catch (NSException *e) { g_lock_active = 0; }
 }
 
 /* 0.8.4: SONDA DEL RELOAD (solo lectura, sin tocar nada del juego).
@@ -5272,8 +5050,15 @@ static void mm_game_resolve(void)
             g_fp_getrot    = (MMGetRotFn)(b + MM_GAME_DELTA(VA_GETROT));
             g_fp_setaimrot = (MMSetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_SET));
             g_fp_getaimrot = (MMGetAimRotFn)(b + MM_GAME_DELTA(VA_AIMROT_GET));
-            g_fp_getgo     = (MMGetGObjFn)(b + MM_GAME_DELTA(VA_GET_GAMEOBJECT));
-            g_fp_getcname  = (MMGetCompStrFn)(b + MM_GAME_DELTA(VA_GETCOMP_BYNAME));
+            /* 0.13.0: el lock vive aca — se reemplaza el getter del juego. */
+            {
+                static BOOL s_patched = NO;
+                if (!s_patched) {
+                    void *fn = (void *)(b + MM_GAME_DELTA(VA_AIMROT_GET));
+                    s_patched = mm_patch_jump(fn, (void *)mm_getaimrot_detour);
+                    MM_LOG(@"%s aimlock detour %s", MM_TAG, s_patched ? "OK" : "FALLO");
+                }
+            }
             MM_LOG(@"%s aimrot setter=%p", MM_TAG, (void *)g_fp_setaimrot);
             g_fp_cam_setfov = mm_ptr_en_imagen((const void *)fp9, b) ? fp9 : NULL;
             g_fp_state     = 1;
@@ -6620,7 +6405,6 @@ static void mm_cloud_build_combat(UIView *page)
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
-    mm_cloud_row(b, @"Esqueleto (linea)", @"mm_x_skel", NO, 150.0, YES);
     [page addSubview:b];
 
     /* Alcance y features fijas del binario. */
@@ -6668,15 +6452,12 @@ static void mm_cloud_build_aim(UIView *page)
 
     /* 1) AIMBOT — tres switches y la altura. Nada mas. */
     UIView *a = mm_cloud_card(@"AIMBOT", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 28.0, NO);
-    mm_cloud_row(a, @"Mover camara", @"mm_lock_cam", YES, 54.0, NO);
-    mm_cloud_row(a, @"Silent aim (pawn)", @"mm_lock_silent", NO, 80.0, NO);
-    mm_cloud_row(a, @"Predecir movimiento", @"mm_lock_pred", YES, 106.0, NO);
-    mm_cloud_row(a, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 132.0, NO);
-    mm_cloud_card_caption(a, @"Altura vs cabeza (m)", 158.0);
+    mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 30.0, NO);
+    mm_cloud_row(a, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 58.0, NO);
+    mm_cloud_card_caption(a, @"Altura vs cabeza (m)", 90.0);
     UISlider *ah = mm_cloud_slider(-0.6f, 0.3f, g_aim_height, @"mm_aim_height",
                                    @selector(onAimHeight:), iw);
-    ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 168.0, iw, 24.0);
+    ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 100.0, iw, 24.0);
     [a addSubview:ah];
     [page addSubview:a];
 
@@ -6687,7 +6468,6 @@ static void mm_cloud_build_aim(UIView *page)
     mm_cloud_row(b, @"Subfusil", @"mm_lock_smg", YES, 58.0, NO);
     mm_cloud_row(b, @"Escopeta", @"mm_lock_shotgun", YES, 86.0, NO);
     mm_cloud_row(b, @"Franco", @"mm_lock_sniper", YES, 114.0, NO);
-    mm_cloud_row(b, @"Auto bone (cabeza)", @"mm_lock_bone", NO, 142.0, NO);
     [page addSubview:b];
 
     /* 3) ASISTENCIA — la del juego. NO depende del lock. */
