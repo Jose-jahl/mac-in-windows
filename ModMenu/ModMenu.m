@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.10.2"
+#define MODMENU_VERSION     "0.10.3"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.10.2";
+const char *modmenu_build_id = "modmenu-glass-0.10.3";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -2516,55 +2516,79 @@ static int mm_declutter_budget(void)
             }
         }
 
-        /* 0.10.1: ESQUELETO LIGERO (cabeza / pecho / caderas).
-           No lee memoria extra: usa la MISMA caja proyectada del enemigo.
-           Tres puntos sobre el eje vertical + hombros y cadera. */
+        /* 0.10.3: ESQUELETO HUMANO (cabeza, brazos y piernas).
+           Se calcula desde la MISMA caja proyectada: cero lecturas extra.
+           Proporciones de figura humana para que se lea como una persona. */
         if (conSkel) {
             CGFloat top = r.origin.y;
             CGFloat bot = CGRectGetMaxY(r);
             CGFloat hgt = bot - top;
-            if (hgt > 12.0) {
+            CGFloat wdt = r.size.width;
+            if (wdt < 8.0) wdt = 8.0;
+            if (hgt > 14.0) {
                 CGFloat cx = CGRectGetMidX(r);
-                CGFloat hw = r.size.width;
-                if (hw < 6.0) hw = 6.0;
-                CGPoint pHead   = CGPointMake(cx, top + hgt * 0.08);
-                CGPoint pNeck   = CGPointMake(cx, top + hgt * 0.16);
-                CGPoint pChest  = CGPointMake(cx, top + hgt * 0.32);
-                CGPoint pHip    = CGPointMake(cx, top + hgt * 0.56);
-                CGFloat shW = hw * 0.55, hipW = hw * 0.40;
+                CGFloat P[9][2] = {
+                    { cx,                  top + hgt * 0.150 },  /* 0 cuello     */
+                    { cx,                  top + hgt * 0.215 },  /* 1 pecho      */
+                    { cx,                  top + hgt * 0.520 },  /* 2 cadera     */
+                    { cx - wdt * 0.30,     top + hgt * 0.200 },  /* 3 hombro izq */
+                    { cx + wdt * 0.30,     top + hgt * 0.200 },  /* 4 hombro der */
+                    { cx - wdt * 0.38,     top + hgt * 0.460 },  /* 5 mano izq   */
+                    { cx + wdt * 0.38,     top + hgt * 0.460 },  /* 6 mano der   */
+                    { cx - wdt * 0.15,     bot },                /* 7 pie izq    */
+                    { cx + wdt * 0.15,     bot }                 /* 8 pie der    */
+                };
+                CGPoint headC = CGPointMake(cx, top + hgt * 0.085);
+                CGFloat headR = wdt * 0.115;
+                if (headR < 1.8) headR = 1.8;
+                if (headR > 6.0) headR = 6.0;
 
-                CGContextSetLineWidth(ctx, 1.4);
-                CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.45);
-                CGContextBeginPath(ctx);
-                CGContextMoveToPoint(ctx, pHead.x, pHead.y);
-                CGContextAddLineToPoint(ctx, pHip.x, pHip.y);
-                CGContextMoveToPoint(ctx, pChest.x - shW, pChest.y);
-                CGContextAddLineToPoint(ctx, pChest.x + shW, pChest.y);
-                CGContextMoveToPoint(ctx, pHip.x - hipW, pHip.y);
-                CGContextAddLineToPoint(ctx, pHip.x + hipW, pHip.y);
-                CGContextStrokePath(ctx);
+                /* dos pasadas: contorno negro y luego color */
+                for (int pass = 0; pass < 2; pass++) {
+                    BOOL outline = (pass == 0);
+                    if (outline) {
+                        CGContextSetLineWidth(ctx, 2.4);
+                        CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.55);
+                    } else {
+                        CGContextSetLineWidth(ctx, 1.1);
+                        CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.95);
+                    }
+                    CGContextBeginPath(ctx);
+                    /* cuello -> cadera (tronco) */
+                    CGContextMoveToPoint(ctx, P[0][0], P[0][1]);
+                    CGContextAddLineToPoint(ctx, P[2][0], P[2][1]);
+                    /* hombros */
+                    CGContextMoveToPoint(ctx, P[3][0], P[3][1]);
+                    CGContextAddLineToPoint(ctx, P[4][0], P[4][1]);
+                    /* brazos (hombro -> codo -> mano) */
+                    CGFloat elbowY = top + hgt * 0.335;
+                    CGContextMoveToPoint(ctx, P[3][0], P[3][1]);
+                    CGContextAddLineToPoint(ctx, cx - wdt * 0.34, elbowY);
+                    CGContextAddLineToPoint(ctx, P[5][0], P[5][1]);
+                    CGContextMoveToPoint(ctx, P[4][0], P[4][1]);
+                    CGContextAddLineToPoint(ctx, cx + wdt * 0.34, elbowY);
+                    CGContextAddLineToPoint(ctx, P[6][0], P[6][1]);
+                    /* piernas (cadera -> rodilla -> pie) */
+                    CGFloat kneeY = top + hgt * 0.760;
+                    CGContextMoveToPoint(ctx, P[2][0], P[2][1]);
+                    CGContextAddLineToPoint(ctx, cx - wdt * 0.16, kneeY);
+                    CGContextAddLineToPoint(ctx, P[7][0], P[7][1]);
+                    CGContextMoveToPoint(ctx, P[2][0], P[2][1]);
+                    CGContextAddLineToPoint(ctx, cx + wdt * 0.16, kneeY);
+                    CGContextAddLineToPoint(ctx, P[8][0], P[8][1]);
+                    CGContextStrokePath(ctx);
 
-                CGContextSetLineWidth(ctx, 0.9);
-                CGContextSetRGBStrokeColor(ctx, cr, cg, cb, 0.92);
-                CGContextBeginPath(ctx);
-                CGContextMoveToPoint(ctx, pHead.x, pHead.y);
-                CGContextAddLineToPoint(ctx, pNeck.x, pNeck.y);
-                CGContextAddLineToPoint(ctx, pChest.x, pChest.y);
-                CGContextMoveToPoint(ctx, pChest.x - shW, pChest.y);
-                CGContextAddLineToPoint(ctx, pChest.x + shW, pChest.y);
-                CGContextMoveToPoint(ctx, pChest.x, pChest.y);
-                CGContextAddLineToPoint(ctx, pHip.x, pHip.y);
-                CGContextMoveToPoint(ctx, pHip.x - hipW, pHip.y);
-                CGContextAddLineToPoint(ctx, pHip.x + hipW, pHip.y);
-                CGContextStrokePath(ctx);
-
-                /* cabeza: punto lleno */
-                CGFloat hr = hw * 0.13;
-                if (hr < 1.4) hr = 1.4;
-                if (hr > 4.0) hr = 4.0;
-                CGContextSetRGBFillColor(ctx, cr, cg, cb, 0.95);
-                CGContextFillEllipseInRect(ctx,
-                    CGRectMake(pHead.x - hr, pHead.y - hr, hr * 2.0, hr * 2.0));
+                    /* cabeza */
+                    if (outline) {
+                        CGContextSetLineWidth(ctx, 2.4);
+                        CGContextStrokeEllipseInRect(ctx,
+                            CGRectMake(headC.x - headR, headC.y - headR, headR * 2.0, headR * 2.0));
+                    } else {
+                        CGContextSetLineWidth(ctx, 1.1);
+                        CGContextStrokeEllipseInRect(ctx,
+                            CGRectMake(headC.x - headR, headC.y - headR, headR * 2.0, headR * 2.0));
+                    }
+                }
             }
         }
 
