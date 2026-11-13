@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.13.1"
+#define MODMENU_VERSION     "0.14.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.13.1";
+const char *modmenu_build_id = "modmenu-glass-0.14.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -759,23 +759,13 @@ static MMGetAimRotFn g_fp_getaimrot = NULL;
 /* ===== 0.13.0: AIM LOCK POR DETOUR DEL GETTER ============================
    El juego reescribe la rotacion de aim desde el input en cada frame, asi que
    escribir la camara o el campo del pawn por timer SIEMPRE llega tarde. Lo que
-   manda es lo que el juego LEE: se reemplaza `Pawn.get_AimRotation` por una
-   funcion nuestra que devuelve la rotacion calculada cuando el lock tiene
-   objetivo, y el valor real del campo cuando no. Invisible para el juego.
-   - get_AimRotation es virtual -> cubre llamadas directas y de vtable.
-   - Con el lock apagado devuelve exactamente lo mismo que el original. */
-static MMQuat g_lock_q = { 0.0f, 0.0f, 0.0f, 1.0f };
+   manda es escribir la rotacion calculada directamente en OFF_PAWN_AIMROT
+   del pawn local, cada frame (CADisplayLink 60 Hz). No se toca codigo
+   ejecutable: solo datos en heap — compatible con firma de codigo iOS.
+   Con el lock apagado no se escribe nada; el campo queda intacto. */
 static volatile int g_lock_active = 0;
-static volatile long g_lock_calls = 0;   /* 0.13.0: prueba de que el detour corre */
 static volatile uint64_t g_lock_pawn = 0;
-
-static void   mm_patch_install(void);
-static void   mm_patch_remove(void);
-static volatile int g_patch_on = 0;
-static uint32_t     g_patch_orig[4];
-static void        *g_patch_addr = NULL;
-static MMQuat mm_getaimrot_detour(void *pawn);
-static BOOL   mm_patch_jump(void *fn, void *dest);
+static volatile long g_lock_frames = 0;
 #define MM_AIM_LOCK_UP 1.15f   /* metros sobre la posicion del pawn (pecho) */
 typedef float (*MMGetFovFn)(void *cam);
 static MMGetFovFn   g_fp_cam_getfov = NULL;   /* C-11 */
@@ -3036,9 +3026,9 @@ static void mm_haptic(int style)
     if ([k isEqualToString:@"mm_guard_capture"]) mm_place_ui();
     if ([k isEqualToString:@"mm_auto_stream"]) mm_apply_stream();
     if ([k isEqualToString:@"mm_x_aim_on"]) { g_aim_on = s.on; mm_aim_apply(); }
-    if ([k isEqualToString:@"mm_x_aimlock"]) {   /* 0.13.1 */
+    if ([k isEqualToString:@"mm_x_aimlock"]) {   /* 0.14: write-struct */
         g_lock_on = s.on;
-        if (s.on) mm_patch_install(); else mm_patch_remove();
+        if (!s.on) g_lock_active = 0;
     }
     if ([k isEqualToString:@"mm_x_aimlock"] || [k hasPrefix:@"mm_lock_"]) mm_lock_opts_sync();
     if ([k isEqualToString:@"mm_x_fast_reload"]) mm_reload_apply();   /* C-18 */
@@ -4713,74 +4703,9 @@ static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out
    REAL de la camara, se calcula el vector forward que produce, y se aplica la
    rotacion minima que lleva ese forward al objetivo. Es independiente de la
    convencion de ejes que use el motor. */
-/* 0.13.0: reemplazo de Pawn.get_AimRotation. ABI: x0 = pawn, retorna HFA s0..s3. */
-static MMQuat mm_getaimrot_detour(void *pawn)
-{
-    MMQuat ident = { 0.0f, 0.0f, 0.0f, 1.0f };
-    g_lock_calls++;
-    if (pawn == NULL) return ident;
-    if (g_lock_active && (uint64_t)(uintptr_t)pawn == g_lock_pawn) return g_lock_q;
-    MMQuat v = ident;
-    memcpy(&v, (const void *)((uintptr_t)pawn + OFF_PAWN_AIMROT), sizeof(v));
-    return v;
-}
-
-/* 0.13.1: instala el detour solo cuando el lock esta encendido y lo restaura
-   al apagarlo. Con el lock OFF el juego corre con sus bytes originales. */
-static void mm_patch_install(void)
-{
-    if (g_patch_on) return;
-    uintptr_t base = (uintptr_t)_dyld_get_image_header(0);
-    if (base == 0) return;
-    void *fn = (void *)(base + MM_GAME_DELTA(VA_AIMROT_GET));
-    if (fn == NULL) return;
-    memcpy(g_patch_orig, fn, sizeof(g_patch_orig));
-    if (!mm_patch_jump(fn, (void *)mm_getaimrot_detour)) {
-        MM_LOG(@"%s aimlock detour FALLO", MM_TAG);
-        return;
-    }
-    g_patch_addr = fn;
-    g_patch_on = 1;
-    MM_LOG(@"%s aimlock detour instalado", MM_TAG);
-}
-
-static void mm_patch_remove(void)
-{
-    if (!g_patch_on || g_patch_addr == NULL) return;
-    uintptr_t page = (uintptr_t)g_patch_addr & ~(uintptr_t)0x3FFF;
-    if (vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
-                   FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
-        memcpy(g_patch_addr, g_patch_orig, sizeof(g_patch_orig));
-        sys_icache_invalidate(g_patch_addr, sizeof(g_patch_orig));
-        vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
-                   FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    }
-    g_patch_on = 0;
-    g_patch_addr = NULL;
-    g_lock_active = 0;
-    MM_LOG(@"%s aimlock detour quitado", MM_TAG);
-}
-
-/* 0.13.0: escribe un salto absoluto en la entrada de una funcion del juego.
-   ldr x16,#8 ; br x16 ; <direccion de 8 bytes>. Requiere pagina privada (COW). */
-static BOOL mm_patch_jump(void *fn, void *dest)
-{
-    if (fn == NULL || dest == NULL) return NO;
-    uintptr_t page = (uintptr_t)fn & ~(uintptr_t)0x3FFF;
-    if (vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
-                   FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS)
-        return NO;
-    uint32_t code[4];
-    code[0] = 0x58000050u;   /* ldr x16, #8 */
-    code[1] = 0xD61F0200u;   /* br  x16   */
-    uint64_t d = (uint64_t)(uintptr_t)dest;
-    memcpy(&code[2], &d, 8);
-    memcpy(fn, code, sizeof(code));
-    sys_icache_invalidate(fn, sizeof(code));
-    vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)0x4000,
-               FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    return YES;
-}
+/* 0.14: el detour vm_protect fue eliminado — viola firma de codigo iOS y
+   causaba SIGKILL al activar. Ahora mm_aim_lock() escribe directamente en
+   OFF_PAWN_AIMROT (datos en heap, no codigo ejecutable). */
 
 /* 0.9.8: AIM LOCK igual que los mods de referencia (SP3CTERIOS y StarCodm).
    StarCodm, desensamblado, hace literalmente:
@@ -4894,9 +4819,11 @@ static void mm_aim_lock(void)
 
         float q[4];
         mm_q_slerp(base, qtar, a, q);
-        g_lock_q.x = q[0]; g_lock_q.y = q[1]; g_lock_q.z = q[2]; g_lock_q.w = q[3];
+        memcpy((void *)((uintptr_t)lp + OFF_PAWN_AIMROT), q, sizeof(q));
+        if (g_fp_setaimrot) { MMQuat qv = {q[0],q[1],q[2],q[3]}; g_fp_setaimrot(lp, qv); }
         g_lock_pawn = (uint64_t)(uintptr_t)lp;
         g_lock_active = 1;
+        g_lock_frames++;
 
         {   /* sonda 2 Hz */
             static double s_lg = 0.0;
@@ -4906,16 +4833,16 @@ static void mm_aim_lock(void)
                 NSString *docs = mm_docs_dir();
                 if (docs.length > 0) {
                     NSString *t = [NSString stringWithFormat:
-                        @"build=%s\nmodo=detour-getAimRotation\n"
+                        @"build=%s\nmodo=write-struct\n"
                         @"camPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
                         @"fwd=%.3f,%.3f,%.3f des=%.3f,%.3f,%.3f\n"
-                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d llamadasGetter=%ld patch=%d\n"
+                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d frames=%ld\n"
                         @"q_base=%.4f,%.4f,%.4f,%.4f\nq_lock=%.4f,%.4f,%.4f,%.4f\n",
                         MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2],
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
-                        (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_calls, (int)g_patch_on,
+                        (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_frames,
                         (double)base[0], (double)base[1], (double)base[2], (double)base[3],
                         (double)q[0], (double)q[1], (double)q[2], (double)q[3]];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
