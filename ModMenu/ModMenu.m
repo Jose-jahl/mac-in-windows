@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.16.1"
+#define MODMENU_VERSION     "0.16.2"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.16.1";
+const char *modmenu_build_id = "modmenu-glass-0.16.2";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -1042,6 +1042,7 @@ static void mm_probe_run(void);
 static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H);
+static void mm_estate_tick(void);   /* 0.16.2: cache de estado a 10 Hz */
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
@@ -4145,6 +4146,7 @@ static void mm_esp_frame(double t)
         if ((s_tick % 30) == 0) mm_aim_apply();
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
+            mm_estate_tick();               /* 0.16.2: lecturas caras a 10 Hz */
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
@@ -8496,13 +8498,149 @@ __attribute__((constructor)) static void modmenu_init(void)
  *    st   + OFF_ST_DOCHANGE (0x03C)   -> float duracion de la recarga
  * ========================================================================= */
 
+/* ===========================================================================
+ *  0.16.2 — ESTADO POR ENEMIGO EN CACHE (optimizacion).
+ *
+ *  EL PROBLEMA QUE ARREGLA
+ *  Las features de 0.16.0 leian memoria DENTRO del pintado: el cono y el aviso
+ *  "te apunta" leian un quaternion de 16 B por enemigo, y el estado de recarga
+ *  hacia 4 saltos de puntero + 2 floats por enemigo, todo a la frecuencia del
+ *  lienzo. Con 20 enemigos a 60 fps eso son ~7.000 lecturas de vm por segundo
+ *  solo para dibujar, y el juego se siente pesado.
+ *
+ *  LA SOLUCION
+ *  Las lecturas caras se hacen a 10 Hz en mm_estate_tick() (llamado desde
+ *  mm_tick), una sola vez por enemigo, y se guardan en g_estate[]. El pintado
+ *  despues NO toca memoria del juego: solo lee el cache. Baja el costo ~6x y el
+ *  estado mostrado no pierde utilidad (una recarga dura segundos).
+ *
+ *  Se indexa por PAWN, no por indice: g_boxes se rearma a 30 Hz y los indices
+ *  pueden cambiar entre un refresh y el siguiente. Si el pawn no coincide, ese
+ *  enemigo simplemente no se dibuja ese frame (mejor que mostrar dato viejo).
+ * ========================================================================= */
+
 #define MM_CONE_HALF_DEG   30.0f   /* medio angulo del cono dibujado */
 #define MM_CONE_LEN_M      10.0f   /* largo del cono en metros        */
+#define MM_AIMED_DEG        7.0f   /* "te apunta" dentro de esto      */
+#define MM_ESTATE_MS      100.0    /* refresh del cache: 10 Hz        */
+
+typedef struct {
+    uint64_t pawn;
+    int      valid;
+    float    fwd[3];              /* forward horizontal ya normalizado */
+    int      reloading;
+    float    elapse, dur;
+    int      ammo, ammoMax, ads;
+} MMEnemyState;
+
+static MMEnemyState g_estate[MM_MAX_BOXES];
+static double       g_estate_t = 0.0;
+static float        g_me[3] = { 0.0f, 0.0f, 0.0f };
+static int          g_me_ok = 0;
+/* toggles cacheados: leerlos por frame costaba un viaje a NSUserDefaults por
+   helper. Se refrescan junto con el cache. */
+static int          g_opt_cone = 0, g_opt_ammo = 0, g_opt_reload = 0, g_opt_aimed = 0;
+
+/* Un solo lugar hace las lecturas caras. */
+static void mm_enemy_state_read(const MMEspBox *b, MMEnemyState *st)
+{
+    st->pawn = b->pawn;
+    st->valid = 0;
+    st->reloading = 0;
+    st->elapse = st->dur = 0.0f;
+    st->ammo = st->ammoMax = -1;
+    st->ads = (b->tags & 8u) ? 1 : 0;
+    st->fwd[0] = st->fwd[1] = st->fwd[2] = 0.0f;
+    if (b->pawn == 0) return;
+
+    /* forward: quaternion de aim en 0x380 */
+    float q[4];
+    memcpy(q, (const void *)((uintptr_t)b->pawn + OFF_PAWN_AIMROT), sizeof(q));
+    float ql = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+    if (ql > 0.01f) {
+        q[0] /= ql; q[1] /= ql; q[2] /= ql; q[3] /= ql;
+        float f[3] = { 0.0f, 0.0f, 1.0f };
+        mm_q_rotate(q, f, st->fwd);
+        float fl = sqrtf(st->fwd[0]*st->fwd[0] + st->fwd[2]*st->fwd[2]);
+        if (fl > 0.05f) {
+            st->fwd[0] /= fl; st->fwd[2] /= fl;
+            st->valid = 1;
+        }
+    }
+
+    /* cadena del arma: inventario -> arma -> estado */
+    uint64_t inv = 0, wep = 0, sm = 0, sst = 0;
+    if (!mm_r64(b->pawn + OFF_PAWN_INVMGR, &inv) || inv == 0) return;
+    if (!mm_r64(inv + OFF_INVM_CURWEP, &wep) || wep == 0) return;
+
+    if (g_opt_ammo || g_opt_reload) {
+        uint8_t aim = 0;
+        if (mm_vm_read(wep + OFF_WEP_AIMING, &aim, 1)) st->ads = (aim & 1) ? 1 : 0;
+    }
+    if (g_opt_ammo) {
+        int32_t clip = -1, cmax = -1;
+        uintptr_t fl = 0;
+        if (mm_r64(wep + OFF_WEP_FIRELST, &fl) && fl != 0) {
+            if (mm_vm_read(fl + OFF_FC_CLIP, &clip, sizeof(clip))) st->ammo = clip;
+            if (mm_vm_read(fl + OFF_FC_CLIPMAX, &cmax, sizeof(cmax))) st->ammoMax = cmax;
+        }
+    }
+    if (g_opt_reload) {
+        if (!mm_r64(wep + OFF_WEP_STATEMACH, &sm) || sm == 0) return;
+        if (!mm_r64(sm + OFF_SM_CURSTATE, &sst) || sst == 0) return;
+        float el = 0.0f, du = 0.0f;
+        mm_vm_read(sst + OFF_ST_ELAPSE, &el, sizeof(el));
+        mm_vm_read(sst + OFF_ST_DOCHANGE, &du, sizeof(du));
+        st->elapse = el;
+        st->dur = du;
+        st->reloading = (du > 0.05f && el > 0.0f && el <= du + 0.5f) ? 1 : 0;
+    }
+}
+
+/* Refresca el cache. Lo llama mm_tick, no el pintado. */
+static void mm_estate_tick(void)
+{
+    double now = CACurrentMediaTime();
+    if ((now - g_estate_t) * 1000.0 < MM_ESTATE_MS) return;
+    g_estate_t = now;
+
+    g_opt_cone   = mm_def_bool(@"mm_esp_cone", NO);
+    g_opt_ammo   = mm_def_bool(@"mm_esp_ammo", NO);
+    g_opt_reload = mm_def_bool(@"mm_esp_reload", NO);
+    g_opt_aimed  = mm_def_bool(@"mm_esp_aimed", NO);
+
+    /* mi posicion, una vez, para el aviso de "te apunta" */
+    g_me_ok = 0;
+    if (g_fp_localpawn != NULL && g_fp_trpos != NULL) {
+        void *lp = g_fp_localpawn();
+        if (lp != NULL) {
+            uint64_t tr = 0;
+            if (mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &tr) && tr != 0) {
+                g_fp_trpos((void *)(uintptr_t)tr, g_me);
+                if (fabsf(g_me[0]) + fabsf(g_me[1]) + fabsf(g_me[2]) > 1.0f) g_me_ok = 1;
+            }
+        }
+    }
+
+    for (int i = 0; i < MM_MAX_BOXES; i++) g_estate[i].valid = 0;
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        if (!g_boxes[i].alive) continue;
+        mm_enemy_state_read(&g_boxes[i], &g_estate[i]);
+    }
+}
+
+/* Devuelve el cache de la caja i solo si sigue siendo el mismo pawn. */
+static const MMEnemyState *mm_estate_of(int i)
+{
+    if (i < 0 || i >= MM_MAX_BOXES) return NULL;
+    const MMEnemyState *st = &g_estate[i];
+    if (!st->valid || st->pawn == 0 || st->pawn != g_boxes[i].pawn) return NULL;
+    return st;
+}
 
 static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H)
 {
-    if (!mm_def_bool(@"mm_esp_cone", NO)) return;
-    if (g_box_count <= 0 || ctx == NULL) return;
+    if (!g_opt_cone || g_box_count <= 0 || ctx == NULL) return;
 
     UIColor *acc = mm_neon_green();
     CGFloat ar = 0.0, ag = 0.0, ab = 0.0;
@@ -8513,29 +8651,16 @@ static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H)
     CGContextSetRGBStrokeColor(ctx, ar, ag, ab, 0.42);
     CGContextSetRGBFillColor(ctx, ar, ag, ab, 0.075);
 
+    float ca = cosf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
+    float sa = sinf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
+
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        if (!g_boxes[i].alive || g_boxes[i].pawn == 0) continue;
+        const MMEnemyState *st = mm_estate_of(i);
+        if (st == NULL || !st->valid) continue;
 
-        float q[4];
-        memcpy(q, (const void *)((uintptr_t)g_boxes[i].pawn + OFF_PAWN_AIMROT), sizeof(q));
-        float ql = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
-        if (!(ql > 0.01f)) continue;
-        q[0] /= ql; q[1] /= ql; q[2] /= ql; q[3] /= ql;
-
-        /* forward = q * (0,0,1) */
-        float f[3] = { 0.0f, 0.0f, 1.0f };
-        mm_q_rotate(q, f, f);
-
-        /* solo el plano horizontal: el cono se dibuja en el piso */
-        float fl = sqrtf(f[0]*f[0] + f[2]*f[2]);
-        if (fl < 0.05f) continue;
-        float fx = f[0] / fl, fz = f[2] / fl;
-
-        float apexY = g_boxes[i].wy - 1.35f;          /* a los pies */
+        float fx = st->fwd[0], fz = st->fwd[2];
+        float apexY = g_boxes[i].wy - 1.35f;
         float a0[3] = { g_boxes[i].wx, apexY, g_boxes[i].wz };
-
-        float ca = cosf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
-        float sa = sinf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
         float l[3] = { a0[0] + (fx * ca - fz * sa) * MM_CONE_LEN_M, apexY,
                        a0[2] + (fx * sa + fz * ca) * MM_CONE_LEN_M };
         float r[3] = { a0[0] + (fx * ca + fz * sa) * MM_CONE_LEN_M, apexY,
@@ -8546,7 +8671,7 @@ static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H)
         if (!mm_w2s(g_view_mtx, g_proj_mtx, a0, NO, W, H, &p0, &d0, NULL, NULL)) continue;
         if (!mm_w2s(g_view_mtx, g_proj_mtx, l,  NO, W, H, &pl, &dl, NULL, NULL)) continue;
         if (!mm_w2s(g_view_mtx, g_proj_mtx, r,  NO, W, H, &pr, &dr, NULL, NULL)) continue;
-        if (d0 || dl || dr) continue;                 /* algun vertice detras */
+        if (d0 || dl || dr) continue;
 
         CGContextBeginPath(ctx);
         CGContextMoveToPoint(ctx, p0.x, p0.y);
@@ -8558,30 +8683,9 @@ static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H)
     CGContextRestoreGState(ctx);
 }
 
-/* Devuelve 1 si el arma del pawn esta cambiando cargador. */
-static int mm_pawn_reloading(uint64_t pawn, float *outElapse, float *outDur)
-{
-    if (outElapse) *outElapse = 0.0f;
-    if (outDur) *outDur = 0.0f;
-    if (pawn == 0) return 0;
-    uint64_t inv = 0, wep = 0, sm = 0, st = 0;
-    if (!mm_r64(pawn + OFF_PAWN_INVMGR, &inv) || inv == 0) return 0;
-    if (!mm_r64(inv + OFF_INVM_CURWEP, &wep) || wep == 0) return 0;
-    if (!mm_r64(wep + OFF_WEP_STATEMACH, &sm) || sm == 0) return 0;
-    if (!mm_r64(sm + OFF_SM_CURSTATE, &st) || st == 0) return 0;
-    float el = 0.0f, du = 0.0f;
-    mm_vm_read(st + OFF_ST_ELAPSE, &el, sizeof(el));
-    mm_vm_read(st + OFF_ST_DOCHANGE, &du, sizeof(du));
-    if (outElapse) *outElapse = el;
-    if (outDur) *outDur = du;
-    return (du > 0.05f && el > 0.0f && el <= du + 0.5f) ? 1 : 0;
-}
-
 static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
 {
-    int wantAmmo   = mm_def_bool(@"mm_esp_ammo", NO);
-    int wantReload = mm_def_bool(@"mm_esp_reload", NO);
-    if ((!wantAmmo && !wantReload) || g_box_count <= 0 || ctx == NULL) return;
+    if ((!g_opt_ammo && !g_opt_reload) || g_box_count <= 0 || ctx == NULL) return;
 
     UIFont *f = [UIFont monospacedDigitSystemFontOfSize:9.0 weight:UIFontWeightSemibold];
     NSShadow *sh = mm_txt_shadow();
@@ -8591,26 +8695,23 @@ static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
     CGContextSaveGState(ctx);
 
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        if (!g_boxes[i].alive) continue;
-
-        float el = 0.0f, du = 0.0f;
-        int reloading = wantReload ? mm_pawn_reloading(g_boxes[i].pawn, &el, &du) : 0;
+        const MMEnemyState *st = mm_estate_of(i);
+        if (st == NULL) continue;
 
         NSString *txt = nil;
         UIColor *col = acc;
-        if (reloading) {
-            int pct = (du > 0.01f) ? (int)((el / du) * 100.0f) : 0;
+        if (g_opt_reload && st->reloading) {
+            int pct = (st->dur > 0.01f) ? (int)((st->elapse / st->dur) * 100.0f) : 0;
             if (pct < 0) pct = 0;
             if (pct > 100) pct = 100;
             txt = [NSString stringWithFormat:@"RECARGA %d%%", pct];
             col = red;
-        } else if (wantAmmo && g_boxes[i].ammo >= 0) {
-            if (g_boxes[i].ammoMax > 0)
-                txt = [NSString stringWithFormat:@"%d/%d", g_boxes[i].ammo, g_boxes[i].ammoMax];
+        } else if (g_opt_ammo && st->ammo >= 0) {
+            if (st->ammoMax > 0)
+                txt = [NSString stringWithFormat:@"%d/%d", st->ammo, st->ammoMax];
             else
-                txt = [NSString stringWithFormat:@"%d", g_boxes[i].ammo];
-            if (g_boxes[i].ammoMax > 0 && g_boxes[i].ammo * 4 <= g_boxes[i].ammoMax)
-                col = red;                              /* cargador casi vacio */
+                txt = [NSString stringWithFormat:@"%d", st->ammo];
+            if (st->ammoMax > 0 && st->ammo * 4 <= st->ammoMax) col = red;
         }
         if (txt == nil) continue;
 
@@ -8620,13 +8721,12 @@ static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
         CGSize sz = mm_text_size(txt, at, 3);
         CGFloat bx = g_boxes[i].x + (g_boxes[i].w - sz.width) * 0.5f;
         CGFloat by = g_boxes[i].y + g_boxes[i].h + 3.0;
-        if (by > H - sz.height) by = g_boxes[i].y - sz.height - 3.0;   /* no salir abajo */
+        if (by > H - sz.height) by = g_boxes[i].y - sz.height - 3.0;
         if (bx < 0.0) bx = 0.0;
         if (bx + sz.width > W) bx = W - sz.width;
         [txt drawAtPoint:CGPointMake(bx, by) withAttributes:at];
 
-        /* marcador de ADS: punto al costado del texto */
-        if (wantAmmo && (g_boxes[i].tags & 8u)) {
+        if (g_opt_ammo && st->ads) {
             CGContextSetRGBFillColor(ctx, 1.0, 0.85, 0.25, 0.95);
             CGContextFillEllipseInRect(ctx, CGRectMake(bx - 8.0, by + sz.height * 0.5 - 2.0,
                                                        4.0, 4.0));
@@ -8635,27 +8735,9 @@ static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
     CGContextRestoreGState(ctx);
 }
 
-
-/* 0.16.1 — "TE APUNTA": marca la caja cuando el forward del enemigo pasa cerca de
-   la posicion del jugador local. Usa SOLO datos que ya existen: el quaternion de aim
-   (0x380) y las dos posiciones. Cero offsets nuevos.
-   Es la prueba de fuego del cono: si el cono esta bien orientado, este aviso tiene
-   que encenderse justo cuando ese enemigo te esta encarando. */
-#define MM_AIMED_DEG   7.0f    /* medio angulo: dentro de esto, "te apunta" */
-
 static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
 {
-    if (!mm_def_bool(@"mm_esp_aimed", NO)) return;
-    if (g_box_count <= 0 || ctx == NULL) return;
-    if (g_fp_localpawn == NULL || g_fp_trpos == NULL) return;
-
-    void *lp = g_fp_localpawn();
-    if (lp == NULL) return;
-    uint64_t tr = 0;
-    if (!mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &tr) || tr == 0) return;
-    float me[3] = { 0.0f, 0.0f, 0.0f };
-    g_fp_trpos((void *)(uintptr_t)tr, me);
-    if (!(fabsf(me[0]) + fabsf(me[1]) + fabsf(me[2]) > 1.0f)) return;
+    if (!g_opt_aimed || !g_me_ok || g_box_count <= 0 || ctx == NULL) return;
 
     float cosLim = cosf(MM_AIMED_DEG * (float)M_PI / 180.0f);
 
@@ -8665,28 +8747,19 @@ static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
     CGContextSetRGBFillColor(ctx, 1.0, 0.22, 0.24, 0.95);
 
     for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        if (!g_boxes[i].alive || g_boxes[i].pawn == 0) continue;
+        const MMEnemyState *st = mm_estate_of(i);
+        if (st == NULL) continue;
 
-        float q[4];
-        memcpy(q, (const void *)((uintptr_t)g_boxes[i].pawn + OFF_PAWN_AIMROT), sizeof(q));
-        float ql = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
-        if (!(ql > 0.01f)) continue;
-        q[0] /= ql; q[1] /= ql; q[2] /= ql; q[3] /= ql;
-
-        float f[3] = { 0.0f, 0.0f, 1.0f };
-        mm_q_rotate(q, f, f);
-
-        float dx = me[0] - g_boxes[i].wx;
-        float dy = me[1] - (g_boxes[i].wy - 1.35f);
-        float dz = me[2] - g_boxes[i].wz;
+        float dx = g_me[0] - g_boxes[i].wx;
+        float dy = g_me[1] - (g_boxes[i].wy - 1.35f);
+        float dz = g_me[2] - g_boxes[i].wz;
         float dl = sqrtf(dx*dx + dy*dy + dz*dz);
         if (dl < 1.5f) continue;
         dx /= dl; dy /= dl; dz /= dl;
 
-        float dot = f[0]*dx + f[1]*dy + f[2]*dz;
+        float dot = st->fwd[0]*dx + st->fwd[1]*dy + st->fwd[2]*dz;
         if (dot < cosLim) continue;
 
-        /* te apunta: borde rojo sobre la caja + marca arriba */
         CGRect r = CGRectMake(g_boxes[i].x - 2.0, g_boxes[i].y - 2.0,
                               g_boxes[i].w + 4.0, g_boxes[i].h + 4.0);
         CGContextStrokeRect(ctx, r);
@@ -8702,7 +8775,6 @@ static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
     }
     CGContextRestoreGState(ctx);
 }
-
 
 /* ===========================================================================
  *  0.15.0 — API del panel (mm_panel_api.h).
