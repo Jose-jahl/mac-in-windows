@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.16.0"
+#define MODMENU_VERSION     "0.16.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.16.0";
+const char *modmenu_build_id = "modmenu-glass-0.16.1";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -1041,6 +1041,7 @@ static void mm_probe_run(void);
 /* 0.16.0: features nuevas del ESP, dibujadas desde el lienzo. */
 static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H);
+static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
@@ -2326,6 +2327,7 @@ static int mm_declutter_budget(void)
     /* 0.16.0: cono de vision y estado (recarga / municion / ADS) por enemigo */
     mm_draw_enemy_cones(ctx, bs.size.width, bs.size.height);
     mm_draw_enemy_state(ctx, bs.size.width, bs.size.height);
+    mm_draw_aimed_at(ctx, bs.size.width, bs.size.height);
 
     /* v0.5.0: aunque no haya cajas (todos los enemigos detras de la camara),
        el lienzo sigue: la flecha "fuera de pantalla" tiene que poder salir. */
@@ -6419,14 +6421,11 @@ static void mm_cloud_build_combat(UIView *page)
     CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
 
     /* ESP: que se dibuja de cada enemigo. */
-    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W,
-                              MM_CLOUD_BODY_H + MM_CLOUD_ROW_H * 3.0);
+    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
-                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
-                       @"mm_esp_ammo", @"mm_esp_reload", @"mm_esp_cone" ];
+                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist" ];
     NSArray *titles = @[ @"ESP maestro", @"Cajas", @"Jugadores", @"Bots",
-                         @"Nombres", @"Distancia",
-                         @"Municion", @"Recarga", @"Cono de vision" ];
+                         @"Nombres", @"Distancia" ];
     for (NSUInteger i = 0; i < keys.count; i++)
         mm_cloud_row(a, titles[i], keys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, (i != 0));
@@ -6436,8 +6435,9 @@ static void mm_cloud_build_combat(UIView *page)
     UIView *b = mm_cloud_card(@"CUERPO", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     NSArray *rkeys = @[ @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
-                        @"mm_esp_fill" ];
-    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba", @"Relleno" ];
+                        @"mm_esp_fill", @"mm_esp_ammo", @"mm_esp_reload" ];
+    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba", @"Relleno",
+                       @"Municion", @"Recarga" ];
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
@@ -6476,6 +6476,12 @@ static void mm_cloud_build_combat(UIView *page)
     [c addSubview:ms];
 
     mm_cloud_static_row(c, @"No recoil", @"ACTIVO", 122.0);
+    /* 0.16.1: las tres features nuevas NO entran en OBJETIVOS (la tarjeta ya esta
+       llena y el body del panel no crece), asi que se reparten en el espacio libre
+       de las otras dos: CUERPO tenia 2 filas libres y ALCANCE otras 2. Todas quedan
+       dentro de MM_CLOUD_BODY_H, que es lo que hace que los toques lleguen. */
+    mm_cloud_row(c, @"Cono de vision", @"mm_esp_cone", NO, 154.0, YES);
+    mm_cloud_row(c, @"Te apunta", @"mm_esp_aimed", NO, 182.0, YES);
     mm_cloud_static_row(c, @"No spread", @"ACTIVO", 150.0);
     mm_cloud_static_row(c, @"Fast reload", @"ACTIVO", 178.0);
     [page addSubview:c];
@@ -8630,6 +8636,74 @@ static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
 }
 
 
+/* 0.16.1 — "TE APUNTA": marca la caja cuando el forward del enemigo pasa cerca de
+   la posicion del jugador local. Usa SOLO datos que ya existen: el quaternion de aim
+   (0x380) y las dos posiciones. Cero offsets nuevos.
+   Es la prueba de fuego del cono: si el cono esta bien orientado, este aviso tiene
+   que encenderse justo cuando ese enemigo te esta encarando. */
+#define MM_AIMED_DEG   7.0f    /* medio angulo: dentro de esto, "te apunta" */
+
+static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
+{
+    if (!mm_def_bool(@"mm_esp_aimed", NO)) return;
+    if (g_box_count <= 0 || ctx == NULL) return;
+    if (g_fp_localpawn == NULL || g_fp_trpos == NULL) return;
+
+    void *lp = g_fp_localpawn();
+    if (lp == NULL) return;
+    uint64_t tr = 0;
+    if (!mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &tr) || tr == 0) return;
+    float me[3] = { 0.0f, 0.0f, 0.0f };
+    g_fp_trpos((void *)(uintptr_t)tr, me);
+    if (!(fabsf(me[0]) + fabsf(me[1]) + fabsf(me[2]) > 1.0f)) return;
+
+    float cosLim = cosf(MM_AIMED_DEG * (float)M_PI / 180.0f);
+
+    CGContextSaveGState(ctx);
+    CGContextSetLineWidth(ctx, 1.6);
+    CGContextSetRGBStrokeColor(ctx, 1.0, 0.22, 0.24, 0.95);
+    CGContextSetRGBFillColor(ctx, 1.0, 0.22, 0.24, 0.95);
+
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        if (!g_boxes[i].alive || g_boxes[i].pawn == 0) continue;
+
+        float q[4];
+        memcpy(q, (const void *)((uintptr_t)g_boxes[i].pawn + OFF_PAWN_AIMROT), sizeof(q));
+        float ql = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+        if (!(ql > 0.01f)) continue;
+        q[0] /= ql; q[1] /= ql; q[2] /= ql; q[3] /= ql;
+
+        float f[3] = { 0.0f, 0.0f, 1.0f };
+        mm_q_rotate(q, f, f);
+
+        float dx = me[0] - g_boxes[i].wx;
+        float dy = me[1] - (g_boxes[i].wy - 1.35f);
+        float dz = me[2] - g_boxes[i].wz;
+        float dl = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (dl < 1.5f) continue;
+        dx /= dl; dy /= dl; dz /= dl;
+
+        float dot = f[0]*dx + f[1]*dy + f[2]*dz;
+        if (dot < cosLim) continue;
+
+        /* te apunta: borde rojo sobre la caja + marca arriba */
+        CGRect r = CGRectMake(g_boxes[i].x - 2.0, g_boxes[i].y - 2.0,
+                              g_boxes[i].w + 4.0, g_boxes[i].h + 4.0);
+        CGContextStrokeRect(ctx, r);
+
+        CGFloat mx = g_boxes[i].x + g_boxes[i].w * 0.5f;
+        CGFloat my = g_boxes[i].y - 10.0;
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, mx, my + 4.0);
+        CGContextAddLineToPoint(ctx, mx - 4.5, my - 3.0);
+        CGContextAddLineToPoint(ctx, mx + 4.5, my - 3.0);
+        CGContextClosePath(ctx);
+        CGContextFillPath(ctx);
+    }
+    CGContextRestoreGState(ctx);
+}
+
+
 /* ===========================================================================
  *  0.15.0 — API del panel (mm_panel_api.h).
  *
@@ -8652,7 +8726,7 @@ static const char *const MM_ESP_KEYS[] = {
     "mm_esp_master", "mm_esp_box", "mm_esp_players", "mm_esp_bots",
     "mm_esp_name", "mm_esp_dist", "mm_esp_lines", "mm_esp_health",
     "mm_esp_fill", "mm_x_radar", "mm_x_cross", "mm_x_aimring", "mm_x_fps",
-    "mm_esp_ammo", "mm_esp_reload", "mm_esp_cone",
+    "mm_esp_ammo", "mm_esp_reload", "mm_esp_cone", "mm_esp_aimed",
     NULL
 };
 
