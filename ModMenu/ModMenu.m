@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.16.2"
+#define MODMENU_VERSION     "0.16.3"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.16.2";
+const char *modmenu_build_id = "modmenu-glass-0.16.3";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -6423,11 +6423,15 @@ static void mm_cloud_build_combat(UIView *page)
     CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
 
     /* ESP: que se dibuja de cada enemigo. */
-    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    /* 10 filas: 38 + 10*28 = 318, tarjeta 326. Entra en el contentSize del scroll. */
+    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W,
+                              38.0 + MM_CLOUD_ROW_H * 10.0 + 8.0);
     NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
-                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist" ];
+                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
+                       @"mm_esp_ammo", @"mm_esp_reload", @"mm_esp_cone", @"mm_esp_aimed" ];
     NSArray *titles = @[ @"ESP maestro", @"Cajas", @"Jugadores", @"Bots",
-                         @"Nombres", @"Distancia" ];
+                         @"Nombres", @"Distancia",
+                         @"Municion", @"Recarga", @"Cono de vision", @"Te apunta" ];
     for (NSUInteger i = 0; i < keys.count; i++)
         mm_cloud_row(a, titles[i], keys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, (i != 0));
@@ -6437,9 +6441,8 @@ static void mm_cloud_build_combat(UIView *page)
     UIView *b = mm_cloud_card(@"CUERPO", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     NSArray *rkeys = @[ @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
-                        @"mm_esp_fill", @"mm_esp_ammo", @"mm_esp_reload" ];
-    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba", @"Relleno",
-                       @"Municion", @"Recarga" ];
+                        @"mm_esp_fill" ];
+    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba", @"Relleno" ];
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
@@ -6478,12 +6481,6 @@ static void mm_cloud_build_combat(UIView *page)
     [c addSubview:ms];
 
     mm_cloud_static_row(c, @"No recoil", @"ACTIVO", 122.0);
-    /* 0.16.1: las tres features nuevas NO entran en OBJETIVOS (la tarjeta ya esta
-       llena y el body del panel no crece), asi que se reparten en el espacio libre
-       de las otras dos: CUERPO tenia 2 filas libres y ALCANCE otras 2. Todas quedan
-       dentro de MM_CLOUD_BODY_H, que es lo que hace que los toques lleguen. */
-    mm_cloud_row(c, @"Cono de vision", @"mm_esp_cone", NO, 154.0, YES);
-    mm_cloud_row(c, @"Te apunta", @"mm_esp_aimed", NO, 182.0, YES);
     mm_cloud_static_row(c, @"No spread", @"ACTIVO", 150.0);
     mm_cloud_static_row(c, @"Fast reload", @"ACTIVO", 178.0);
     [page addSubview:c];
@@ -7346,7 +7343,22 @@ static void mm_build_ui(void)
 
     /* Paginas: area ancha de tres columnas, 604 x 214. */
     CGRect body = CGRectMake(18.0, MM_CLOUD_BODY_Y, MM_PANEL_W - 36.0, MM_CLOUD_BODY_H);
-    g_p_esp  = [[UIView alloc] initWithFrame:body];
+    /* 0.16.3: la pagina ESP pasa a ser SCROLLABLE. Las tres columnas estaban llenas
+       (OBJETIVOS 6 filas, CUERPO 4, ALCANCE con 2 sliders + 3 filas fijas en
+       y=122/150/178), asi que no habia un solo hueco libre: la version anterior puso
+       los toggles nuevos encima de "No spread"/"Fast reload". Con scroll la tarjeta
+       puede crecer y todo queda alcanzable, sin volver a tocar posiciones a ojo. */
+    {
+        UIScrollView *sc = [[UIScrollView alloc] initWithFrame:body];
+        sc.contentSize = CGSizeMake(body.size.width, MM_CLOUD_BODY_H + MM_CLOUD_ROW_H * 4.0 + 20.0);
+        sc.alwaysBounceVertical = YES;
+        sc.showsVerticalScrollIndicator = YES;
+        sc.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+        sc.clipsToBounds = YES;
+        sc.delaysContentTouches = NO;      /* que los switches respondan al primer toque */
+        sc.canCancelContentTouches = YES;
+        g_p_esp = sc;
+    }
     g_p_aim  = [[UIView alloc] initWithFrame:body];
     g_p_vis  = [[UIView alloc] initWithFrame:body];
     g_p_misc = [[UIView alloc] initWithFrame:body];
