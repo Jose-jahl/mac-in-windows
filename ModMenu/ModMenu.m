@@ -1,4 +1,4 @@
-/*=============================================================================
+﻿/*=============================================================================
  *  ModMenu.m  -  menu runtime del proyecto fusion
  *  ---------------------------------------------------------------------------
  *  Este archivo se compila como ModMenu.dylib y la herramienta lo mete en el
@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.17.0"
+#define MODMENU_VERSION     "0.17.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.17.0";
+const char *modmenu_build_id = "modmenu-glass-0.17.1";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -3157,6 +3157,29 @@ static void mm_haptic(int style)
 /* 1.20: copiar el ultimo self_test.txt al portapapeles (codigo copiable). */
 - (void)onSelfTestCopy
 {
+    /* 0.17.1: tabla de la ENTIDAD. El team vive aca: OFF_ENT_TEAM = 0x110.
+       Esta tabla valida de una sola pasada team, dead(0x0FC), robot(0x298),
+       BRState(0x078), vehicle(0x190/0x194), war(0x2A8), medtime(0x2AC),
+       invis(0x2B0) y el puntero de nombre(0x160). */
+    [out appendString:@"\n# ENTIDAD (pawn + OFF_PAWN_ENTITY = 0x5C0)\n"];
+    for (int k = 0; k < n; k++)
+        [out appendFormat:@"ent%d=%#lx\n", k, (unsigned long)ev[k]];
+    [out appendString:@"eoff     "];
+    for (int k = 0; k < n; k++) [out appendFormat:@"e%-9d", k];
+    [out appendString:@"\n"];
+    for (uintptr_t off = 0x000; off < 0x300; off += 4) {
+        uint32_t v[6];
+        int any = 0;
+        for (int k = 0; k < n; k++) {
+            if (ev[k] != 0 && mm_vm_read((uintptr_t)ev[k] + off, &v[k], sizeof(v[k]))) any = 1;
+            else v[k] = 0xDEADBEEFu;
+        }
+        if (!any) continue;
+        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
+        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
+        [out appendString:@"\n"];
+    }
+
     NSString *docs = mm_docs_dir();
     NSString *p = (docs.length > 0)
         ? [docs stringByAppendingPathComponent:@"self_test.txt"] : nil;
@@ -8833,11 +8856,14 @@ static void mm_team_probe_dump(void)
     if (lp == NULL) return;
 
     uintptr_t pv[6];
+    uint64_t  ev[6];
     char      nm[6][48];
     float     d[6];
     int       n = 0;
 
     pv[0] = (uintptr_t)lp;
+    ev[0] = 0;
+    mm_r64(pv[0] + OFF_PAWN_ENTITY, &ev[0]);
     snprintf(nm[0], sizeof(nm[0]), "(local)");
     d[0] = 0.0f;
     n = 1;
@@ -8845,6 +8871,8 @@ static void mm_team_probe_dump(void)
     for (int i = 0; i < g_box_count && n < 6; i++) {
         if (g_boxes[i].pawn == 0) continue;
         pv[n] = (uintptr_t)g_boxes[i].pawn;
+        ev[n] = 0;
+        mm_r64(pv[n] + OFF_PAWN_ENTITY, &ev[n]);
         snprintf(nm[n], sizeof(nm[n]), "%s", g_boxes[i].name[0] ? g_boxes[i].name : "?");
         d[n] = g_boxes[i].dist;
         n++;
@@ -9012,3 +9040,4 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
