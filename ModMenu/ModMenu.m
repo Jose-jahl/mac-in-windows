@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.18.0"
+#define MODMENU_VERSION     "0.19.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.18.0";
+const char *modmenu_build_id = "modmenu-glass-0.19.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -8826,6 +8826,34 @@ static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
  *
  *  Corre una sola vez por activacion (1920 lecturas), no en cada frame.
  * ========================================================================= */
+/* 0.19.0: volcado generico de una tabla objeto/offset. Una sola implementacion
+   para todas las estructuras, para no repetir el mismo bucle seis veces. */
+static void mm_probe_table(NSMutableString *out, NSString *title,
+                           const uint64_t *obj, int n,
+                           uintptr_t lo, uintptr_t hi, const char *pfx)
+{
+    [out appendFormat:@"\n# %@\n", title];
+    for (int k = 0; k < n; k++)
+        [out appendFormat:@"%s%d=%#lx\n", pfx, k, (unsigned long)obj[k]];
+    [out appendString:@"off      "];
+    for (int k = 0; k < n; k++) [out appendFormat:@"%s%-8d", pfx, k];
+    [out appendString:@"\n"];
+    for (uintptr_t off = lo; off < hi; off += 4) {
+        uint32_t v[6];
+        int any = 0;
+        for (int k = 0; k < n; k++) {
+            if (obj[k] != 0 && mm_vm_read((uintptr_t)obj[k] + off, &v[k], sizeof(v[k])))
+                any = 1;
+            else
+                v[k] = 0xDEADBEEFu;
+        }
+        if (!any) continue;
+        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
+        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
+        [out appendString:@"\n"];
+    }
+}
+
 static void mm_team_probe_dump(void)
 {
     if (g_fp_localpawn == NULL) return;
@@ -8833,126 +8861,76 @@ static void mm_team_probe_dump(void)
     if (lp == NULL) return;
 
     uintptr_t pv[6];
-    uint64_t  ev[6];
     char      nm[6][48];
     float     d[6];
-    int       n = 0;
+    int       n = 1;
 
     pv[0] = (uintptr_t)lp;
-    ev[0] = 0;
-    mm_r64(pv[0] + OFF_PAWN_ENTITY, &ev[0]);
     snprintf(nm[0], sizeof(nm[0]), "(local)");
     d[0] = 0.0f;
-    n = 1;
-
     for (int i = 0; i < g_box_count && n < 6; i++) {
         if (g_boxes[i].pawn == 0) continue;
         pv[n] = (uintptr_t)g_boxes[i].pawn;
-        ev[n] = 0;
-        mm_r64(pv[n] + OFF_PAWN_ENTITY, &ev[n]);
         snprintf(nm[n], sizeof(nm[n]), "%s", g_boxes[i].name[0] ? g_boxes[i].name : "?");
         d[n] = g_boxes[i].dist;
         n++;
     }
 
-    NSMutableString *out = [NSMutableString stringWithCapacity:40000];
-    [out appendFormat:@"# FUSION team probe  build=%s  pawns=%d\n", MODMENU_VERSION, n];
+    NSMutableString *out = [NSMutableString stringWithCapacity:250000];
+    [out appendFormat:@"# FUSION probe  build=%s  pawns=%d\n", MODMENU_VERSION, n];
     for (int k = 0; k < n; k++)
         [out appendFormat:@"pawn%d=%#lx dist=%.1f name=%s\n",
                           k, (unsigned long)pv[k], (double)d[k], nm[k]];
-    [out appendString:@"\n# cada fila: offset  local  p1  p2 ...  (u32 hex)\n"];
-    [out appendString:@"off      "];
-    for (int k = 0; k < n; k++) [out appendFormat:@"p%-9d", k];
-    [out appendString:@"\n"];
 
-    for (uintptr_t off = 0x000; off < 0x600; off += 4) {
-        uint32_t v[6];
-        int any = 0;
-        for (int k = 0; k < n; k++) {
-            if (mm_vm_read(pv[k] + off, &v[k], 4)) any = 1;
-            else v[k] = 0xDEADBEEFu;
+    /* ---- 1) PAWN: transform, aim rotation, punteros ---- */
+    uint64_t pawn[6];
+    for (int k = 0; k < n; k++) pawn[k] = (uint64_t)pv[k];
+    mm_probe_table(out, @"PAWN", pawn, n, 0x000, 0x600, "p");
+
+    /* ---- 2) ENTIDAD: team(0x110), dead(0x0FC), robot(0x298), vehicle,
+               invis, war, medtime, armor(0x5C4/0x5C8), nombre(0x160) ---- */
+    uint64_t ent[6], tr[6], wep[6], wd[6], fc[6], root[6];
+    for (int k = 0; k < n; k++) {
+        uint64_t e = 0, t = 0, inv = 0, w = 0, wc = 0, fcl = 0;
+        ent[k] = 0; tr[k] = 0; wep[k] = 0; wd[k] = 0; fc[k] = 0; root[k] = 0;
+        if (mm_r64(pv[k] + OFF_PAWN_ENTITY, &e) && e != 0) ent[k] = e;
+        if (mm_r64(pv[k] + OFF_PAWN_TRANSFORM, &t) && t != 0) tr[k] = t;
+        if (mm_r64(pv[k] + OFF_PAWN_INVMGR, &inv) && inv != 0 &&
+            mm_r64(inv + OFF_INVM_CURWEP, &w) && w != 0) {
+            wep[k] = w;
+            if (mm_r64(w + OFF_WEP_CONFIG, &wc) && wc != 0) wd[k] = wc;
+            if (mm_r64(w + OFF_WEP_FIRELST, &fcl) && fcl != 0) fc[k] = fcl;
         }
-        if (!any) continue;
-        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
-        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
-        [out appendString:@"\n"];
+        (void)root;
     }
+    mm_probe_table(out, @"ENTIDAD (pawn+0x5C0)", ent, n, 0x000, 0x600, "e");
+    mm_probe_table(out, @"TRANSFORM (pawn+0x308)", tr, n, 0x000, 0x120, "t");
 
-    /* 0.17.1: tabla de la ENTIDAD. El team vive aca: OFF_ENT_TEAM = 0x110.
-       Esta tabla valida de una sola pasada team, dead(0x0FC), robot(0x298),
-       BRState(0x078), vehicle(0x190/0x194), war(0x2A8), medtime(0x2AC),
-       invis(0x2B0) y el puntero de nombre(0x160). */
-    [out appendString:@"\n# ENTIDAD (pawn + OFF_PAWN_ENTITY = 0x5C0)\n"];
-    for (int k = 0; k < n; k++)
-        [out appendFormat:@"ent%d=%#lx\n", k, (unsigned long)ev[k]];
-    [out appendString:@"eoff     "];
-    for (int k = 0; k < n; k++) [out appendFormat:@"e%-9d", k];
-    [out appendString:@"\n"];
-    for (uintptr_t off = 0x000; off < 0x300; off += 4) {
-        uint32_t v[6];
-        int any = 0;
-        for (int k = 0; k < n; k++) {
-            if (ev[k] != 0 && mm_vm_read((uintptr_t)ev[k] + off, &v[k], sizeof(v[k]))) any = 1;
-            else v[k] = 0xDEADBEEFu;
-        }
-        if (!any) continue;
-        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
-        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
-        [out appendString:@"\n"];
-    }
+    /* ---- 3) ARMA y WEAPONDATA: muzzle flash, ADS, ammo ---- */
+    mm_probe_table(out, @"ARMA (INVMGR+0x048)", wep, n, 0x000, 0x400, "w");
+    mm_probe_table(out, @"WEAPONDATA (arma+0x280)", wd, n, 0x000, 0x200, "d");
+    mm_probe_table(out, @"FIRE COMPONENT (arma+0x150)", fc, n, 0x000, 0x400, "f");
 
-    /* 0.18.0: tablas del ARMA. El muzzle flash se configura en el arma y en su
-       WeaponData, asi que estas dos tablas son el instrumento para encontrar el
-       campo que lo apaga (y de paso validan ADS/ammo, que ya usamos a ciegas).
-       Cadena: pawn -> OFF_PAWN_INVMGR(0x2A0) -> OFF_INVM_CURWEP(0x048) -> arma
-               arma -> OFF_WEP_CONFIG(0x280) -> WeaponData */
+    /* ---- 4) ESQUELETO: punteros del pawn LOCAL y su destino.
+       El mesh/huesos cuelgan de un objeto apuntado por el pawn; para encontrarlo
+       sin adivinar, se vuelcan los primeros 0x80 B de cada campo que parezca
+       puntero. Ahi se ve la firma de un array de huesos (ptr a array + count). ---- */
+    [out appendString:@"\n# PUNTEROS DEL PAWN LOCAL -> destino (0x80 B)\n"];
     {
-        uint64_t wep[6], wd[6];
-        for (int k2 = 0; k2 < n; k2++) {
-            uint64_t inv = 0;
-            wep[k2] = 0;
-            wd[k2] = 0;
-            if (mm_r64(pv[k2] + OFF_PAWN_INVMGR, &inv) && inv != 0) {
-                if (mm_r64(inv + OFF_INVM_CURWEP, &wep[k2]) && wep[k2] != 0)
-                    mm_r64(wep[k2] + OFF_WEP_CONFIG, &wd[k2]);
+        uintptr_t base = pv[0];
+        for (uintptr_t off = 0x000; off < 0x600; off += 8) {
+            uint64_t v = 0;
+            if (!mm_r64(base + off, &v) || v == 0) continue;
+            if (v < 0x100000000ULL || v > 0x0000800000000000ULL) continue;
+            if ((v & 7) != 0) continue;
+            uint32_t w[32];
+            if (!mm_vm_read((uintptr_t)v, w, sizeof(w))) continue;
+            [out appendFormat:@"@pawn+0x%03lx -> %#lx\n", (unsigned long)off, (unsigned long)v];
+            for (int r = 0; r < 8; r++) {
+                [out appendFormat:@"   +0x%02x  ", (unsigned)(r * 16)];
+                for (int c = 0; c < 4; c++) [out appendFormat:@"%08X ", w[r * 4 + c]];
+                [out appendString:@"\n"];
             }
-        }
-        [out appendString:@"\n# ARMA (pawn -> INVMGR 0x2A0 -> CURWEP 0x048)\n"];
-        for (int k2 = 0; k2 < n; k2++)
-            [out appendFormat:@"wep%d=%#lx wdata%d=%#lx\n", k2, (unsigned long)wep[k2],
-                              k2, (unsigned long)wd[k2]];
-        [out appendString:@"woff     "];
-        for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"w%-9d", k2];
-        [out appendString:@"\n"];
-        for (uintptr_t off = 0x000; off < 0x400; off += 4) {
-            uint32_t v[6];
-            int any = 0;
-            for (int k2 = 0; k2 < n; k2++) {
-                if (wep[k2] != 0 && mm_vm_read((uintptr_t)wep[k2] + off, &v[k2], sizeof(v[k2])))
-                    any = 1;
-                else v[k2] = 0xDEADBEEFu;
-            }
-            if (!any) continue;
-            [out appendFormat:@"0x%03lx    ", (unsigned long)off];
-            for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"%08X ", v[k2]];
-            [out appendString:@"\n"];
-        }
-        [out appendString:@"\n# WEAPONDATA (arma + OFF_WEP_CONFIG 0x280)\n"];
-        [out appendString:@"doff     "];
-        for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"d%-9d", k2];
-        [out appendString:@"\n"];
-        for (uintptr_t off = 0x000; off < 0x200; off += 4) {
-            uint32_t v[6];
-            int any = 0;
-            for (int k2 = 0; k2 < n; k2++) {
-                if (wd[k2] != 0 && mm_vm_read((uintptr_t)wd[k2] + off, &v[k2], sizeof(v[k2])))
-                    any = 1;
-                else v[k2] = 0xDEADBEEFu;
-            }
-            if (!any) continue;
-            [out appendFormat:@"0x%03lx    ", (unsigned long)off];
-            for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"%08X ", v[k2]];
-            [out appendString:@"\n"];
         }
     }
 
@@ -8962,6 +8940,7 @@ static void mm_team_probe_dump(void)
               atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     }
 }
+
 
 
 /* ===========================================================================
@@ -9095,5 +9074,6 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
 
