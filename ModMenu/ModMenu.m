@@ -3157,29 +3157,6 @@ static void mm_haptic(int style)
 /* 1.20: copiar el ultimo self_test.txt al portapapeles (codigo copiable). */
 - (void)onSelfTestCopy
 {
-    /* 0.17.1: tabla de la ENTIDAD. El team vive aca: OFF_ENT_TEAM = 0x110.
-       Esta tabla valida de una sola pasada team, dead(0x0FC), robot(0x298),
-       BRState(0x078), vehicle(0x190/0x194), war(0x2A8), medtime(0x2AC),
-       invis(0x2B0) y el puntero de nombre(0x160). */
-    [out appendString:@"\n# ENTIDAD (pawn + OFF_PAWN_ENTITY = 0x5C0)\n"];
-    for (int k = 0; k < n; k++)
-        [out appendFormat:@"ent%d=%#lx\n", k, (unsigned long)ev[k]];
-    [out appendString:@"eoff     "];
-    for (int k = 0; k < n; k++) [out appendFormat:@"e%-9d", k];
-    [out appendString:@"\n"];
-    for (uintptr_t off = 0x000; off < 0x300; off += 4) {
-        uint32_t v[6];
-        int any = 0;
-        for (int k = 0; k < n; k++) {
-            if (ev[k] != 0 && mm_vm_read((uintptr_t)ev[k] + off, &v[k], sizeof(v[k]))) any = 1;
-            else v[k] = 0xDEADBEEFu;
-        }
-        if (!any) continue;
-        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
-        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
-        [out appendString:@"\n"];
-    }
-
     NSString *docs = mm_docs_dir();
     NSString *p = (docs.length > 0)
         ? [docs stringByAppendingPathComponent:@"self_test.txt"] : nil;
@@ -8893,6 +8870,29 @@ static void mm_team_probe_dump(void)
         int any = 0;
         for (int k = 0; k < n; k++) {
             if (mm_vm_read(pv[k] + off, &v[k], 4)) any = 1;
+            else v[k] = 0xDEADBEEFu;
+        }
+        if (!any) continue;
+        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
+        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
+        [out appendString:@"\n"];
+    }
+
+    /* 0.17.1: tabla de la ENTIDAD. El team vive aca: OFF_ENT_TEAM = 0x110.
+       Esta tabla valida de una sola pasada team, dead(0x0FC), robot(0x298),
+       BRState(0x078), vehicle(0x190/0x194), war(0x2A8), medtime(0x2AC),
+       invis(0x2B0) y el puntero de nombre(0x160). */
+    [out appendString:@"\n# ENTIDAD (pawn + OFF_PAWN_ENTITY = 0x5C0)\n"];
+    for (int k = 0; k < n; k++)
+        [out appendFormat:@"ent%d=%#lx\n", k, (unsigned long)ev[k]];
+    [out appendString:@"eoff     "];
+    for (int k = 0; k < n; k++) [out appendFormat:@"e%-9d", k];
+    [out appendString:@"\n"];
+    for (uintptr_t off = 0x000; off < 0x300; off += 4) {
+        uint32_t v[6];
+        int any = 0;
+        for (int k = 0; k < n; k++) {
+            if (ev[k] != 0 && mm_vm_read((uintptr_t)ev[k] + off, &v[k], sizeof(v[k]))) any = 1;
             else v[k] = 0xDEADBEEFu;
         }
         if (!any) continue;
