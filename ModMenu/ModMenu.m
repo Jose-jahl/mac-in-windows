@@ -1038,6 +1038,9 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
+/* 0.16.0: features nuevas del ESP, dibujadas desde el lienzo. */
+static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H);
+static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
@@ -2320,6 +2323,9 @@ static int mm_declutter_budget(void)
     if (o->targetList) mm_draw_target_list(ctx, bs);
     if (conTrails)  mm_trails_draw(ctx, bs);
     if (conBearings) mm_draw_bearings(ctx, bs);
+    /* 0.16.0: cono de vision y estado (recarga / municion / ADS) por enemigo */
+    mm_draw_enemy_cones(ctx, bs.size.width, bs.size.height);
+    mm_draw_enemy_state(ctx, bs.size.width, bs.size.height);
 
     /* v0.5.0: aunque no haya cajas (todos los enemigos detras de la camara),
        el lienzo sigue: la flecha "fuera de pantalla" tiene que poder salir. */
@@ -6413,11 +6419,14 @@ static void mm_cloud_build_combat(UIView *page)
     CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
 
     /* ESP: que se dibuja de cada enemigo. */
-    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W,
+                              MM_CLOUD_BODY_H + MM_CLOUD_ROW_H * 3.0);
     NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
-                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist" ];
+                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
+                       @"mm_esp_ammo", @"mm_esp_reload", @"mm_esp_cone" ];
     NSArray *titles = @[ @"ESP maestro", @"Cajas", @"Jugadores", @"Bots",
-                         @"Nombres", @"Distancia" ];
+                         @"Nombres", @"Distancia",
+                         @"Municion", @"Recarga", @"Cono de vision" ];
     for (NSUInteger i = 0; i < keys.count; i++)
         mm_cloud_row(a, titles[i], keys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, (i != 0));
@@ -8462,6 +8471,166 @@ __attribute__((constructor)) static void modmenu_init(void)
 }
 
 /* ===========================================================================
+ *  0.16.0 — CONO DE VISION ENEMIGO + ESTADO (recarga / municion / ADS).
+ *
+ *  Van como helpers APARTE, no dentro del bucle de cajas: ese bucle esta muy
+ *  optimizado (diccionarios de texto preparados una vez por frame, declutter,
+ *  presupuesto de etiquetas) y meterle lecturas de memoria por caja habria
+ *  degradado el resto. Aca se recorre g_boxes por separado, leyendo el pawn de
+ *  cada caja, y se dibuja en una pasada propia.
+ *
+ *  Datos que se usan (todos ya verificados en el proyecto):
+ *    pawn + OFF_PAWN_AIMROT (0x380)   -> quaternion de aim = forward del enemigo
+ *    pawn + OFF_PAWN_INVMGR (0x2A0)   -> InventoryManager
+ *    invm + OFF_INVM_CURWEP (0x048)   -> arma actual
+ *    wep  + OFF_WEP_AIMING  (0x490)   -> byte m_IsAimingOn (ADS)
+ *    wep  + OFF_WEP_STATEMACH (0x170) -> WeaponStateMachine
+ *    sm   + OFF_SM_CURSTATE (0x018)   -> WeaponState
+ *    st   + OFF_ST_ELAPSE   (0x02C)   -> float mClipChangeElapseTime
+ *    st   + OFF_ST_DOCHANGE (0x03C)   -> float duracion de la recarga
+ * ========================================================================= */
+
+#define MM_CONE_HALF_DEG   30.0f   /* medio angulo del cono dibujado */
+#define MM_CONE_LEN_M      10.0f   /* largo del cono en metros        */
+
+static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H)
+{
+    if (!mm_def_bool(@"mm_esp_cone", NO)) return;
+    if (g_box_count <= 0 || ctx == NULL) return;
+
+    UIColor *acc = mm_neon_green();
+    CGFloat ar = 0.0, ag = 0.0, ab = 0.0;
+    [acc getRed:&ar green:&ag blue:&ab alpha:NULL];
+
+    CGContextSaveGState(ctx);
+    CGContextSetLineWidth(ctx, 1.0);
+    CGContextSetRGBStrokeColor(ctx, ar, ag, ab, 0.42);
+    CGContextSetRGBFillColor(ctx, ar, ag, ab, 0.075);
+
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        if (!g_boxes[i].alive || g_boxes[i].pawn == 0) continue;
+
+        float q[4];
+        memcpy(q, (const void *)((uintptr_t)g_boxes[i].pawn + OFF_PAWN_AIMROT), sizeof(q));
+        float ql = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+        if (!(ql > 0.01f)) continue;
+        q[0] /= ql; q[1] /= ql; q[2] /= ql; q[3] /= ql;
+
+        /* forward = q * (0,0,1) */
+        float f[3] = { 0.0f, 0.0f, 1.0f };
+        mm_q_rotate(q, f, f);
+
+        /* solo el plano horizontal: el cono se dibuja en el piso */
+        float fl = sqrtf(f[0]*f[0] + f[2]*f[2]);
+        if (fl < 0.05f) continue;
+        float fx = f[0] / fl, fz = f[2] / fl;
+
+        float apexY = g_boxes[i].wy - 1.35f;          /* a los pies */
+        float a0[3] = { g_boxes[i].wx, apexY, g_boxes[i].wz };
+
+        float ca = cosf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
+        float sa = sinf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
+        float l[3] = { a0[0] + (fx * ca - fz * sa) * MM_CONE_LEN_M, apexY,
+                       a0[2] + (fx * sa + fz * ca) * MM_CONE_LEN_M };
+        float r[3] = { a0[0] + (fx * ca + fz * sa) * MM_CONE_LEN_M, apexY,
+                       a0[2] + (-fx * sa + fz * ca) * MM_CONE_LEN_M };
+
+        CGPoint p0, pl, pr;
+        int d0 = 0, dl = 0, dr = 0;
+        if (!mm_w2s(g_view_mtx, g_proj_mtx, a0, NO, W, H, &p0, &d0, NULL, NULL)) continue;
+        if (!mm_w2s(g_view_mtx, g_proj_mtx, l,  NO, W, H, &pl, &dl, NULL, NULL)) continue;
+        if (!mm_w2s(g_view_mtx, g_proj_mtx, r,  NO, W, H, &pr, &dr, NULL, NULL)) continue;
+        if (d0 || dl || dr) continue;                 /* algun vertice detras */
+
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, p0.x, p0.y);
+        CGContextAddLineToPoint(ctx, pl.x, pl.y);
+        CGContextAddLineToPoint(ctx, pr.x, pr.y);
+        CGContextClosePath(ctx);
+        CGContextDrawPath(ctx, kCGPathFillStroke);
+    }
+    CGContextRestoreGState(ctx);
+}
+
+/* Devuelve 1 si el arma del pawn esta cambiando cargador. */
+static int mm_pawn_reloading(uint64_t pawn, float *outElapse, float *outDur)
+{
+    if (outElapse) *outElapse = 0.0f;
+    if (outDur) *outDur = 0.0f;
+    if (pawn == 0) return 0;
+    uint64_t inv = 0, wep = 0, sm = 0, st = 0;
+    if (!mm_r64(pawn + OFF_PAWN_INVMGR, &inv) || inv == 0) return 0;
+    if (!mm_r64(inv + OFF_INVM_CURWEP, &wep) || wep == 0) return 0;
+    if (!mm_r64(wep + OFF_WEP_STATEMACH, &sm) || sm == 0) return 0;
+    if (!mm_r64(sm + OFF_SM_CURSTATE, &st) || st == 0) return 0;
+    float el = 0.0f, du = 0.0f;
+    mm_vm_read(st + OFF_ST_ELAPSE, &el, sizeof(el));
+    mm_vm_read(st + OFF_ST_DOCHANGE, &du, sizeof(du));
+    if (outElapse) *outElapse = el;
+    if (outDur) *outDur = du;
+    return (du > 0.05f && el > 0.0f && el <= du + 0.5f) ? 1 : 0;
+}
+
+static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
+{
+    int wantAmmo   = mm_def_bool(@"mm_esp_ammo", NO);
+    int wantReload = mm_def_bool(@"mm_esp_reload", NO);
+    if ((!wantAmmo && !wantReload) || g_box_count <= 0 || ctx == NULL) return;
+
+    UIFont *f = [UIFont monospacedDigitSystemFontOfSize:9.0 weight:UIFontWeightSemibold];
+    NSShadow *sh = mm_txt_shadow();
+    UIColor *acc = mm_neon_green();
+    UIColor *red = [UIColor colorWithRed:1.0 green:0.30 blue:0.32 alpha:0.96];
+
+    CGContextSaveGState(ctx);
+
+    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
+        if (!g_boxes[i].alive) continue;
+
+        float el = 0.0f, du = 0.0f;
+        int reloading = wantReload ? mm_pawn_reloading(g_boxes[i].pawn, &el, &du) : 0;
+
+        NSString *txt = nil;
+        UIColor *col = acc;
+        if (reloading) {
+            int pct = (du > 0.01f) ? (int)((el / du) * 100.0f) : 0;
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+            txt = [NSString stringWithFormat:@"RECARGA %d%%", pct];
+            col = red;
+        } else if (wantAmmo && g_boxes[i].ammo >= 0) {
+            if (g_boxes[i].ammoMax > 0)
+                txt = [NSString stringWithFormat:@"%d/%d", g_boxes[i].ammo, g_boxes[i].ammoMax];
+            else
+                txt = [NSString stringWithFormat:@"%d", g_boxes[i].ammo];
+            if (g_boxes[i].ammoMax > 0 && g_boxes[i].ammo * 4 <= g_boxes[i].ammoMax)
+                col = red;                              /* cargador casi vacio */
+        }
+        if (txt == nil) continue;
+
+        NSDictionary *at = @{ NSFontAttributeName: f,
+                              NSForegroundColorAttributeName: col,
+                              NSShadowAttributeName: sh };
+        CGSize sz = mm_text_size(txt, at, 3);
+        CGFloat bx = g_boxes[i].x + (g_boxes[i].w - sz.width) * 0.5f;
+        CGFloat by = g_boxes[i].y + g_boxes[i].h + 3.0;
+        if (by > H - sz.height) by = g_boxes[i].y - sz.height - 3.0;   /* no salir abajo */
+        if (bx < 0.0) bx = 0.0;
+        if (bx + sz.width > W) bx = W - sz.width;
+        [txt drawAtPoint:CGPointMake(bx, by) withAttributes:at];
+
+        /* marcador de ADS: punto al costado del texto */
+        if (wantAmmo && (g_boxes[i].tags & 8u)) {
+            CGContextSetRGBFillColor(ctx, 1.0, 0.85, 0.25, 0.95);
+            CGContextFillEllipseInRect(ctx, CGRectMake(bx - 8.0, by + sz.height * 0.5 - 2.0,
+                                                       4.0, 4.0));
+        }
+    }
+    CGContextRestoreGState(ctx);
+}
+
+
+/* ===========================================================================
  *  0.15.0 — API del panel (mm_panel_api.h).
  *
  *  Costura entre el panel (hoy ImGui, ver imgui_app.mm) y el motor. El panel NO
@@ -8483,6 +8652,7 @@ static const char *const MM_ESP_KEYS[] = {
     "mm_esp_master", "mm_esp_box", "mm_esp_players", "mm_esp_bots",
     "mm_esp_name", "mm_esp_dist", "mm_esp_lines", "mm_esp_health",
     "mm_esp_fill", "mm_x_radar", "mm_x_cross", "mm_x_aimring", "mm_x_fps",
+    "mm_esp_ammo", "mm_esp_reload", "mm_esp_cone",
     NULL
 };
 
