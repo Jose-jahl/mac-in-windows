@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.17.1"
+#define MODMENU_VERSION     "0.18.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.17.1";
+const char *modmenu_build_id = "modmenu-glass-0.18.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -8901,6 +8901,61 @@ static void mm_team_probe_dump(void)
         [out appendString:@"\n"];
     }
 
+    /* 0.18.0: tablas del ARMA. El muzzle flash se configura en el arma y en su
+       WeaponData, asi que estas dos tablas son el instrumento para encontrar el
+       campo que lo apaga (y de paso validan ADS/ammo, que ya usamos a ciegas).
+       Cadena: pawn -> OFF_PAWN_INVMGR(0x2A0) -> OFF_INVM_CURWEP(0x048) -> arma
+               arma -> OFF_WEP_CONFIG(0x280) -> WeaponData */
+    {
+        uint64_t wep[6], wd[6];
+        for (int k2 = 0; k2 < n; k2++) {
+            uint64_t inv = 0;
+            wep[k2] = 0;
+            wd[k2] = 0;
+            if (mm_r64(pv[k2] + OFF_PAWN_INVMGR, &inv) && inv != 0) {
+                if (mm_r64(inv + OFF_INVM_CURWEP, &wep[k2]) && wep[k2] != 0)
+                    mm_r64(wep[k2] + OFF_WEP_CONFIG, &wd[k2]);
+            }
+        }
+        [out appendString:@"\n# ARMA (pawn -> INVMGR 0x2A0 -> CURWEP 0x048)\n"];
+        for (int k2 = 0; k2 < n; k2++)
+            [out appendFormat:@"wep%d=%#lx wdata%d=%#lx\n", k2, (unsigned long)wep[k2],
+                              k2, (unsigned long)wd[k2]];
+        [out appendString:@"woff     "];
+        for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"w%-9d", k2];
+        [out appendString:@"\n"];
+        for (uintptr_t off = 0x000; off < 0x400; off += 4) {
+            uint32_t v[6];
+            int any = 0;
+            for (int k2 = 0; k2 < n; k2++) {
+                if (wep[k2] != 0 && mm_vm_read((uintptr_t)wep[k2] + off, &v[k2], sizeof(v[k2])))
+                    any = 1;
+                else v[k2] = 0xDEADBEEFu;
+            }
+            if (!any) continue;
+            [out appendFormat:@"0x%03lx    ", (unsigned long)off];
+            for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"%08X ", v[k2]];
+            [out appendString:@"\n"];
+        }
+        [out appendString:@"\n# WEAPONDATA (arma + OFF_WEP_CONFIG 0x280)\n"];
+        [out appendString:@"doff     "];
+        for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"d%-9d", k2];
+        [out appendString:@"\n"];
+        for (uintptr_t off = 0x000; off < 0x200; off += 4) {
+            uint32_t v[6];
+            int any = 0;
+            for (int k2 = 0; k2 < n; k2++) {
+                if (wd[k2] != 0 && mm_vm_read((uintptr_t)wd[k2] + off, &v[k2], sizeof(v[k2])))
+                    any = 1;
+                else v[k2] = 0xDEADBEEFu;
+            }
+            if (!any) continue;
+            [out appendFormat:@"0x%03lx    ", (unsigned long)off];
+            for (int k2 = 0; k2 < n; k2++) [out appendFormat:@"%08X ", v[k2]];
+            [out appendString:@"\n"];
+        }
+    }
+
     NSString *docs = mm_docs_dir();
     if (docs.length > 0) {
         [out writeToFile:[docs stringByAppendingPathComponent:@"fusion_team.txt"]
@@ -9040,4 +9095,5 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
