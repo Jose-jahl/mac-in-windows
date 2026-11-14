@@ -8560,6 +8560,23 @@ int mm_panel_esp(const char *key)
 }
 void mm_panel_set_esp(const char *key, int on) { mm_api_put_bool(key, on ? YES : NO); }
 
+/* ---- identidad: el panel pide los acentos en vez de tener colores propios ---- */
+void mm_panel_accent(int secondary, float out[3])
+{
+    if (out == NULL) return;
+    UIColor *c = secondary ? mm_neon_purple() : mm_neon_green();
+    CGFloat r = 0.20, g = 1.00, b = 0.58;
+    if (![c getRed:&r green:&g blue:&b alpha:NULL]) {
+        /* color en otro espacio: caemos al tema 0 (FUSION) */
+        r = secondary ? 0.63 : 0.20;
+        g = secondary ? 0.30 : 1.00;
+        b = secondary ? 1.00 : 0.58;
+    }
+    out[0] = (float)r;
+    out[1] = (float)g;
+    out[2] = (float)b;
+}
+
 /* ---- telemetria ---- */
 float mm_panel_fps(void)            { return g_fps; }
 int   mm_panel_targets(void)        { return g_box_count; }

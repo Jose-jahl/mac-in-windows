@@ -38,6 +38,11 @@ void  mm_panel_set_lock_ads(int on);
 int   mm_panel_esp(const char *key);
 void  mm_panel_set_esp(const char *key, int on);
 
+/* ---- identidad: el panel NO tiene colores propios, los pide aca ----
+   secondary = 0 -> acento primario (mm_neon_green),  1 -> secundario (mm_neon_purple).
+   Respeta el tema elegido: FUSION (verde/morado), Hielo, Magenta, Fuego, Aqua o custom. */
+void  mm_panel_accent(int secondary, float out_rgb[3]);
+
 /* ---- telemetria (solo lectura) ---- */
 float mm_panel_fps(void);
 int   mm_panel_targets(void);
