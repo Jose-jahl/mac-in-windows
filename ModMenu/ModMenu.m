@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.16.3"
+#define MODMENU_VERSION     "0.17.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.16.3";
+const char *modmenu_build_id = "modmenu-glass-0.17.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -1043,6 +1043,7 @@ static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H);
 static void mm_estate_tick(void);   /* 0.16.2: cache de estado a 10 Hz */
+static void mm_team_probe_dump(void);   /* 0.17.0: sonda de equipo (una vez) */
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
@@ -4147,6 +4148,22 @@ static void mm_esp_frame(double t)
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
             mm_estate_tick();               /* 0.16.2: lecturas caras a 10 Hz */
+
+            /* 0.17.0: sonda de equipo. Corre UNA vez, 3 s despues de prender el
+               switch (asi ya hay cajas), y se rearma al apagarlo. */
+            {
+                static double s_tp_t0 = 0.0;
+                static int    s_tp_done = 0;
+                int on = mm_def_bool(@"mm_team_probe", NO);
+                if (on && !s_tp_done) {
+                    double now = CACurrentMediaTime();
+                    if (s_tp_t0 == 0.0) s_tp_t0 = now;
+                    else if (now - s_tp_t0 > 3.0) { s_tp_done = 1; mm_team_probe_dump(); }
+                } else if (!on && s_tp_done) {
+                    s_tp_t0 = 0.0;
+                    s_tp_done = 0;
+                }
+            }
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
@@ -6500,6 +6517,9 @@ static void mm_cloud_build_aim(UIView *page)
                                    @selector(onAimHeight:), iw);
     ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 100.0, iw, 24.0);
     [a addSubview:ah];
+    /* 0.17.0: sonda de equipo. Zona verificada: la tarjeta tiene libre desde 130
+       hasta MM_CLOUD_BODY_H (214); la fila ocupa 132..160. */
+    mm_cloud_row(a, @"Sonda de equipo", @"mm_team_probe", NO, 132.0, NO);
     [page addSubview:a];
 
     /* 2) ARMAS — con cuales actua el lock. */
@@ -8789,6 +8809,79 @@ static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
 }
 
 /* ===========================================================================
+ *  0.17.0 — SONDA DE EQUIPO.
+ *
+ *  POR QUE EXISTE
+ *  El team filter es la feature que mas mejora el aimlock (no enganchar
+ *  companeros), pero NO se puede sacar estaticamente: hay 5 candidatos
+ *  `get_TeamId`/`get_TeamID` en el corpus y NINGUNO tiene `type` en el CSV (solo
+ *  el 2% de las filas lo tiene), asi que no se puede atribuir la VA a una clase.
+ *  Un offset adivinado rompe el ESP en silencio. Ver docs/EQUIPO_SONDA.md.
+ *
+ *  QUE HACE
+ *  Vuelca Documents/fusion_team.txt con una tabla: para cada offset de 4 bytes
+ *  entre 0x000 y 0x600, el valor u32 del pawn LOCAL y el de hasta 5 pawns
+ *  cercanos, con su nombre y distancia. El offset del equipo aparece solo: es la
+ *  fila donde el local coincide con sus companeros y difiere de los enemigos.
+ *
+ *  Corre una sola vez por activacion (1920 lecturas), no en cada frame.
+ * ========================================================================= */
+static void mm_team_probe_dump(void)
+{
+    if (g_fp_localpawn == NULL) return;
+    void *lp = g_fp_localpawn();
+    if (lp == NULL) return;
+
+    uintptr_t pv[6];
+    char      nm[6][48];
+    float     d[6];
+    int       n = 0;
+
+    pv[0] = (uintptr_t)lp;
+    snprintf(nm[0], sizeof(nm[0]), "(local)");
+    d[0] = 0.0f;
+    n = 1;
+
+    for (int i = 0; i < g_box_count && n < 6; i++) {
+        if (g_boxes[i].pawn == 0) continue;
+        pv[n] = (uintptr_t)g_boxes[i].pawn;
+        snprintf(nm[n], sizeof(nm[n]), "%s", g_boxes[i].name[0] ? g_boxes[i].name : "?");
+        d[n] = g_boxes[i].dist;
+        n++;
+    }
+
+    NSMutableString *out = [NSMutableString stringWithCapacity:40000];
+    [out appendFormat:@"# FUSION team probe  build=%s  pawns=%d\n", MODMENU_VERSION, n];
+    for (int k = 0; k < n; k++)
+        [out appendFormat:@"pawn%d=%#lx dist=%.1f name=%s\n",
+                          k, (unsigned long)pv[k], (double)d[k], nm[k]];
+    [out appendString:@"\n# cada fila: offset  local  p1  p2 ...  (u32 hex)\n"];
+    [out appendString:@"off      "];
+    for (int k = 0; k < n; k++) [out appendFormat:@"p%-9d", k];
+    [out appendString:@"\n"];
+
+    for (uintptr_t off = 0x000; off < 0x600; off += 4) {
+        uint32_t v[6];
+        int any = 0;
+        for (int k = 0; k < n; k++) {
+            if (mm_vm_read(pv[k] + off, &v[k], 4)) any = 1;
+            else v[k] = 0xDEADBEEFu;
+        }
+        if (!any) continue;
+        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
+        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
+        [out appendString:@"\n"];
+    }
+
+    NSString *docs = mm_docs_dir();
+    if (docs.length > 0) {
+        [out writeToFile:[docs stringByAppendingPathComponent:@"fusion_team.txt"]
+              atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    }
+}
+
+
+/* ===========================================================================
  *  0.15.0 — API del panel (mm_panel_api.h).
  *
  *  Costura entre el panel (hoy ImGui, ver imgui_app.mm) y el motor. El panel NO
@@ -8810,7 +8903,7 @@ static const char *const MM_ESP_KEYS[] = {
     "mm_esp_master", "mm_esp_box", "mm_esp_players", "mm_esp_bots",
     "mm_esp_name", "mm_esp_dist", "mm_esp_lines", "mm_esp_health",
     "mm_esp_fill", "mm_x_radar", "mm_x_cross", "mm_x_aimring", "mm_x_fps",
-    "mm_esp_ammo", "mm_esp_reload", "mm_esp_cone", "mm_esp_aimed",
+    "mm_esp_ammo", "mm_esp_reload", "mm_esp_cone", "mm_esp_aimed", "mm_team_probe",
     NULL
 };
 
