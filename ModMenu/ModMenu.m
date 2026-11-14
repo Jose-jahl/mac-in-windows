@@ -8126,6 +8126,12 @@ static BOOL mm_place_ui(void)
    primeros 60 s; despues lento (5 s) pero PARA SIEMPRE. */
 static void mm_tick(void)
 {
+#ifdef MM_USE_IMGUI
+    /* 0.15.0: el panel ImGui se crea una sola vez, ya con la ventana lista. */
+    {   static int s_ig_done = 0;
+        if (!s_ig_done) { s_ig_done = 1; extern void mm_imgui_start(void); mm_imgui_start(); }
+    }
+#endif
     @try {
         g_tries++;
         if (!g_ui_ok) g_ui_ok = YES;
@@ -8454,3 +8460,117 @@ __attribute__((constructor)) static void modmenu_init(void)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ mm_tick(); });
 }
+
+/* ===========================================================================
+ *  0.15.0 — API del panel (mm_panel_api.h).
+ *
+ *  Costura entre el panel (hoy ImGui, ver imgui_app.mm) y el motor. El panel NO
+ *  toca las variables internas: entra por aca.
+ *
+ *  Los setters hacen las TRES cosas que hace el panel UIKit en onSwitch::
+ *    1. persisten la preferencia con la misma clave,
+ *    2. invalidan el cache de opciones de dibujo (mm_opts_invalidate),
+ *    3. actualizan el estado en caliente (g_lock_on, g_aim_*, g_lock_*).
+ *  Asi los dos paneles quedan siempre en sincronia.
+ *
+ *  Todo el bloque esta bajo MM_USE_IMGUI: sin ese define no existe y la build
+ *  queda identica a la anterior.
+ * ========================================================================= */
+#ifdef MM_USE_IMGUI
+#include "mm_panel_api.h"
+
+static const char *const MM_ESP_KEYS[] = {
+    "mm_esp_master", "mm_esp_box", "mm_esp_players", "mm_esp_bots",
+    "mm_esp_name", "mm_esp_dist", "mm_esp_lines", "mm_esp_health",
+    "mm_esp_fill", "mm_x_radar", "mm_x_cross", "mm_x_aimring", "mm_x_fps",
+    NULL
+};
+
+static BOOL mm_api_key_ok(const char *key)
+{
+    if (!key) return NO;
+    for (int i = 0; MM_ESP_KEYS[i] != NULL; i++)
+        if (strcmp(MM_ESP_KEYS[i], key) == 0) return YES;
+    return NO;
+}
+
+static void mm_api_put_bool(const char *key, BOOL on)
+{
+    if (!mm_api_key_ok(key)) return;
+    NSString *k = [NSString stringWithUTF8String:key];
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:k];
+    mm_opts_invalidate();
+    if ([k isEqualToString:@"mm_esp_master"]) mm_apply_esp_lock();
+    if ([k isEqualToString:@"mm_x_radar"] && g_esp != nil) [g_esp setNeedsDisplay];
+}
+
+static void mm_lock_kind_put(int kind, BOOL on)
+{
+    const char *key = (kind == 1) ? "mm_lock_rifle"   :
+                      (kind == 2) ? "mm_lock_smg"     :
+                      (kind == 3) ? "mm_lock_shotgun" : "mm_lock_sniper";
+    if (kind < 1 || kind > 4) return;
+    [[NSUserDefaults standardUserDefaults] setBool:on
+                                            forKey:[NSString stringWithUTF8String:key]];
+    mm_lock_opts_sync();
+}
+
+/* ---- aim ---- */
+int mm_panel_aimlock(void)          { return g_lock_on ? 1 : 0; }
+void mm_panel_set_aimlock(int on)   { g_lock_on = on ? YES : NO;
+                                      if (!on) g_lock_active = 0; }
+float mm_panel_aim_fov(void)        { return g_aim_fov; }
+void mm_panel_set_aim_fov(float v)  { g_aim_fov = v; }
+float mm_panel_aim_smooth(void)     { return g_aim_smooth; }
+void mm_panel_set_aim_smooth(float v) { g_aim_smooth = v; }
+float mm_panel_aim_height(void)     { return g_aim_height; }
+void mm_panel_set_aim_height(float v) { g_aim_height = v; }
+float mm_panel_aim_strength(void)   { return g_aim_strength; }
+void mm_panel_set_aim_strength(float v)
+{
+    if (v < 0.0f) v = 0.0f;
+    if (v > 28.0f) v = 28.0f;
+    g_aim_strength = v;
+    [[NSUserDefaults standardUserDefaults] setFloat:v forKey:@"mm_x_aim_strength"];
+    mm_aim_apply();                     /* reescribe el slot del relay (ADR 0008) */
+}
+
+/* ---- filtro por arma ---- */
+int mm_panel_lock_kind(int kind)
+{
+    switch (kind) {
+        case 1: return g_lock_rifle ? 1 : 0;
+        case 2: return g_lock_smg ? 1 : 0;
+        case 3: return g_lock_shotgun ? 1 : 0;
+        case 4: return g_lock_sniper ? 1 : 0;
+        default: return 0;
+    }
+}
+void mm_panel_set_lock_kind(int kind, int on) { mm_lock_kind_put(kind, on ? YES : NO); }
+int  mm_panel_lock_ads(void)        { return g_lock_ads ? 1 : 0; }
+void mm_panel_set_lock_ads(int on)  { g_lock_ads = on ? YES : NO;
+                                      [[NSUserDefaults standardUserDefaults]
+                                          setBool:g_lock_ads forKey:@"mm_lock_ads"]; }
+
+/* ---- ESP ---- */
+int mm_panel_esp(const char *key)
+{
+    if (!mm_api_key_ok(key)) return -1;
+    return mm_def_bool([NSString stringWithUTF8String:key], NO) ? 1 : 0;
+}
+void mm_panel_set_esp(const char *key, int on) { mm_api_put_bool(key, on ? YES : NO); }
+
+/* ---- telemetria ---- */
+float mm_panel_fps(void)            { return g_fps; }
+int   mm_panel_targets(void)        { return g_box_count; }
+int   mm_panel_lock_active(void)    { return g_lock_active ? 1 : 0; }
+long  mm_panel_lock_frames(void)    { return (long)g_lock_frames; }
+long  mm_panel_lock_stuck(void)     { return g_lock_diag[0]; }
+long  mm_panel_lock_pisan(void)     { return g_lock_diag[1]; }
+const char *mm_panel_version(void)  { return MODMENU_VERSION; }
+
+/* ---- acciones ---- */
+void mm_panel_close(void)           { mm_set_panel(NO); }
+int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
+
+#endif /* MM_USE_IMGUI */
