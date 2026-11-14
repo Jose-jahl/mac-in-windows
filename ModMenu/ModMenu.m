@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.14.1"
+#define MODMENU_VERSION     "0.14.2"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.14.1";
+const char *modmenu_build_id = "modmenu-glass-0.14.2";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -395,6 +395,13 @@ const char *modmenu_build_id = "modmenu-glass-0.14.1";
 static float g_aim_strength = 28.0f;
 static float g_aim_fov = 90.0f;    /* 0.14.1: cono +-45; 180 dejaba enganchar a 85 grados */
 static float g_aim_smooth = 0.0f;   /* C-4: 0 = snap, 1 = suave */
+/* 0.14.2: diagnostico del aimlock.
+   g_lock_last  = lo que escribimos el frame anterior.
+   g_lock_diag  = [0] frames en que la escritura sobrevivio hasta el frame siguiente,
+                  [1] frames en que el juego la piso antes. */
+static float g_lock_last[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+static int   g_lock_last_ok = 0;
+static long  g_lock_diag[2] = { 0, 0 };
 static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
@@ -4743,15 +4750,34 @@ static void mm_aim_lock(void)
         void *lp = g_fp_localpawn();
         if (lp == NULL) { g_lock_active = 0; return; }
 
-        /* origen = posicion de la camara (validada; si sale basura no se toca nada) */
+        /* 0.14.2 (F4): EL BUG DE LOS PIES.
+           La rotacion que escribimos es la del PAWN, asi que el pivote del giro es
+           el pawn. Pero el angulo se medía desde la CAMARA. En tercera persona la
+           camara esta mas alta y atras: la direccion camara->objetivo es mas plana
+           que pawn->objetivo, y al aplicarla al pawn el arma queda apuntando POR
+           DEBAJO del objetivo.
+           Explica los tres sintomas medidos en dispositivo:
+             - franco: a largo alcance la diferencia angular es despreciable -> anda
+             - escopeta: a corta la dispersion lo tapa -> anda
+             - rifle/SMG a media distancia: pega en los pies -> "no anda"
+           Regla: el origen del vector tiene que ser el PIVOTE del giro. */
         float o[3] = { 0.0f, 0.0f, 0.0f };
         BOOL haveO = NO;
-        void *cam = g_fp_maincam();
-        void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
-        if (ctr != NULL) {
-            g_fp_trpos(ctr, o);
+        int  o_src = 0;                 /* 0 = pawn (correcto), 1 = camara (fallback) */
+        uint64_t trl = 0;
+        if (mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &trl) && trl != 0) {
+            g_fp_trpos((void *)(uintptr_t)trl, o);
             if (isfinite(o[0]) && isfinite(o[1]) && isfinite(o[2]) &&
                 (fabsf(o[0]) + fabsf(o[1]) + fabsf(o[2])) > 1.0f) haveO = YES;
+        }
+        if (!haveO) {                   /* fallback: camara (comportamiento 0.14.1) */
+            void *cam = g_fp_maincam();
+            void *ctr = (cam != NULL) ? g_fp_gettrans(cam) : NULL;
+            if (ctr != NULL) {
+                g_fp_trpos(ctr, o);
+                if (isfinite(o[0]) && isfinite(o[1]) && isfinite(o[2]) &&
+                    (fabsf(o[0]) + fabsf(o[1]) + fabsf(o[2])) > 1.0f) { haveO = YES; o_src = 1; }
+            }
         }
         if (!haveO) { g_lock_active = 0; return; }
 
@@ -4759,6 +4785,16 @@ static void mm_aim_lock(void)
         float base[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
         memcpy(base, (const void *)((uintptr_t)lp + OFF_PAWN_AIMROT), sizeof(base));
         mm_q_norm(base);
+
+        /* 0.14.2 (F5): el "solo anda cuando me muevo".
+           Si al empezar el frame el valor leido NO es el que escribimos el frame
+           anterior, el juego lo reescribio y ganamos la pulseada solo cuando su
+           propia escritura no ocurre. Medimos los dos casos y los logueamos. */
+        if (g_lock_last_ok) {
+            float d2 = 0.0f;
+            for (int k = 0; k < 4; k++) { float d = base[k] - g_lock_last[k]; d2 += d * d; }
+            if (d2 < 0.0004f) g_lock_diag[0]++; else g_lock_diag[1]++;
+        }
         float fwd[3];
         { float f[3] = { 0.0f, 0.0f, 1.0f }; mm_q_rotate(base, f, fwd); }
 
@@ -4844,6 +4880,9 @@ static void mm_aim_lock(void)
         memcpy((void *)((uintptr_t)lp + OFF_PAWN_AIMROT), q, sizeof(q));
         memcpy((void *)((uintptr_t)lp + OFF_PAWN_SIMAIMROT), q, sizeof(q));
         if (g_fp_setaimrot) { MMQuat qv = {q[0],q[1],q[2],q[3]}; g_fp_setaimrot(lp, qv); }
+        g_lock_last[0] = q[0]; g_lock_last[1] = q[1];
+        g_lock_last[2] = q[2]; g_lock_last[3] = q[3];
+        g_lock_last_ok = 1;
         g_lock_pawn = (uint64_t)(uintptr_t)lp;
         g_lock_active = 1;
         g_lock_frames++;
@@ -4857,16 +4896,17 @@ static void mm_aim_lock(void)
                 if (docs.length > 0) {
                     NSString *t = [NSString stringWithFormat:
                         @"build=%s\nmodo=write-struct\n"
-                        @"camPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
+                        @"origen=%.2f,%.2f,%.2f src=%d\ntarget=%.2f,%.2f,%.2f\n"
                         @"fwd=%.3f,%.3f,%.3f des=%.3f,%.3f,%.3f\n"
-                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d frames=%ld dt=%.4f\n"
+                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d frames=%ld dt=%.4f "
+                        @"stuck=%ld pisan=%ld\n"
                         @"q_base=%.4f,%.4f,%.4f,%.4f\nq_lock=%.4f,%.4f,%.4f,%.4f\n",
-                        MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2],
+                        MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2], o_src,
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
                         (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_frames,
-                        (double)dt,
+                        (double)dt, g_lock_diag[0], g_lock_diag[1],
                         (double)base[0], (double)base[1], (double)base[2], (double)base[3],
                         (double)q[0], (double)q[1], (double)q[2], (double)q[3]];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
