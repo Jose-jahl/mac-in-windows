@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.14.0"
+#define MODMENU_VERSION     "0.14.1"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.14.0";
+const char *modmenu_build_id = "modmenu-glass-0.14.1";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -393,7 +393,7 @@ const char *modmenu_build_id = "modmenu-glass-0.14.0";
    Aca escribimos ese float (fuerza de aim, 0..28). Si la dylib no lo escribio
    todavia, el slot vale 0 -> aim apagado (fail-safe, nunca maximo). */
 static float g_aim_strength = 28.0f;
-static float g_aim_fov = 180.0f;
+static float g_aim_fov = 90.0f;    /* 0.14.1: cono +-45; 180 dejaba enganchar a 85 grados */
 static float g_aim_smooth = 0.0f;   /* C-4: 0 = snap, 1 = suave */
 static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
@@ -4812,14 +4812,37 @@ static void mm_aim_lock(void)
         mm_q_mul(qd, base, qtar);
         mm_q_norm(qtar);
 
+        /* 0.14.1 (F1): el suavizado era POR FRAME, no por tiempo. Eso lo hacia
+           depender de los FPS y, peor, del guard termico (que saltea 1 de 2 o 1 de 4
+           frames): en un equipo caliente el aim iba a la mitad o a un cuarto de
+           velocidad. Ahora el tope es en GRADOS POR SEGUNDO y se escala por dt. */
+        static double s_prev_t = 0.0;
+        double now_t = CACurrentMediaTime();
+        float dt = 1.0f / 60.0f;
+        if (s_prev_t > 0.0 && now_t > s_prev_t) dt = (float)(now_t - s_prev_t);
+        s_prev_t = now_t;
+        if (dt < 0.002f) dt = 0.002f;      /* evita divisiones raras */
+        if (dt > 0.100f) dt = 0.100f;      /* frame perdido: no dar un salto */
+
+        /* smooth 0 -> 900 deg/s (snap), smooth 1 -> 60 deg/s (suave) */
+        float degPerSec = 900.0f - g_aim_smooth * 840.0f;
+        if (degPerSec < 30.0f) degPerSec = 30.0f;
+        float maxDeg = degPerSec * dt;
+
         float a = 1.0f - g_aim_smooth * 0.90f;
-        float maxDeg = 6.0f + (1.0f - g_aim_smooth) * 14.0f;
         if (a * angDeg > maxDeg) a = maxDeg / angDeg;
-        if (a < 0.05f) a = 0.05f;
+        if (a < 0.02f) a = 0.02f;
+        if (a > 1.0f) a = 1.0f;
 
         float q[4];
         mm_q_slerp(base, qtar, a, q);
+
+        /* 0.14.1 (F3): el getter del juego elige entre m_AimRotation (0x380) y
+           m_SimulatedAimRotation (0x3C0) segun una condicion interna (verificado en
+           el desensamblado: csel 0x380/0x3C0). Escribir solo 0x380 no tenia efecto
+           en los estados en que el juego lee el simulado. Se escriben las dos. */
         memcpy((void *)((uintptr_t)lp + OFF_PAWN_AIMROT), q, sizeof(q));
+        memcpy((void *)((uintptr_t)lp + OFF_PAWN_SIMAIMROT), q, sizeof(q));
         if (g_fp_setaimrot) { MMQuat qv = {q[0],q[1],q[2],q[3]}; g_fp_setaimrot(lp, qv); }
         g_lock_pawn = (uint64_t)(uintptr_t)lp;
         g_lock_active = 1;
@@ -4836,13 +4859,14 @@ static void mm_aim_lock(void)
                         @"build=%s\nmodo=write-struct\n"
                         @"camPos=%.2f,%.2f,%.2f\ntarget=%.2f,%.2f,%.2f\n"
                         @"fwd=%.3f,%.3f,%.3f des=%.3f,%.3f,%.3f\n"
-                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d frames=%ld\n"
+                        @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d frames=%ld dt=%.4f\n"
                         @"q_base=%.4f,%.4f,%.4f,%.4f\nq_lock=%.4f,%.4f,%.4f,%.4f\n",
                         MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2],
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
                         (double)dot, (double)angDeg, (double)a, kind, (long)g_lock_frames,
+                        (double)dt,
                         (double)base[0], (double)base[1], (double)base[2], (double)base[3],
                         (double)q[0], (double)q[1], (double)q[2], (double)q[3]];
                     [t writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
@@ -8358,7 +8382,7 @@ __attribute__((constructor)) static void modmenu_init(void)
        escribe) y lo publica en el slot del relay (cod_base+0xDC639EC). */
     g_aim_strength = mm_def_float(@"mm_x_aim_strength", 28.0f);
     if (g_aim_strength < 0.0f || g_aim_strength > 28.0f) g_aim_strength = 28.0f;
-    g_aim_fov = mm_def_float(@"mm_x_aim_fov", 180.0f);
+    g_aim_fov = mm_def_float(@"mm_x_aim_fov", 90.0f);
     if (g_aim_fov < 5.0f || g_aim_fov > 180.0f) g_aim_fov = 180.0f;
     g_aim_smooth = mm_def_float(@"mm_x_aim_smooth", 0.0f);
     if (g_aim_smooth < 0.0f || g_aim_smooth > 1.0f) g_aim_smooth = 0.0f;
