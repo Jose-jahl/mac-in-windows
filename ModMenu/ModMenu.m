@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.20.0"
+#define MODMENU_VERSION     "0.21.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.20.0";
+const char *modmenu_build_id = "modmenu-glass-0.21.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -428,13 +428,17 @@ static BOOL mm_def_bool(NSString *k, BOOL d);   /* forward: lo usa mm_reload_app
    arma (por defecto solo franco y escopeta, que es donde mas se usa). */
 static void mm_lock_opts_sync(void)
 {
-    g_lock_on      = mm_def_bool(@"mm_x_aimlock", NO);
-    g_lock_rifle   = mm_def_bool(@"mm_lock_rifle", YES);
-    g_lock_smg     = mm_def_bool(@"mm_lock_smg", YES);
-    g_lock_shotgun = mm_def_bool(@"mm_lock_shotgun", YES);
-    g_lock_sniper  = mm_def_bool(@"mm_lock_sniper", YES);
-    g_aim_height   = mm_def_float(@"mm_aim_height", 0.0f);
-    g_lock_ads     = mm_def_bool(@"mm_lock_ads", NO);
+    /* 0.21.0: DECISION DE PRODUCTO. El aimlock queda siempre activo y solo para
+       franco y escopeta, con el punto de mira fijo (altura 0 = cuello/pecho).
+       No se lee de preferencias a proposito: asi ningun switch viejo, ni un
+       ajuste guardado de una version anterior, lo puede apagar ni cambiar. */
+    g_lock_on      = YES;
+    g_lock_rifle   = NO;
+    g_lock_smg     = NO;
+    g_lock_shotgun = YES;
+    g_lock_sniper  = YES;
+    g_lock_ads     = NO;
+    g_aim_height   = 0.0f;
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -1039,11 +1043,6 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
 /* 0.16.0: features nuevas del ESP, dibujadas desde el lienzo. */
-static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H);
-static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H);
-static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H);
-static void mm_estate_tick(void);   /* 0.16.2: cache de estado a 10 Hz */
-static void mm_team_probe_dump(void);   /* 0.17.0: sonda de equipo (una vez) */
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
 static void mm_refresh_count_glass(void);
@@ -2327,9 +2326,6 @@ static int mm_declutter_budget(void)
     if (conTrails)  mm_trails_draw(ctx, bs);
     if (conBearings) mm_draw_bearings(ctx, bs);
     /* 0.16.0: cono de vision y estado (recarga / municion / ADS) por enemigo */
-    mm_draw_enemy_cones(ctx, bs.size.width, bs.size.height);
-    mm_draw_enemy_state(ctx, bs.size.width, bs.size.height);
-    mm_draw_aimed_at(ctx, bs.size.width, bs.size.height);
 
     /* v0.5.0: aunque no haya cajas (todos los enemigos detras de la camara),
        el lienzo sigue: la flecha "fuera de pantalla" tiene que poder salir. */
@@ -4136,7 +4132,7 @@ static void mm_esp_frame(double t)
         static double s_lastT = 0.0;
         if (s_lastT > 0.0 && t > s_lastT) {
             double inst = 1.0 / (t - s_lastT);
-            g_fps = (g_fps > 0.0) ? (g_fps * 0.9 + inst * 0.1) : inst;
+            g_fps = (g_fps > 0.0) ? (g_fps * 0.75 + inst * 0.25) : inst;
         }
         s_lastT = t;
 
@@ -4147,23 +4143,8 @@ static void mm_esp_frame(double t)
         if ((s_tick % 30) == 0) mm_aim_apply();
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
-            mm_estate_tick();               /* 0.16.2: lecturas caras a 10 Hz */
 
-            /* 0.17.0: sonda de equipo. Corre UNA vez, 3 s despues de prender el
-               switch (asi ya hay cajas), y se rearma al apagarlo. */
-            {
-                static double s_tp_t0 = 0.0;
-                static int    s_tp_done = 0;
-                int on = mm_def_bool(@"mm_team_probe", NO);
-                if (on && !s_tp_done) {
-                    double now = CACurrentMediaTime();
-                    if (s_tp_t0 == 0.0) s_tp_t0 = now;
-                    else if (now - s_tp_t0 > 3.0) { s_tp_done = 1; mm_team_probe_dump(); }
-                } else if (!on && s_tp_done) {
-                    s_tp_t0 = 0.0;
-                    s_tp_done = 0;
-                }
-            }
+            
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
             mm_refresh_count_glass();       /* v0.3.2: contador glass */
@@ -6457,9 +6438,8 @@ static void mm_cloud_build_combat(UIView *page)
     /* Cuerpo: salud, lineas y relleno. */
     UIView *b = mm_cloud_card(@"CUERPO", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    NSArray *rkeys = @[ @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top",
-                        @"mm_esp_fill" ];
-    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba", @"Relleno" ];
+    NSArray *rkeys = @[ @"mm_esp_health", @"mm_esp_lines", @"mm_esp_lines_top" ];
+    NSArray *rtit = @[ @"Salud", @"Lineas", @"Lineas desde arriba" ];
     for (NSUInteger i = 0; i < rkeys.count; i++)
         mm_cloud_row(b, rtit[i], rkeys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, YES);
@@ -6468,7 +6448,9 @@ static void mm_cloud_build_combat(UIView *page)
     /* Alcance y features fijas del binario. */
     UIView *c = mm_cloud_card(@"ALCANCE", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    float rng = mm_def_float(@"mm_esp_range", 500.0f);
+    float rng = mm_def_float(@"mm_esp_range", 300.0f);
+    if (rng > 300.0f) rng = 300.0f;      /* 0.21.0: tope duro 300 m */
+    if (rng < 20.0f) rng = 20.0f;
     UILabel *rl = mm_cloud_caption(@"Rango ESP", 108.0);
     rl.frame = CGRectMake(MM_CLOUD_CARD_INNER, 30.0, 108.0, 14.0);
     [c addSubview:rl];
@@ -6477,7 +6459,7 @@ static void mm_cloud_build_combat(UIView *page)
     g_range_val.textAlignment = NSTextAlignmentRight;
     g_range_val.frame = CGRectMake(MM_CLOUD_CARD_INNER + 112.0, 30.0, iw - 112.0, 14.0);
     [c addSubview:g_range_val];
-    UISlider *rs = mm_cloud_slider(20.0f, 500.0f, rng, @"mm_esp_range",
+    UISlider *rs = mm_cloud_slider(20.0f, 300.0f, rng, @"mm_esp_range",
                                    @selector(onSlider:), iw);
     rs.frame = CGRectMake(MM_CLOUD_CARD_INNER, 44.0, iw, 24.0);
     [c addSubview:rs];
@@ -6509,27 +6491,10 @@ static void mm_cloud_build_aim(UIView *page)
     CGFloat iw = MM_CLOUD_CARD_W - (MM_CLOUD_CARD_INNER * 2.0);
 
     /* 1) AIMBOT — tres switches y la altura. Nada mas. */
-    UIView *a = mm_cloud_card(@"AIMBOT", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(a, @"Aim lock", @"mm_x_aimlock", NO, 30.0, NO);
-    mm_cloud_row(a, @"Solo al apuntar (ADS)", @"mm_lock_ads", NO, 58.0, NO);
-    mm_cloud_card_caption(a, @"Altura vs cabeza (m)", 90.0);
-    UISlider *ah = mm_cloud_slider(-0.6f, 0.3f, g_aim_height, @"mm_aim_height",
-                                   @selector(onAimHeight:), iw);
-    ah.frame = CGRectMake(MM_CLOUD_CARD_INNER, 100.0, iw, 24.0);
-    [a addSubview:ah];
-    /* 0.17.0: sonda de equipo. Zona verificada: la tarjeta tiene libre desde 130
-       hasta MM_CLOUD_BODY_H (214); la fila ocupa 132..160. */
-    mm_cloud_row(a, @"Sonda de equipo", @"mm_team_probe", NO, 132.0, NO);
-    [page addSubview:a];
+
 
     /* 2) ARMAS — con cuales actua el lock. */
-    UIView *b = mm_cloud_card(@"ARMAS", MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP,
-                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(b, @"Fusil", @"mm_lock_rifle", YES, 30.0, NO);
-    mm_cloud_row(b, @"Subfusil", @"mm_lock_smg", YES, 58.0, NO);
-    mm_cloud_row(b, @"Escopeta", @"mm_lock_shotgun", YES, 86.0, NO);
-    mm_cloud_row(b, @"Franco", @"mm_lock_sniper", YES, 114.0, NO);
-    [page addSubview:b];
+
 
     /* 3) ASISTENCIA — la del juego. NO depende del lock. */
     UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -6613,10 +6578,7 @@ static void mm_cloud_build_visual(UIView *page)
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
     /* 2026-11: lecturas RE nuevas (team / estado / municion). Default OFF hasta
        validar en device (docs/re-lecturas-1057.md). */
-    mm_cloud_row(c, @"Filtrar equipo", @"mm_x_team_filter", NO, 94.0, YES);
     mm_cloud_row(c, @"Ignorar caidos (aim)", @"mm_x_ignore_down", NO, 122.0, NO);
-    mm_cloud_row(c, @"Estado (cura/invisible/veh)", @"mm_x_state_tags", NO, 154.0, YES);
-    mm_cloud_row(c, @"Municion + ADS", @"mm_x_ammo", NO, 182.0, YES);
     [page addSubview:c];
 }
 
@@ -8531,284 +8493,6 @@ __attribute__((constructor)) static void modmenu_init(void)
  * ========================================================================= */
 
 /* ===========================================================================
- *  0.16.2 — ESTADO POR ENEMIGO EN CACHE (optimizacion).
- *
- *  EL PROBLEMA QUE ARREGLA
- *  Las features de 0.16.0 leian memoria DENTRO del pintado: el cono y el aviso
- *  "te apunta" leian un quaternion de 16 B por enemigo, y el estado de recarga
- *  hacia 4 saltos de puntero + 2 floats por enemigo, todo a la frecuencia del
- *  lienzo. Con 20 enemigos a 60 fps eso son ~7.000 lecturas de vm por segundo
- *  solo para dibujar, y el juego se siente pesado.
- *
- *  LA SOLUCION
- *  Las lecturas caras se hacen a 10 Hz en mm_estate_tick() (llamado desde
- *  mm_tick), una sola vez por enemigo, y se guardan en g_estate[]. El pintado
- *  despues NO toca memoria del juego: solo lee el cache. Baja el costo ~6x y el
- *  estado mostrado no pierde utilidad (una recarga dura segundos).
- *
- *  Se indexa por PAWN, no por indice: g_boxes se rearma a 30 Hz y los indices
- *  pueden cambiar entre un refresh y el siguiente. Si el pawn no coincide, ese
- *  enemigo simplemente no se dibuja ese frame (mejor que mostrar dato viejo).
- * ========================================================================= */
-
-#define MM_CONE_HALF_DEG   30.0f   /* medio angulo del cono dibujado */
-#define MM_CONE_LEN_M      10.0f   /* largo del cono en metros        */
-#define MM_AIMED_DEG        7.0f   /* "te apunta" dentro de esto      */
-#define MM_ESTATE_MS      100.0    /* refresh del cache: 10 Hz        */
-
-typedef struct {
-    uint64_t pawn;
-    int      valid;
-    float    fwd[3];              /* forward horizontal ya normalizado */
-    int      reloading;
-    float    elapse, dur;
-    int      ammo, ammoMax, ads;
-} MMEnemyState;
-
-static MMEnemyState g_estate[MM_MAX_BOXES];
-static double       g_estate_t = 0.0;
-static float        g_me[3] = { 0.0f, 0.0f, 0.0f };
-static int          g_me_ok = 0;
-/* toggles cacheados: leerlos por frame costaba un viaje a NSUserDefaults por
-   helper. Se refrescan junto con el cache. */
-static int          g_opt_cone = 0, g_opt_ammo = 0, g_opt_reload = 0, g_opt_aimed = 0;
-
-/* Un solo lugar hace las lecturas caras. */
-static void mm_enemy_state_read(const MMEspBox *b, MMEnemyState *st)
-{
-    st->pawn = b->pawn;
-    st->valid = 0;
-    st->reloading = 0;
-    st->elapse = st->dur = 0.0f;
-    st->ammo = st->ammoMax = -1;
-    st->ads = (b->tags & 8u) ? 1 : 0;
-    st->fwd[0] = st->fwd[1] = st->fwd[2] = 0.0f;
-    if (b->pawn == 0) return;
-
-    /* forward: quaternion de aim en 0x380 */
-    float q[4];
-    memcpy(q, (const void *)((uintptr_t)b->pawn + OFF_PAWN_AIMROT), sizeof(q));
-    float ql = sqrtf(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
-    if (ql > 0.01f) {
-        q[0] /= ql; q[1] /= ql; q[2] /= ql; q[3] /= ql;
-        float f[3] = { 0.0f, 0.0f, 1.0f };
-        mm_q_rotate(q, f, st->fwd);
-        float fl = sqrtf(st->fwd[0]*st->fwd[0] + st->fwd[2]*st->fwd[2]);
-        if (fl > 0.05f) {
-            st->fwd[0] /= fl; st->fwd[2] /= fl;
-            st->valid = 1;
-        }
-    }
-
-    /* cadena del arma: inventario -> arma -> estado */
-    uint64_t inv = 0, wep = 0, sm = 0, sst = 0;
-    if (!mm_r64(b->pawn + OFF_PAWN_INVMGR, &inv) || inv == 0) return;
-    if (!mm_r64(inv + OFF_INVM_CURWEP, &wep) || wep == 0) return;
-
-    if (g_opt_ammo || g_opt_reload) {
-        uint8_t aim = 0;
-        if (mm_vm_read(wep + OFF_WEP_AIMING, &aim, 1)) st->ads = (aim & 1) ? 1 : 0;
-    }
-    if (g_opt_ammo) {
-        int32_t clip = -1, cmax = -1;
-        uintptr_t fl = 0;
-        if (mm_r64(wep + OFF_WEP_FIRELST, &fl) && fl != 0) {
-            if (mm_vm_read(fl + OFF_FC_CLIP, &clip, sizeof(clip))) st->ammo = clip;
-            if (mm_vm_read(fl + OFF_FC_CLIPMAX, &cmax, sizeof(cmax))) st->ammoMax = cmax;
-        }
-    }
-    if (g_opt_reload) {
-        if (!mm_r64(wep + OFF_WEP_STATEMACH, &sm) || sm == 0) return;
-        if (!mm_r64(sm + OFF_SM_CURSTATE, &sst) || sst == 0) return;
-        float el = 0.0f, du = 0.0f;
-        mm_vm_read(sst + OFF_ST_ELAPSE, &el, sizeof(el));
-        mm_vm_read(sst + OFF_ST_DOCHANGE, &du, sizeof(du));
-        st->elapse = el;
-        st->dur = du;
-        st->reloading = (du > 0.05f && el > 0.0f && el <= du + 0.5f) ? 1 : 0;
-    }
-}
-
-/* Refresca el cache. Lo llama mm_tick, no el pintado. */
-static void mm_estate_tick(void)
-{
-    double now = CACurrentMediaTime();
-    if ((now - g_estate_t) * 1000.0 < MM_ESTATE_MS) return;
-    g_estate_t = now;
-
-    g_opt_cone   = mm_def_bool(@"mm_esp_cone", NO);
-    g_opt_ammo   = mm_def_bool(@"mm_esp_ammo", NO);
-    g_opt_reload = mm_def_bool(@"mm_esp_reload", NO);
-    g_opt_aimed  = mm_def_bool(@"mm_esp_aimed", NO);
-
-    /* mi posicion, una vez, para el aviso de "te apunta" */
-    g_me_ok = 0;
-    if (g_fp_localpawn != NULL && g_fp_trpos != NULL) {
-        void *lp = g_fp_localpawn();
-        if (lp != NULL) {
-            uint64_t tr = 0;
-            if (mm_r64((uintptr_t)lp + OFF_PAWN_TRANSFORM, &tr) && tr != 0) {
-                g_fp_trpos((void *)(uintptr_t)tr, g_me);
-                if (fabsf(g_me[0]) + fabsf(g_me[1]) + fabsf(g_me[2]) > 1.0f) g_me_ok = 1;
-            }
-        }
-    }
-
-    for (int i = 0; i < MM_MAX_BOXES; i++) g_estate[i].valid = 0;
-    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        if (!g_boxes[i].alive) continue;
-        mm_enemy_state_read(&g_boxes[i], &g_estate[i]);
-    }
-}
-
-/* Devuelve el cache de la caja i solo si sigue siendo el mismo pawn. */
-static const MMEnemyState *mm_estate_of(int i)
-{
-    if (i < 0 || i >= MM_MAX_BOXES) return NULL;
-    const MMEnemyState *st = &g_estate[i];
-    if (!st->valid || st->pawn == 0 || st->pawn != g_boxes[i].pawn) return NULL;
-    return st;
-}
-
-static void mm_draw_enemy_cones(CGContextRef ctx, CGFloat W, CGFloat H)
-{
-    if (!g_opt_cone || g_box_count <= 0 || ctx == NULL) return;
-
-    UIColor *acc = mm_neon_green();
-    CGFloat ar = 0.0, ag = 0.0, ab = 0.0;
-    [acc getRed:&ar green:&ag blue:&ab alpha:NULL];
-
-    CGContextSaveGState(ctx);
-    CGContextSetLineWidth(ctx, 1.0);
-    CGContextSetRGBStrokeColor(ctx, ar, ag, ab, 0.42);
-    CGContextSetRGBFillColor(ctx, ar, ag, ab, 0.075);
-
-    float ca = cosf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
-    float sa = sinf(MM_CONE_HALF_DEG * (float)M_PI / 180.0f);
-
-    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        const MMEnemyState *st = mm_estate_of(i);
-        if (st == NULL || !st->valid) continue;
-
-        float fx = st->fwd[0], fz = st->fwd[2];
-        float apexY = g_boxes[i].wy - 1.35f;
-        float a0[3] = { g_boxes[i].wx, apexY, g_boxes[i].wz };
-        float l[3] = { a0[0] + (fx * ca - fz * sa) * MM_CONE_LEN_M, apexY,
-                       a0[2] + (fx * sa + fz * ca) * MM_CONE_LEN_M };
-        float r[3] = { a0[0] + (fx * ca + fz * sa) * MM_CONE_LEN_M, apexY,
-                       a0[2] + (-fx * sa + fz * ca) * MM_CONE_LEN_M };
-
-        CGPoint p0, pl, pr;
-        int d0 = 0, dl = 0, dr = 0;
-        if (!mm_w2s(g_view_mtx, g_proj_mtx, a0, NO, W, H, &p0, &d0, NULL, NULL)) continue;
-        if (!mm_w2s(g_view_mtx, g_proj_mtx, l,  NO, W, H, &pl, &dl, NULL, NULL)) continue;
-        if (!mm_w2s(g_view_mtx, g_proj_mtx, r,  NO, W, H, &pr, &dr, NULL, NULL)) continue;
-        if (d0 || dl || dr) continue;
-
-        CGContextBeginPath(ctx);
-        CGContextMoveToPoint(ctx, p0.x, p0.y);
-        CGContextAddLineToPoint(ctx, pl.x, pl.y);
-        CGContextAddLineToPoint(ctx, pr.x, pr.y);
-        CGContextClosePath(ctx);
-        CGContextDrawPath(ctx, kCGPathFillStroke);
-    }
-    CGContextRestoreGState(ctx);
-}
-
-static void mm_draw_enemy_state(CGContextRef ctx, CGFloat W, CGFloat H)
-{
-    if ((!g_opt_ammo && !g_opt_reload) || g_box_count <= 0 || ctx == NULL) return;
-
-    UIFont *f = [UIFont monospacedDigitSystemFontOfSize:9.0 weight:UIFontWeightSemibold];
-    NSShadow *sh = mm_txt_shadow();
-    UIColor *acc = mm_neon_green();
-    UIColor *red = [UIColor colorWithRed:1.0 green:0.30 blue:0.32 alpha:0.96];
-
-    CGContextSaveGState(ctx);
-
-    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        const MMEnemyState *st = mm_estate_of(i);
-        if (st == NULL) continue;
-
-        NSString *txt = nil;
-        UIColor *col = acc;
-        if (g_opt_reload && st->reloading) {
-            int pct = (st->dur > 0.01f) ? (int)((st->elapse / st->dur) * 100.0f) : 0;
-            if (pct < 0) pct = 0;
-            if (pct > 100) pct = 100;
-            txt = [NSString stringWithFormat:@"RECARGA %d%%", pct];
-            col = red;
-        } else if (g_opt_ammo && st->ammo >= 0) {
-            if (st->ammoMax > 0)
-                txt = [NSString stringWithFormat:@"%d/%d", st->ammo, st->ammoMax];
-            else
-                txt = [NSString stringWithFormat:@"%d", st->ammo];
-            if (st->ammoMax > 0 && st->ammo * 4 <= st->ammoMax) col = red;
-        }
-        if (txt == nil) continue;
-
-        NSDictionary *at = @{ NSFontAttributeName: f,
-                              NSForegroundColorAttributeName: col,
-                              NSShadowAttributeName: sh };
-        CGSize sz = mm_text_size(txt, at, 3);
-        CGFloat bx = g_boxes[i].x + (g_boxes[i].w - sz.width) * 0.5f;
-        CGFloat by = g_boxes[i].y + g_boxes[i].h + 3.0;
-        if (by > H - sz.height) by = g_boxes[i].y - sz.height - 3.0;
-        if (bx < 0.0) bx = 0.0;
-        if (bx + sz.width > W) bx = W - sz.width;
-        [txt drawAtPoint:CGPointMake(bx, by) withAttributes:at];
-
-        if (g_opt_ammo && st->ads) {
-            CGContextSetRGBFillColor(ctx, 1.0, 0.85, 0.25, 0.95);
-            CGContextFillEllipseInRect(ctx, CGRectMake(bx - 8.0, by + sz.height * 0.5 - 2.0,
-                                                       4.0, 4.0));
-        }
-    }
-    CGContextRestoreGState(ctx);
-}
-
-static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
-{
-    if (!g_opt_aimed || !g_me_ok || g_box_count <= 0 || ctx == NULL) return;
-
-    float cosLim = cosf(MM_AIMED_DEG * (float)M_PI / 180.0f);
-
-    CGContextSaveGState(ctx);
-    CGContextSetLineWidth(ctx, 1.6);
-    CGContextSetRGBStrokeColor(ctx, 1.0, 0.22, 0.24, 0.95);
-    CGContextSetRGBFillColor(ctx, 1.0, 0.22, 0.24, 0.95);
-
-    for (int i = 0; i < g_box_count && i < MM_MAX_BOXES; i++) {
-        const MMEnemyState *st = mm_estate_of(i);
-        if (st == NULL) continue;
-
-        float dx = g_me[0] - g_boxes[i].wx;
-        float dy = g_me[1] - (g_boxes[i].wy - 1.35f);
-        float dz = g_me[2] - g_boxes[i].wz;
-        float dl = sqrtf(dx*dx + dy*dy + dz*dz);
-        if (dl < 1.5f) continue;
-        dx /= dl; dy /= dl; dz /= dl;
-
-        float dot = st->fwd[0]*dx + st->fwd[1]*dy + st->fwd[2]*dz;
-        if (dot < cosLim) continue;
-
-        CGRect r = CGRectMake(g_boxes[i].x - 2.0, g_boxes[i].y - 2.0,
-                              g_boxes[i].w + 4.0, g_boxes[i].h + 4.0);
-        CGContextStrokeRect(ctx, r);
-
-        CGFloat mx = g_boxes[i].x + g_boxes[i].w * 0.5f;
-        CGFloat my = g_boxes[i].y - 10.0;
-        CGContextBeginPath(ctx);
-        CGContextMoveToPoint(ctx, mx, my + 4.0);
-        CGContextAddLineToPoint(ctx, mx - 4.5, my - 3.0);
-        CGContextAddLineToPoint(ctx, mx + 4.5, my - 3.0);
-        CGContextClosePath(ctx);
-        CGContextFillPath(ctx);
-    }
-    CGContextRestoreGState(ctx);
-}
-
-/* ===========================================================================
  *  0.17.0 — SONDA DE EQUIPO.
  *
  *  POR QUE EXISTE
@@ -8828,195 +8512,17 @@ static void mm_draw_aimed_at(CGContextRef ctx, CGFloat W, CGFloat H)
  * ========================================================================= */
 /* 0.19.0: volcado generico de una tabla objeto/offset. Una sola implementacion
    para todas las estructuras, para no repetir el mismo bucle seis veces. */
-static void mm_probe_table(NSMutableString *out, NSString *title,
-                           const uint64_t *obj, int n,
-                           uintptr_t lo, uintptr_t hi, const char *pfx)
-{
-    [out appendFormat:@"\n# %@\n", title];
-    for (int k = 0; k < n; k++)
-        [out appendFormat:@"%s%d=%#lx\n", pfx, k, (unsigned long)obj[k]];
-    [out appendString:@"off      "];
-    for (int k = 0; k < n; k++) [out appendFormat:@"%s%-8d", pfx, k];
-    [out appendString:@"\n"];
-    for (uintptr_t off = lo; off < hi; off += 4) {
-        uint32_t v[6];
-        int any = 0;
-        for (int k = 0; k < n; k++) {
-            if (obj[k] != 0 && mm_vm_read((uintptr_t)obj[k] + off, &v[k], sizeof(v[k])))
-                any = 1;
-            else
-                v[k] = 0xDEADBEEFu;
-        }
-        if (!any) continue;
-        [out appendFormat:@"0x%03lx    ", (unsigned long)off];
-        for (int k = 0; k < n; k++) [out appendFormat:@"%08X ", v[k]];
-        [out appendString:@"\n"];
-    }
-}
+
 
 /* 0.20.0: busca el array de huesos POR FIRMA, en el dispositivo.
    Un array de huesos es: puntero a array + cantidad, y cada elemento apunta a un
    Transform con coordenadas de mundo plausibles. En vez de volcar 3 niveles y
    adivinar en el laboratorio, se prueba aca y se reporta el candidato. */
-static int mm_looks_like_transform(uintptr_t t, float outpos[3])
-{
-    uint8_t b[0x40];
-    if (!mm_vm_read(t, b, sizeof(b))) return 0;
-    for (int off = 0; off + 12 <= 0x40; off += 4) {
-        float x, y, z;
-        memcpy(&x, b + off, sizeof(x));
-        memcpy(&y, b + off + 4, sizeof(y));
-        memcpy(&z, b + off + 8, sizeof(z));
-        if (!isfinite(x) || !isfinite(y) || !isfinite(z)) continue;
-        float ax = fabsf(x), ay = fabsf(y), az = fabsf(z);
-        if (ax < 0.01f && ay < 0.01f && az < 0.01f) continue;
-        if (ax > 10000.0f || ay > 10000.0f || az > 10000.0f) continue;
-        outpos[0] = x; outpos[1] = y; outpos[2] = z;
-        return 1;
-    }
-    return 0;
-}
 
-static void mm_probe_bones(NSMutableString *out, uintptr_t pawn)
-{
-    [out appendString:@"\n# HUESOS: busqueda del array por firma (ptr + count + elementos tipo Transform)\n"];
-    int found = 0;
-    for (uintptr_t o = 0; o < 0x600; o += 8) {
-        uint64_t p = 0;
-        if (!mm_r64(pawn + o, &p) || p == 0) continue;
-        if (p < 0x100000000ULL || p > 0x0000800000000000ULL) continue;
-        uint8_t b[0x40];
-        if (!mm_vm_read((uintptr_t)p, b, sizeof(b))) continue;
-        for (int k = 0; k + 16 <= 0x40; k += 8) {
-            uint64_t q = 0;
-            memcpy(&q, b + k, 8);
-            if (q < 0x100000000ULL || q > 0x0000800000000000ULL) continue;
-            for (int d = 8; d <= 16; d += 8) {
-                if (k + d + 4 > 0x40) continue;
-                uint32_t c = 0;
-                memcpy(&c, b + k + d, sizeof(c));
-                if (c < 8 || c > 200) continue;
-                for (uintptr_t base = 0; base <= 0x20; base += 0x10) {
-                    int okT = 0;
-                    float p0[3] = { 0, 0, 0 };
-                    float p1[3] = { 0, 0, 0 };
-                    int probes = (int)c < 6 ? (int)c : 6;
-                    for (int e = 0; e < probes; e++) {
-                        uint64_t el = 0;
-                        if (!mm_r64(q + base + (uintptr_t)e * 8, &el) || el == 0) continue;
-                        float pos[3];
-                        if (mm_looks_like_transform((uintptr_t)el, pos)) {
-                            if (okT == 0) { p0[0] = pos[0]; p0[1] = pos[1]; p0[2] = pos[2]; }
-                            if (okT == 1) { p1[0] = pos[0]; p1[1] = pos[1]; p1[2] = pos[2]; }
-                            okT++;
-                        }
-                    }
-                    if (okT >= 4) {
-                        found++;
-                        [out appendFormat:
-                            @"BONES pawn+0x%03lx obj=%#lx array=%#lx base=%#lx count=%u ok=%d "
-                            @"pos0=%.1f,%.1f,%.1f pos1=%.1f,%.1f,%.1f\n",
-                            (unsigned long)o, (unsigned long)p, (unsigned long)q,
-                            (unsigned long)base, c, okT,
-                            (double)p0[0], (double)p0[1], (double)p0[2],
-                            (double)p1[0], (double)p1[1], (double)p1[2]];
-                    }
-                }
-            }
-        }
-    }
-    if (found == 0) [out appendString:@"BONES sin candidatos\n"];
-}
 
-static void mm_team_probe_dump(void)
-{
-    if (g_fp_localpawn == NULL) return;
-    void *lp = g_fp_localpawn();
-    if (lp == NULL) return;
 
-    uintptr_t pv[6];
-    char      nm[6][48];
-    float     d[6];
-    int       n = 1;
 
-    pv[0] = (uintptr_t)lp;
-    snprintf(nm[0], sizeof(nm[0]), "(local)");
-    d[0] = 0.0f;
-    for (int i = 0; i < g_box_count && n < 6; i++) {
-        if (g_boxes[i].pawn == 0) continue;
-        pv[n] = (uintptr_t)g_boxes[i].pawn;
-        snprintf(nm[n], sizeof(nm[n]), "%s", g_boxes[i].name[0] ? g_boxes[i].name : "?");
-        d[n] = g_boxes[i].dist;
-        n++;
-    }
 
-    NSMutableString *out = [NSMutableString stringWithCapacity:250000];
-    [out appendFormat:@"# FUSION probe  build=%s  pawns=%d\n", MODMENU_VERSION, n];
-    for (int k = 0; k < n; k++)
-        [out appendFormat:@"pawn%d=%#lx dist=%.1f name=%s\n",
-                          k, (unsigned long)pv[k], (double)d[k], nm[k]];
-
-    /* ---- 1) PAWN: transform, aim rotation, punteros ---- */
-    uint64_t pawn[6];
-    for (int k = 0; k < n; k++) pawn[k] = (uint64_t)pv[k];
-    mm_probe_table(out, @"PAWN", pawn, n, 0x000, 0x600, "p");
-
-    /* ---- 2) ENTIDAD: team(0x110), dead(0x0FC), robot(0x298), vehicle,
-               invis, war, medtime, armor(0x5C4/0x5C8), nombre(0x160) ---- */
-    uint64_t ent[6], tr[6], wep[6], wd[6], fc[6], root[6];
-    for (int k = 0; k < n; k++) {
-        uint64_t e = 0, t = 0, inv = 0, w = 0, wc = 0, fcl = 0;
-        ent[k] = 0; tr[k] = 0; wep[k] = 0; wd[k] = 0; fc[k] = 0; root[k] = 0;
-        if (mm_r64(pv[k] + OFF_PAWN_ENTITY, &e) && e != 0) ent[k] = e;
-        if (mm_r64(pv[k] + OFF_PAWN_TRANSFORM, &t) && t != 0) tr[k] = t;
-        if (mm_r64(pv[k] + OFF_PAWN_INVMGR, &inv) && inv != 0 &&
-            mm_r64(inv + OFF_INVM_CURWEP, &w) && w != 0) {
-            wep[k] = w;
-            if (mm_r64(w + OFF_WEP_CONFIG, &wc) && wc != 0) wd[k] = wc;
-            if (mm_r64(w + OFF_WEP_FIRELST, &fcl) && fcl != 0) fc[k] = fcl;
-        }
-        (void)root;
-    }
-    mm_probe_table(out, @"ENTIDAD (pawn+0x5C0)", ent, n, 0x000, 0x600, "e");
-    mm_probe_table(out, @"TRANSFORM (pawn+0x308)", tr, n, 0x000, 0x120, "t");
-
-    /* ---- 3) ARMA y WEAPONDATA: muzzle flash, ADS, ammo ---- */
-    mm_probe_table(out, @"ARMA (INVMGR+0x048)", wep, n, 0x000, 0x400, "w");
-    mm_probe_table(out, @"WEAPONDATA (arma+0x280)", wd, n, 0x000, 0x200, "d");
-    mm_probe_table(out, @"FIRE COMPONENT (arma+0x150)", fc, n, 0x000, 0x400, "f");
-
-    /* ---- 4) ESQUELETO: punteros del pawn LOCAL y su destino.
-       El mesh/huesos cuelgan de un objeto apuntado por el pawn; para encontrarlo
-       sin adivinar, se vuelcan los primeros 0x80 B de cada campo que parezca
-       puntero. Ahi se ve la firma de un array de huesos (ptr a array + count). ---- */
-    [out appendString:@"\n# PUNTEROS DEL PAWN LOCAL -> destino (0x80 B)\n"];
-    {
-        uintptr_t base = pv[0];
-        for (uintptr_t off = 0x000; off < 0x600; off += 8) {
-            uint64_t v = 0;
-            if (!mm_r64(base + off, &v) || v == 0) continue;
-            if (v < 0x100000000ULL || v > 0x0000800000000000ULL) continue;
-            if ((v & 7) != 0) continue;
-            uint32_t w[32];
-            if (!mm_vm_read((uintptr_t)v, w, sizeof(w))) continue;
-            [out appendFormat:@"@pawn+0x%03lx -> %#lx\n", (unsigned long)off, (unsigned long)v];
-            for (int r = 0; r < 8; r++) {
-                [out appendFormat:@"   +0x%02x  ", (unsigned)(r * 16)];
-                for (int c = 0; c < 4; c++) [out appendFormat:@"%08X ", w[r * 4 + c]];
-                [out appendString:@"\n"];
-            }
-        }
-    }
-
-    /* 0.20.0: inferencia de huesos sobre el pawn local */
-    mm_probe_bones(out, pv[0]);
-
-    NSString *docs = mm_docs_dir();
-    if (docs.length > 0) {
-        [out writeToFile:[docs stringByAppendingPathComponent:@"fusion_team.txt"]
-              atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    }
-}
 
 
 
@@ -9151,6 +8657,7 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
 
 
