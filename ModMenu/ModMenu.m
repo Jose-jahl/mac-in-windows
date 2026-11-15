@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.23.0"
+#define MODMENU_VERSION     "0.24.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.23.0";
+const char *modmenu_build_id = "modmenu-glass-0.24.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -405,6 +405,7 @@ static long  g_lock_diag[2] = { 0, 0 };
 static BOOL g_lock_on = NO;
 static BOOL g_lock_rifle = YES, g_lock_smg = YES, g_lock_shotgun = YES, g_lock_sniper = YES;
 static BOOL g_lock_ads  = NO;    /* 0.9.3: lock solo mientras apunta (mas discreto) */
+static BOOL g_aim_silent    = NO;   /* 0.24.0: escribir solo en el frame del disparo */
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 0.0f;   /* 0.9.9: offset vertical DESDE LA CABEZA (0 = cabeza) */
 static BOOL  g_aim_on = NO;   /* 0.10.2: default OFF (el relay necesita re-aplicarse) */
@@ -464,6 +465,7 @@ static void mm_lock_opts_sync(void)
     /* 0.23.0: punto de mira. 0 = pecho, 1 = cabeza. La distancia es al ancla de la
        caja (cuello), asi que son metros, no offsets. */
     g_aim_height   = mm_def_bool(@"mm_aim_head", NO) ? 0.10f : -0.30f;
+    g_aim_silent   = mm_def_bool(@"mm_aim_silent", NO);
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -3070,7 +3072,8 @@ static void mm_haptic(int style)
         if (!s.on) g_lock_active = 0;
     }
     if ([k isEqualToString:@"mm_x_aimlock"] || [k hasPrefix:@"mm_lock_"] ||
-        [k isEqualToString:@"mm_aim_head"]) mm_lock_opts_sync();
+        [k isEqualToString:@"mm_aim_head"] ||
+        [k isEqualToString:@"mm_aim_silent"]) mm_lock_opts_sync();
     if ([k isEqualToString:@"mm_x_fast_reload"]) mm_reload_apply();   /* C-18 */
     if ([k isEqualToString:@"mm_x_aim_key"]) {
         g_aim_key_mode = s.on;
@@ -4921,6 +4924,35 @@ static void mm_aim_lock(void)
            m_SimulatedAimRotation (0x3C0) segun una condicion interna (verificado en
            el desensamblado: csel 0x380/0x3C0). Escribir solo 0x380 no tenia efecto
            en los estados en que el juego lee el simulado. Se escriben las dos. */
+        /* 0.24.0 — MODO "SOLO AL DISPARAR" (aproximacion a silent aim SIN hook).
+           En vez de corregir la rotacion todos los frames (donde arrastra la mira
+           visible), se escribe solo en los frames donde el arma dispara. El disparo
+           se detecta por la CAIDA del contador municion, que es un dato que ya
+           leemos: si `clip` bajo respecto del frame anterior, hubo disparo.
+           Se mantiene 3 frames para cubrir la rafaga. Si el modo esta apagado, el
+           comportamiento es exactamente el de 0.23.0 (corregir siempre).
+           Fail-safe: si no se puede leer `clip`, se escribe igual (nunca bloquear). */
+        if (g_aim_silent) {
+            int32_t clip = -1;
+            uint64_t inv = 0, wep = 0, fl = 0;
+            if (mm_r64((uintptr_t)lp + OFF_PAWN_INVMGR, &inv) && inv != 0 &&
+                mm_r64(inv + OFF_INVM_CURWEP, &wep) && wep != 0 &&
+                mm_r64(wep + OFF_WEP_FIRELST, &fl) && fl != 0)
+                mm_vm_read(fl + OFF_FC_CLIP, &clip, sizeof(clip));
+            static int32_t s_last_clip = -1;
+            static int s_fire_hold = 0;
+            if (clip >= 0 && s_last_clip >= 0 && clip < s_last_clip) s_fire_hold = 3;
+            if (clip >= 0) s_last_clip = clip;
+            if (s_fire_hold > 0) {
+                s_fire_hold--;
+            } else {
+                /* fuera del disparo: no se escribe, pero el objetivo ya quedo elegido
+                   y `q` calculado, asi que el frame del disparo es instantaneo. */
+                g_lock_active = 1;
+                return;
+            }
+        }
+
         memcpy((void *)((uintptr_t)lp + OFF_PAWN_AIMROT), q, sizeof(q));
         memcpy((void *)((uintptr_t)lp + OFF_PAWN_SIMAIMROT), q, sizeof(q));
         if (g_fp_setaimrot) { MMQuat qv = {q[0],q[1],q[2],q[3]}; g_fp_setaimrot(lp, qv); }
@@ -6539,8 +6571,9 @@ static void mm_cloud_build_aim(UIView *page)
        offset de memoria, es una altura en metros, asi que no puede romper nada. */
     UIView *a = mm_cloud_card(@"AIM LOCK", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(a, @"A la cabeza", @"mm_aim_head", NO, 30.0, NO);
-    mm_cloud_static_row(a, @"Armas", @"Franco + Escopeta", 58.0);
-    mm_cloud_static_row(a, @"Estado", @"Siempre activo", 86.0);
+    mm_cloud_row(a, @"Solo al disparar", @"mm_aim_silent", NO, 58.0, NO);
+    mm_cloud_static_row(a, @"Armas", @"Franco + Escopeta", 86.0);
+    mm_cloud_static_row(a, @"Estado", @"Siempre activo", 114.0);
     [page addSubview:a];
 
     UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -8726,6 +8759,7 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
 
 
