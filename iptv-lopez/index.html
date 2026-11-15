@@ -351,6 +351,7 @@ window.IPTV_SOURCES = {
 </script>
 <script>
 window.__FORCE_WEB = 1;
+window.__FORCE_TV = 1;
 /* IPTV LOPEZ 3.2 - webOS (Chromium 53: sin grid, sin inset, sin gap, sin async) */
 (function () {
   'use strict';
@@ -379,7 +380,8 @@ window.__FORCE_WEB = 1;
     tabs: [], tab: 0, index: 0, zone: 'grid', view: [], cols: 4, cardW: 280,
     favs: {}, byUrl: {}, counts: {}, playing: null, attempt: 0,
     osdTimer: null, guardTimer: null,
-    web: location.search.indexOf('web=1') > -1 || !!window.__FORCE_WEB
+    web: location.search.indexOf('web=1') > -1 || !!window.__FORCE_WEB,
+    tv: !!window.__FORCE_TV
   };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -558,7 +560,7 @@ window.__FORCE_WEB = 1;
       if (t.sect !== lastSect) { html += '<div class="sect">' + esc(t.sect) + '</div>'; lastSect = t.sect; }
       n = state.counts[t.id];
       html += '<div class="tab' + (i === state.tab ? ' on' : '') +
-              (state.zone === 'side' && i === state.tab ? ' focus' : '') + '">' +
+              ((state.zone === 'side' || state.zone === 'tabs') && i === state.tab ? ' focus' : '') + '">' +
               esc(t.label) + (n ? '<span class="n">' + n + '</span>' : '') + '</div>';
     }
     tabsEl.innerHTML = html;
@@ -621,6 +623,13 @@ window.__FORCE_WEB = 1;
   function revealCard() {
     var el = grid.children[state.index];
     if (!el) return;
+    if (state.web) {
+      var r = el.getBoundingClientRect();
+      var h = window.innerHeight || 720;
+      if (r.top < 96) window.scrollTo(0, (window.pageYOffset || 0) + r.top - 104);
+      else if (r.bottom > h - 24) window.scrollTo(0, (window.pageYOffset || 0) + r.bottom - h + 40);
+      return;
+    }
     var et = el.offsetTop, eb = et + el.offsetHeight;
     var st = grid.scrollTop, vh = grid.clientHeight;
     if (et < st + 4) grid.scrollTop = et - 8;
@@ -628,6 +637,7 @@ window.__FORCE_WEB = 1;
   }
 
   function revealTab() {
+    if (state.web) { window.scrollTo(0, 0); return; }
     var i, idx = 0, found = null;
     for (i = 0; i < tabsEl.children.length; i++) {
       if (tabsEl.children[i].className.indexOf('tab') === 0) {
@@ -847,6 +857,7 @@ window.__FORCE_WEB = 1;
     state.attempt = 0;
     perr.className = 'hidden';
     player.className = '';
+    if (state.web) document.body.style.overflow = 'hidden';
     showOsd(ch.name, (ch.group || '') + '  ·  conectando');
     beginStream(ch);
   }
@@ -856,6 +867,7 @@ window.__FORCE_WEB = 1;
     if (state.guardTimer) clearTimeout(state.guardTimer);
     try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) {}
     player.className = 'hidden';
+    if (state.web) document.body.style.overflow = '';
   }
 
   function zap(dir) {
@@ -912,8 +924,31 @@ window.__FORCE_WEB = 1;
       return;
     }
 
-    /* en modo navegador dejamos que las flechas scrolleen la pagina */
-    if (state.web) return;
+    /* modo navegador con cursor: no secuestramos las flechas */
+    if (state.web && !state.tv) return;
+
+    /* modo control remoto (D-pad) servido por web */
+    if (state.tv) {
+      if (state.zone === 'tabs') {
+        if (k === 37) { e.preventDefault(); selectTab(state.tab - 1); return; }
+        if (k === 39) { e.preventDefault(); selectTab(state.tab + 1); return; }
+        if (k === 40 || k === 13) { e.preventDefault(); state.zone = 'grid'; renderTabs(); paintFocus(); return; }
+        return;
+      }
+      if (k === 37) { e.preventDefault(); move('left'); return; }
+      if (k === 39) { e.preventDefault(); move('right'); return; }
+      if (k === 38) {
+        e.preventDefault();
+        if (state.index < state.cols) { state.zone = 'tabs'; renderTabs(); paintFocus(); }
+        else move('up');
+        return;
+      }
+      if (k === 40) { e.preventDefault(); move('down'); return; }
+      if (k === 13) { e.preventDefault(); if (state.view.length) play(state.view[state.index]); return; }
+      if (k === 404) { toggleFav(); return; }
+      if (k === 406) { refreshCurrent(); return; }
+      return;
+    }
 
     if (state.zone === 'side') {
       if (k === 38) { e.preventDefault(); selectTab(state.tab - 1); return; }
