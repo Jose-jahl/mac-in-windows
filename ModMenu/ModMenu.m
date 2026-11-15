@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.25.0"
+#define MODMENU_VERSION     "0.26.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.25.0";
+const char *modmenu_build_id = "modmenu-glass-0.26.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -470,9 +470,14 @@ static void mm_lock_opts_sync(void)
     g_lock_ads     = NO;
     /* 0.23.0: punto de mira. 0 = pecho, 1 = cabeza. La distancia es al ancla de la
        caja (cuello), asi que son metros, no offsets. */
-    g_aim_height   = mm_def_bool(@"mm_aim_head", NO) ? 0.10f : -0.30f;
-    g_aim_silent   = mm_def_bool(@"mm_aim_silent", NO);
-    g_aim_track    = mm_def_bool(@"mm_aim_track", YES);
+    /* 0.26.0: sin perillas. Las tres (cabeza/pecho, solo al disparar, mantener
+       objetivo) movian el punto menos de medio grado a distancia normal y el operador
+       no noto ninguna. Se fijan los valores neutros y se sacan del panel: menos
+       botones que no hacen nada. Lo que si mueve la aguja es el hueso real, que queda
+       fuera por decision de producto. */
+    g_aim_height   = 0.0f;
+    g_aim_silent   = NO;
+    g_aim_track    = NO;
 }
 
 /* C-18: recarga rapida toggleable. El relay de GetChangeClipTime lee el slot
@@ -6508,13 +6513,11 @@ static void mm_cloud_build_combat(UIView *page)
     /* ESP: que se dibuja de cada enemigo. */
     /* 10 filas: 38 + 10*28 = 318, tarjeta 326. Entra en el contentSize del scroll. */
     UIView *a = mm_cloud_card(@"OBJETIVOS", 0.0, MM_CLOUD_CARD_W,
-                              38.0 + MM_CLOUD_ROW_H * 10.0 + 8.0);
+                              38.0 + MM_CLOUD_ROW_H * 6.0 + 8.0);
     NSArray *keys = @[ @"mm_esp_master", @"mm_esp_box", @"mm_esp_players",
-                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist",
-                       @"mm_esp_ammo", @"mm_esp_reload", @"mm_esp_cone", @"mm_esp_aimed" ];
+                       @"mm_esp_bots", @"mm_esp_name", @"mm_esp_dist" ];
     NSArray *titles = @[ @"ESP maestro", @"Cajas", @"Jugadores", @"Bots",
-                         @"Nombres", @"Distancia",
-                         @"Municion", @"Recarga", @"Cono de vision", @"Te apunta" ];
+                         @"Nombres", @"Distancia" ];
     for (NSUInteger i = 0; i < keys.count; i++)
         mm_cloud_row(a, titles[i], keys[i], NO,
                      38.0 + (CGFloat)i * MM_CLOUD_ROW_H, (i != 0));
@@ -6587,14 +6590,11 @@ static void mm_cloud_build_aim(UIView *page)
        que es el cuello: +0.10 m queda en la cabeza, -0.30 m en el pecho. No es un
        offset de memoria, es una altura en metros, asi que no puede romper nada. */
     UIView *a = mm_cloud_card(@"AIM LOCK", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(a, @"A la cabeza", @"mm_aim_head", NO, 30.0, NO);
-    mm_cloud_row(a, @"Mantener objetivo", @"mm_aim_track", YES, 58.0, NO);
-    mm_cloud_row(a, @"Solo al disparar", @"mm_aim_silent", NO, 86.0, NO);
-    mm_cloud_static_row(a, @"Armas", @"Franco + Escopeta", 114.0);
-    mm_cloud_static_row(a, @"Estado", @"Siempre activo", 142.0);
+                mm_cloud_static_row(a, @"Armas", @"Franco + Escopeta", 30.0);
+    mm_cloud_static_row(a, @"Estado", @"Siempre activo", 58.0);
     [page addSubview:a];
 
-    UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+    UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP),
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Aimbot (asist)", @"mm_x_aim_on", g_aim_on, 30.0, NO);
     mm_cloud_card_caption(c, @"Fuerza de aim", 58.0);
@@ -8777,6 +8777,7 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
 
 
