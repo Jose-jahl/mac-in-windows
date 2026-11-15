@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.21.0"
+#define MODMENU_VERSION     "0.22.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.21.0";
+const char *modmenu_build_id = "modmenu-glass-0.22.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -410,8 +410,31 @@ static float g_aim_height = 0.0f;   /* 0.9.9: offset vertical DESDE LA CABEZA (0
 static BOOL  g_aim_on = NO;   /* 0.10.2: default OFF (el relay necesita re-aplicarse) */
 static BOOL  g_aim_key_mode = NO;   /* C-3: aim solo mientras se mantiene el boton AIM */
 static BOOL  g_aim_key_held = NO;
+/* ===========================================================================
+ *  0.22.0 (P0) — GATE DE VERSION A NIVEL DE ARCHIVO.
+ *
+ *  Antes el chequeo vivia como `static int g_ver_ok` DENTRO de un tick, asi que
+ *  solo apagaba el ESP. El aimlock y el relay del aim seguian escribiendo contra
+ *  offsets de 1.0.57 aunque el juego fuera otra version: eso no se ve, se crashea.
+ *
+ *  Ahora hay un solo gate, y TODO el que escriba memoria del juego lo consulta.
+ *  Es fail-closed: mientras no se haya podido confirmar la version, no se escribe.
+ * ========================================================================= */
+static int g_ver_gate = -1;
+
+static int mm_ver_ok(void)
+{
+    if (g_ver_gate < 0) {
+        NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
+        g_ver_gate = (gv != nil && [gv isEqualToString:@FUSION_OFFSETS_VERSION]) ? 1 : 0;
+    }
+    return g_ver_gate;
+}
+
 static void mm_aim_apply(void)
 {
+    /* 0.22.0 (P0): nunca escribir el slot del relay con offsets de otra version. */
+    if (mm_ver_ok() != 1) return;
     const struct mach_header *h = _dyld_get_image_header(0);
     if (h == NULL) return;
     /* strength +0xEC, FOV +0xF0, gate +0xF4, cur +0xF8 (lo escribe el relay), alpha +0xFC */
@@ -1042,6 +1065,7 @@ static BOOL mm_w2s(const float *view, const float *proj, const float p[3],
                    BOOL cabeza, CGFloat W, CGFloat H, CGPoint *out,
                    int *detras, float *vxo, float *vyo);   /* Fase 1.5: estelas */
 static void mm_probe_run(void);
+static void mm_diag_dump(void);   /* 0.22.0 P0 */
 /* 0.16.0: features nuevas del ESP, dibujadas desde el lienzo. */
 static void mm_reload_apply(void);     /* C-18: slot de recarga rapida */
 static void mm_layout_count_glass(void);
@@ -4144,6 +4168,12 @@ static void mm_esp_frame(double t)
         if ((s_tick++ & 1) == 0) {
             mm_esp_collect_real();
 
+            /* 0.22.0: diag unico a los 5 s, cuando ya hay colecta y pintado. */
+            {
+                static int s_diag_done = 0;
+                if (!s_diag_done && mm_uptime() > 5.0) { s_diag_done = 1; mm_diag_dump(); }
+            }
+
             
             mm_reload_diag();               /* 0.8.4: sonda del reload (4 Hz, propia) */
             mm_esp_read_diag();             /* 0.8.8: sonda de lecturas (1 Hz) */
@@ -4732,7 +4762,10 @@ static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out
    Nosotros hacemos lo mismo; la camara es opcional (apagada por defecto). */
 static void mm_aim_lock(void)
 {
-    @try {
+        /* 0.22.0 (P0): si la version del juego no coincide con los offsets, el lock
+       no toca nada. Fail-closed: preferible un aimlock apagado a un write a ciegas. */
+    if (mm_ver_ok() != 1) { g_lock_active = 0; return; }
+@try {
         if (!g_lock_on) { g_lock_active = 0; return; }
         if (g_panel_open || g_esp == nil || g_esp.hidden) { g_lock_active = 0; return; }
         if (g_fp_trpos == NULL || g_fp_localpawn == NULL ||
@@ -8526,6 +8559,29 @@ __attribute__((constructor)) static void modmenu_init(void)
 
 
 
+/* 0.22.0 (P0): un solo archivo de diagnostico al arrancar. Sirve para saber, sin
+   adivinar, con que version del juego corrio el mod y si el gate lo dejo pasar. */
+static void mm_diag_dump(void)
+{
+    NSString *gv = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
+    NSMutableString *d = [NSMutableString stringWithCapacity:1200];
+    [d appendFormat:@"build=%s\n", MODMENU_VERSION];
+    [d appendFormat:@"offsets=%s\n", FUSION_OFFSETS_VERSION];
+    [d appendFormat:@"juego=%@\n", gv ?: @"(desconocido)"];
+    [d appendFormat:@"gate=%d  (1 ok, 0 mismatch, -1 sin evaluar)\n", g_ver_gate];
+    [d appendFormat:@"cajas=%d\n", g_box_count];
+    [d appendFormat:@"colecta_ms=%.2f\n", g_collect_ms];
+    [d appendFormat:@"paint_fps=%.1f\n", g_paint_fps];
+    [d appendFormat:@"reads_s=%.0f\n", g_reads_per_s];
+    [d appendFormat:@"boots_sucios=%d\n", g_dirty_boots];
+    [d appendFormat:@"termico=%d\n", g_thermal_level];
+    [d appendFormat:@"aimlock=%d\n", (int)g_lock_on];
+    NSString *docs = mm_docs_dir();
+    if (docs.length > 0)
+        [d writeToFile:[docs stringByAppendingPathComponent:@"fusion_diag.txt"]
+            atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
 /* ===========================================================================
  *  0.15.0 — API del panel (mm_panel_api.h).
  *
@@ -8657,6 +8713,7 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
 
 
