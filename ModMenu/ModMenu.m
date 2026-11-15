@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.19.0"
+#define MODMENU_VERSION     "0.20.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.19.0";
+const char *modmenu_build_id = "modmenu-glass-0.20.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -8854,6 +8854,80 @@ static void mm_probe_table(NSMutableString *out, NSString *title,
     }
 }
 
+/* 0.20.0: busca el array de huesos POR FIRMA, en el dispositivo.
+   Un array de huesos es: puntero a array + cantidad, y cada elemento apunta a un
+   Transform con coordenadas de mundo plausibles. En vez de volcar 3 niveles y
+   adivinar en el laboratorio, se prueba aca y se reporta el candidato. */
+static int mm_looks_like_transform(uintptr_t t, float outpos[3])
+{
+    uint8_t b[0x40];
+    if (!mm_vm_read(t, b, sizeof(b))) return 0;
+    for (int off = 0; off + 12 <= 0x40; off += 4) {
+        float x, y, z;
+        memcpy(&x, b + off, sizeof(x));
+        memcpy(&y, b + off + 4, sizeof(y));
+        memcpy(&z, b + off + 8, sizeof(z));
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z)) continue;
+        float ax = fabsf(x), ay = fabsf(y), az = fabsf(z);
+        if (ax < 0.01f && ay < 0.01f && az < 0.01f) continue;
+        if (ax > 10000.0f || ay > 10000.0f || az > 10000.0f) continue;
+        outpos[0] = x; outpos[1] = y; outpos[2] = z;
+        return 1;
+    }
+    return 0;
+}
+
+static void mm_probe_bones(NSMutableString *out, uintptr_t pawn)
+{
+    [out appendString:@"\n# HUESOS: busqueda del array por firma (ptr + count + elementos tipo Transform)\n"];
+    int found = 0;
+    for (uintptr_t o = 0; o < 0x600; o += 8) {
+        uint64_t p = 0;
+        if (!mm_r64(pawn + o, &p) || p == 0) continue;
+        if (p < 0x100000000ULL || p > 0x0000800000000000ULL) continue;
+        uint8_t b[0x40];
+        if (!mm_vm_read((uintptr_t)p, b, sizeof(b))) continue;
+        for (int k = 0; k + 16 <= 0x40; k += 8) {
+            uint64_t q = 0;
+            memcpy(&q, b + k, 8);
+            if (q < 0x100000000ULL || q > 0x0000800000000000ULL) continue;
+            for (int d = 8; d <= 16; d += 8) {
+                if (k + d + 4 > 0x40) continue;
+                uint32_t c = 0;
+                memcpy(&c, b + k + d, sizeof(c));
+                if (c < 8 || c > 200) continue;
+                for (uintptr_t base = 0; base <= 0x20; base += 0x10) {
+                    int okT = 0;
+                    float p0[3] = { 0, 0, 0 };
+                    float p1[3] = { 0, 0, 0 };
+                    int probes = (int)c < 6 ? (int)c : 6;
+                    for (int e = 0; e < probes; e++) {
+                        uint64_t el = 0;
+                        if (!mm_r64(q + base + (uintptr_t)e * 8, &el) || el == 0) continue;
+                        float pos[3];
+                        if (mm_looks_like_transform((uintptr_t)el, pos)) {
+                            if (okT == 0) { p0[0] = pos[0]; p0[1] = pos[1]; p0[2] = pos[2]; }
+                            if (okT == 1) { p1[0] = pos[0]; p1[1] = pos[1]; p1[2] = pos[2]; }
+                            okT++;
+                        }
+                    }
+                    if (okT >= 4) {
+                        found++;
+                        [out appendFormat:
+                            @"BONES pawn+0x%03lx obj=%#lx array=%#lx base=%#lx count=%u ok=%d "
+                            @"pos0=%.1f,%.1f,%.1f pos1=%.1f,%.1f,%.1f\n",
+                            (unsigned long)o, (unsigned long)p, (unsigned long)q,
+                            (unsigned long)base, c, okT,
+                            (double)p0[0], (double)p0[1], (double)p0[2],
+                            (double)p1[0], (double)p1[1], (double)p1[2]];
+                    }
+                }
+            }
+        }
+    }
+    if (found == 0) [out appendString:@"BONES sin candidatos\n"];
+}
+
 static void mm_team_probe_dump(void)
 {
     if (g_fp_localpawn == NULL) return;
@@ -8933,6 +9007,9 @@ static void mm_team_probe_dump(void)
             }
         }
     }
+
+    /* 0.20.0: inferencia de huesos sobre el pawn local */
+    mm_probe_bones(out, pv[0]);
 
     NSString *docs = mm_docs_dir();
     if (docs.length > 0) {
@@ -9074,6 +9151,7 @@ void mm_panel_close(void)           { mm_set_panel(NO); }
 int  mm_panel_visible(void)         { return g_panel_open ? 1 : 0; }
 
 #endif /* MM_USE_IMGUI */
+
 
 
 
