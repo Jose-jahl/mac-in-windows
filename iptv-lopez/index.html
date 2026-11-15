@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>IPTV LOPEZ</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%; height: 100%;
+  background: #07090d;
+  color: #e8edf4;
+  font-family: "LG Smart UI", "Helvetica Neue", Arial, sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hidden { display: none; }
+
+#app { display: flex; width: 100%; height: 100%; }
+
+/* ---------------- sidebar ---------------- */
+#side {
+  width: 236px;
+  min-width: 236px;
+  -webkit-flex: 0 0 236px;
+  flex: 0 0 236px;
+  height: 100%;
+  background: #0a0d12;
+  border-right: 1px solid #13181f;
+  display: flex;
+  flex-direction: column;
+}
+
+#brand {
+  display: flex;
+  align-items: center;
+  padding: 20px 18px 16px 18px;
+  border-bottom: 1px solid #12171e;
+}
+#brand .mark {
+  width: 30px; height: 30px;
+  border-radius: 9px;
+  background: -webkit-linear-gradient(top, #2ee6ff, #0e8fa6);
+  background: linear-gradient(top, #2ee6ff, #0e8fa6);
+  box-shadow: 0 0 16px rgba(34, 211, 238, .45);
+  margin-right: 11px;
+  position: relative;
+}
+#brand .mark:after {
+  content: "";
+  position: absolute;
+  left: 11px; top: 9px;
+  width: 0; height: 0;
+  border-left: 9px solid #04131a;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+}
+#brand .b1 { font-size: 15px; letter-spacing: 4px; color: #cfd9e4; font-weight: 300; line-height: 1.15; }
+#brand .b2 { font-size: 15px; letter-spacing: 4px; color: #22d3ee; font-weight: 700; line-height: 1.15; }
+
+#tabs { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 8px 0 10px 0; }
+
+.sect {
+  padding: 14px 18px 5px 18px;
+  font-size: 9px;
+  letter-spacing: 2.4px;
+  color: #414b59;
+  font-weight: 700;
+}
+
+.tab {
+  padding: 9px 18px;
+  font-size: 13px;
+  color: #94a1b2;
+  border-left: 3px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab.on {
+  color: #ffffff;
+  background: #0e2a33;
+  border-left-color: #22d3ee;
+  font-weight: 600;
+}
+.tab.focus { background: #1b2833; color: #ffffff; border-left-color: #ffffff; }
+.tab .n { float: right; font-size: 10px; color: #56657a; padding-left: 6px; }
+
+#sidenote {
+  padding: 10px 18px 14px 18px;
+  font-size: 9.5px;
+  letter-spacing: 1.4px;
+  color: #35404e;
+  border-top: 1px solid #12171e;
+}
+
+/* ---------------- main ---------------- */
+#main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+
+#head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 20px 34px 8px 34px;
+}
+#title { font-size: 25px; font-weight: 700; letter-spacing: -.4px; color: #f2f6fb; }
+.meta span { font-size: 11px; color: #66748a; letter-spacing: 1px; margin-left: 16px; }
+#status { color: #22d3ee; }
+
+#grid {
+  position: relative;
+  flex: 1 1 auto;
+  padding: 6px 34px 0 34px;
+  overflow: hidden;
+}
+
+.card {
+  position: relative;
+  display: inline-block;
+  vertical-align: top;
+  margin: 0 12px 10px 0;
+  padding: 9px 12px;
+  height: 76px;
+  border-radius: 10px;
+  background: #0f141b;
+  border: 1px solid #19202a;
+  overflow: hidden;
+}
+
+.card .logo {
+  display: inline-block;
+  vertical-align: middle;
+  width: 46px; height: 46px;
+  border-radius: 9px;
+  background: #161c25;
+  object-fit: contain;
+  margin-right: 11px;
+}
+.card .ph {
+  display: inline-block;
+  vertical-align: middle;
+  width: 46px; height: 46px;
+  line-height: 46px;
+  border-radius: 9px;
+  background: #12252c;
+  color: #35cfe6;
+  font-size: 19px;
+  font-weight: 700;
+  text-align: center;
+  margin-right: 11px;
+}
+.card .txt { display: inline-block; vertical-align: middle; width: 66%; }
+.card .nm {
+  font-size: 13.5px; color: #e4ebf3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.card .gr {
+  font-size: 9.5px; color: #5a687c; letter-spacing: 1.2px;
+  text-transform: uppercase; margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.card .fav {
+  position: absolute; top: 7px; right: 9px;
+  font-size: 11px; color: #f5c518; display: none;
+}
+.card.is-fav .fav { display: block; }
+
+.card.focus {
+  background: -webkit-linear-gradient(top, #123542, #0d2530);
+  background: linear-gradient(top, #123542, #0d2530);
+  border-color: #22d3ee;
+  box-shadow: 0 0 0 2px #22d3ee, 0 0 26px rgba(34, 211, 238, .22);
+}
+.card.focus .nm { color: #ffffff; }
+.card.focus .gr { color: #7fd8e6; }
+
+.empty {
+  padding: 90px 0 0 0;
+  text-align: center;
+  color: #5a687c;
+  font-size: 14px;
+  letter-spacing: .5px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 18px; height: 18px;
+  border: 2px solid #1e2a36;
+  border-top-color: #22d3ee;
+  border-radius: 50%;
+  vertical-align: -3px;
+  margin-right: 9px;
+  -webkit-animation: spin .8s linear infinite;
+  animation: spin .8s linear infinite;
+}
+@-webkit-keyframes spin { to { -webkit-transform: rotate(360deg); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#hints {
+  flex: 0 0 auto;
+  padding: 8px 34px 10px 34px;
+  font-size: 10.5px;
+  color: #4e5b6d;
+  letter-spacing: 1px;
+  border-top: 1px solid #10151c;
+}
+#hints span { margin-right: 20px; }
+#hints b { color: #22d3ee; font-weight: 700; }
+
+/* ---------------- player ---------------- */
+#player {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: #000000;
+}
+#video { display: block; width: 100%; height: 100%; background: #000000; }
+
+#osd {
+  position: absolute;
+  left: 46px; bottom: 40px;
+  padding: 11px 16px;
+  border-radius: 9px;
+  background: #060a0e;
+  border: 1px solid #1e2530;
+  max-width: 62%;
+  opacity: 1;
+}
+#osd.fade { opacity: 0; }
+.osd-name { font-size: 19px; font-weight: 700; }
+.osd-state { font-size: 11px; color: #8b99ab; margin-top: 4px; letter-spacing: 1.2px; }
+
+#perr {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: #000000;
+  text-align: center;
+  padding-top: 300px;
+}
+#perr p { font-size: 17px; color: #e8edf4; }
+#perr .small { font-size: 11px; color: #6f7d90; margin-top: 8px; }
+
+/* ---------- modo navegador (TV Browser / web) ---------- */
+body.web, body.web html { overflow: auto; height: auto; }
+body.web #app { display: block; height: auto; }
+body.web #side {
+  width: auto; min-width: 0; height: auto;
+  display: block; border-right: 0; border-bottom: 1px solid #13181f;
+}
+body.web #brand { display: inline-block; padding: 12px 16px; border: 0; vertical-align: middle; }
+body.web #tabs { display: block; padding: 0 12px 10px 12px; overflow: visible; min-height: 0; }
+body.web .sect { display: none; }
+body.web .tab {
+  display: inline-block; margin: 0 6px 6px 0; padding: 6px 12px;
+  border: 1px solid #1e2530; border-left: 1px solid #1e2530; border-radius: 14px;
+}
+body.web .tab.on { border-color: #22d3ee; background: #0e2a33; }
+body.web #main { display: block; }
+body.web #grid { overflow: visible; height: auto; padding: 10px 24px 60px 24px; }
+body.web .card { cursor: pointer; }
+body.web #hints, body.web #sidenote { display: none; }
+
+
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <aside id="side">
+    <div id="brand">
+      <div class="mark"></div>
+      <div class="brandtxt">
+        <div class="b1">IPTV</div>
+        <div class="b2">LOPEZ</div>
+      </div>
+    </div>
+    <nav id="tabs"></nav>
+    <div id="sidenote">AZUL · actualizar</div>
+  </aside>
+
+  <main id="main">
+    <header id="head">
+      <h1 id="title">Colombia</h1>
+      <div class="meta">
+        <span id="count"></span>
+        <span id="status"></span>
+        <span id="clock">--:--</span>
+      </div>
+    </header>
+
+    <section id="grid"></section>
+
+    <footer id="hints">
+      <span><b>OK</b> ver</span>
+      <span><b>&#8592;</b> categorías</span>
+      <span><b>CH +/−</b> canal</span>
+      <span><b>VERDE</b> favorito</span>
+      <span><b>AZUL</b> actualizar</span>
+      <span><b>ATRÁS</b> volver</span>
+    </footer>
+  </main>
+</div>
+
+<div id="player" class="hidden">
+  <video id="video" playsinline></video>
+  <div id="osd">
+    <div class="osd-name" id="osdName"></div>
+    <div class="osd-state" id="osdState"></div>
+  </div>
+  <div id="perr" class="hidden">
+    <p id="perrText">No se pudo abrir el canal.</p>
+    <p class="small">OK para reintentar · CH+ para el siguiente</p>
+  </div>
+</div>
+
+<script>
+window.CHANNELS = [{"name":"Caracol HD2","group":"Nacionales","logo":"https://i.imgur.com/Fww94l9.png","url":"http://181.78.14.26:4000/play/a00d/index.m3u8"},{"name":"Caracol Internacional","group":"Nacionales","logo":"https://i.imgur.com/h7LWbt5.png","url":"http://45.5.117.57:8200/play/a0e9/index.m3u8"},{"name":"RCN HD2","group":"Nacionales","logo":"https://i.imgur.com/SrMPTfc.png","url":"http://181.78.14.26:4000/play/a07m/index.m3u8"},{"name":"Canal 1 (Colombia)","group":"Nacionales","logo":"https://i.imgur.com/YFywPLC.png","url":"http://190.109.2.92:8000/play/a010/index.m3u8"},{"name":"Senal Colombia","group":"Nacionales","logo":"https://i.imgur.com/Y9x16vl.png","url":"http://138.121.15.230:9002/SENAL-COLOMBIA/index.m3u8"},{"name":"Canal Capital","group":"Nacionales","logo":"https://i.imgur.com/zAYtbYi.png","url":"http://138.121.15.230:9002/CANAL-CAPITAL/index.m3u8"},{"name":"Citytv Bogota","group":"Nacionales","logo":"https://i.imgur.com/h7K9EW9.png","url":"http://138.121.15.230:9002/CITY-TV/index.m3u8"},{"name":"NTN24","group":"Nacionales","logo":"https://i.imgur.com/UoKmSAP.png","url":"https://stream1.bitred.cl/ntn24/index.m3u8"},{"name":"Canal Institucional","group":"Nacionales","logo":"https://i.imgur.com/hqfQVrU.png","url":"http://190.61.47.54:8000/play/a00v/index.m3u8"},{"name":"Trece (Colombia)","group":"Nacionales","logo":"https://i.imgur.com/jsuXXIg.png","url":"http://190.60.46.228:8888/play/a030/index.m3u8"},{"name":"Teleantioquia","group":"Nacionales","logo":"https://i.imgur.com/6WMV2Az.png","url":"http://138.121.15.230:9002/TELEANTIOQUIA/index.m3u8"},{"name":"Telecaribe","group":"Nacionales","logo":"https://i.imgur.com/E35cXHt.png","url":"http://138.121.15.230:9002/TELECARIBE/index.m3u8"},{"name":"Telepacifico","group":"Nacionales","logo":"https://i.imgur.com/39hy97J.png","url":"http://138.121.15.230:9002/TELEPACIFICO/index.m3u8"},{"name":"Noticias RCN","group":"Nacionales","logo":"https://i.imgur.com/FMX4QCM.png","url":"https://jmp2.uk/plu-67d9b0ebc290c9499046e88f.m3u8"},{"name":"Red+","group":"Nacionales","logo":"https://i.imgur.com/kuqkTMC.png","url":"https://inforedvos.lcdn.claro.net.co/Content/HLS_HLS_DIR/Live/channel(REDMASHDWEB)/master.m3u8"},{"name":"Blu Radio","group":"Nacionales","logo":"https://i.imgur.com/w2t8CGT.png","url":"https://mdstrm.com/live-stream-playlist/58d1921a72e2b22e2905e493.m3u8"},{"name":"Cablenoticias","group":"Nacionales","logo":"https://i.imgur.com/FfhOGR9.png","url":"http://181.78.211.244:8005/play/a09u/index.m3u8"},{"name":"Canal 8 Sincelejo","group":"Nacionales","logo":"https://i.imgur.com/6lAA8lL.png","url":"http://181.78.21.38:8000/play/a0df/index.m3u8"},{"name":"Canal 8 TV+","group":"Nacionales","logo":"https://i.imgur.com/peOIG1F.png","url":"https://movil.ejeserver.com/live/canal8tv.m3u8"},{"name":"Canal Congreso","group":"Nacionales","logo":"https://i.imgur.com/3VnL8dp.png","url":"http://138.121.15.230:9002/CANAL-CONGRESO/index.m3u8"},{"name":"Canal Dos","group":"Nacionales","logo":"https://i.imgur.com/BYsyNHZ.jpg","url":"http://131.221.41.94/hls/canal2.m3u8"},{"name":"Canal Mas Television","group":"Nacionales","logo":"https://i.imgur.com/ODMa27W.jpg","url":"https://movil.ejeserver.com/live/teledoradahd.m3u8"},{"name":"Canal RCN","group":"Nacionales","logo":"https://i.imgur.com/5PhTaHp.png","url":"http://38.134.250.110:8000/play/a00i/index.m3u8"},{"name":"Canal Telefamilia","group":"Nacionales","logo":"https://i.imgur.com/D1s1Q3k.png","url":"https://stmv2.voxtvhd.com.br/telefamilia/telefamilia/playlist.m3u8"},{"name":"Canal TV3","group":"Nacionales","logo":"https://i.imgur.com/pyeBDpg.jpeg","url":"https://streaming.telenetdigital.net.co:8086/canal3tv/stream.m3u8"},{"name":"Nuestra Tele Internacional","group":"Nacionales","logo":"https://i.imgur.com/JoGQqmP.png","url":"http://45.173.231.22:8000/play/a0cr/index.m3u8"},{"name":"RCN Mas","group":"Nacionales","logo":"https://i.imgur.com/MJzuRAN.png","url":"http://45.224.96.220:18000/play/a098/index.m3u8"},{"name":"RCN Novelas","group":"Nacionales","logo":"https://i.imgur.com/9wxdWNQ.png","url":"https://cdnlive.klicgo.net/rcnnovelas/live/playlist.m3u8"},{"name":"Telecafe (Colombia)","group":"Nacionales","logo":"https://i.imgur.com/28XmS1J.png","url":"http://138.121.15.230:9002/TELECAFE/index.m3u8"},{"name":"Teleislas","group":"Nacionales","logo":"https://i.imgur.com/aKHGRyk.png","url":"http://190.61.47.54:8000/play/a015/index.m3u8"},{"name":"Telemedellin","group":"Nacionales","logo":"https://i.imgur.com/GnxzRTC.png","url":"http://181.78.82.130:8000/play/a0ru/index.m3u8"},{"name":"Win Sports","group":"Deportes","logo":"https://i.imgur.com/DuSSrHV.png","url":"http://138.121.15.230:9002/WIN-SPORT/index.m3u8"},{"name":"Win+ Futbol","group":"Deportes","logo":"https://i.imgur.com/0UN87vB.png","url":"http://181.78.12.119:16123/play/ch19/index.m3u8"},{"name":"ESPN 2 Latin America Colombia","group":"Deportes","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/ESPN2_logo.svg/960px-ESPN2_logo.svg.png","url":"http://190.61.47.54:8000/play/a005/index.m3u8"},{"name":"ESPN Latin America Colombia","group":"Deportes","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/ESPN_wordmark.svg/960px-ESPN_wordmark.svg.png","url":"http://190.61.47.54:8000/play/a004/index.m3u8"},{"name":"TNT Sports (Argentina)","group":"Deportes","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/TNT_Sports_2021_logo.svg/960px-TNT_Sports_2021_logo.svg.png","url":"http://45.184.109.10/live/69393EAE6ADBC65A68F942022362A202/86.m3u8"},{"name":"TNT Sports (Argentina) SD","group":"Deportes","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/TNT_Sports_2021_logo.svg/960px-TNT_Sports_2021_logo.svg.png","url":"http://181.78.79.131:8000/play/a0mo"},{"name":"TV Golfo Uraba","group":"Deportes","logo":"https://i.imgur.com/Nd5axnS.png","url":"https://stmv7.voxtvhd.com.br/golfo/golfo/playlist.m3u8"},{"name":"DW English","group":"Mundo","logo":"","url":"https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8"},{"name":"France 24","group":"Mundo","logo":"","url":"https://static.france24.com/live/F24_EN_LO_HLS/live_web.m3u8"},{"name":"NASA TV","group":"Mundo","logo":"","url":"https://ntv1.akamaized.net/hls/live/2014075/NASA-NTV1-HLS/master.m3u8"},{"name":"Red Bull TV","group":"Mundo","logo":"","url":"https://rbmn-live.akamaized.net/hls/live/590964/BoRB-AT/master.m3u8"},{"name":"A&E Latin America","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/d/df/A%26E_Network_logo.svg/960px-A%26E_Network_logo.svg.png","url":"http://138.121.15.230:9002/A&E/index.m3u8"},{"name":"Canal Cine Dios","group":"Cine y Series","logo":"https://i.imgur.com/S4xqZgV.png","url":"https://canal.mediaserver.com.co/live/cinedios.m3u8"},{"name":"Discovery Channel Latin America","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/f/f1/2019_Discovery_logo.svg/960px-2019_Discovery_logo.svg.png","url":"http://45.171.64.30:6060/play/a032/index.m3u8"},{"name":"E! Latin America Colombia","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/9/96/E%21_Logo_2012.svg/500px-E%21_Logo_2012.svg.png","url":"http://38.134.250.110:8000/play/a00x/index.m3u8"},{"name":"Space","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/1/1a/SpaceLogo.svg/960px-SpaceLogo.svg.png","url":"http://45.171.64.30:6060/play/a04n/index.m3u8"},{"name":"Star Channel (Colombia)","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Star_Channel_2020.svg/960px-Star_Channel_2020.svg.png","url":"http://190.61.47.54:8000/play/a035/index.m3u8"},{"name":"Studio Universal Latin America Colombia","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/StudioUniversal2016.png/960px-StudioUniversal2016.png","url":"http://45.171.64.30:2000/play/a04o/index.m3u8"},{"name":"TLC Latin America","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/TLC_Logo.svg/960px-TLC_Logo.svg.png","url":"http://38.134.250.110:8000/play/a00n/index.m3u8"},{"name":"TNT Latin America Colombia","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/2/24/TNT_Logo_2016.svg/960px-TNT_Logo_2016.svg.png","url":"http://181.78.211.244:8005/play/a09g/index.m3u8"},{"name":"TNT Novelas Colombia","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/6/67/TNT_Novelas_2025.svg/1920px-TNT_Novelas_2025.svg.png","url":"http://190.61.47.54:8000/play/a02f/index.m3u8"},{"name":"TNT Novelas ColombiaHD","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/6/67/TNT_Novelas_2025.svg/1920px-TNT_Novelas_2025.svg.png","url":"http://181.78.79.131:8000/play/a0na"},{"name":"Universal TV Latin America Colombia","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/4/42/Universal_TV_logo.svg/960px-Universal_TV_logo.svg.png","url":"http://38.134.250.110:8000/play/a006/index.m3u8"},{"name":"Warner Channel Colombia","group":"Cine y Series","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/f/f9/Warner_TV_logo.svg/960px-Warner_TV_logo.svg.png","url":"http://38.134.250.110:8000/play/a029/index.m3u8"},{"name":"Cartoon Network Latin America North Atlantic","group":"Infantil","logo":"https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/Cartoon_Network_2010_logo.svg/960px-Cartoon_Network_2010_logo.svg.png","url":"http://45.173.12.70:8000/play/a0fj"},{"name":"Discovery Kids Latin America Colombia","group":"Infantil","logo":"https://thumb.wikimedia.org/wikipedia/commons/thumb/7/7f/Discovery_Kids_2021_2D_sin_wordmark.svg/960px-Discovery_Kids_2021_2D_sin_wordmark.svg.png","url":"http://38.134.250.110:8000/play/a003/index.m3u8"},{"name":"Disney Channel Latin America Center","group":"Infantil","logo":"https://upload.wikimedia.org/wikipedia/commons/f/ff/2024_Disney_Channel_text_logo.svg","url":"http://181.78.8.199:8000/play/a0dn/index.m3u8"},{"name":"Disney Channel Latin America Panregional","group":"Infantil","logo":"https://upload.wikimedia.org/wikipedia/commons/f/ff/2024_Disney_Channel_text_logo.svg","url":"http://45.134.141.161:2200/ARG/Disney_Channel/index.m3u8"},{"name":"Disney Jr. Latin America","group":"Infantil","logo":"https://upload.wikimedia.org/wikipedia/commons/e/e3/2024_Disney_Jr._Logo.svg","url":"http://190.14.10.19:16000/play/a02d/index.m3u8"},{"name":"Disney Jr. Latin America North","group":"Infantil","logo":"https://upload.wikimedia.org/wikipedia/commons/e/e3/2024_Disney_Jr._Logo.svg","url":"http://181.78.14.26:4000/play/a073/index.m3u8"},{"name":"Eureka","group":"Infantil","logo":"https://i.imgur.com/WgnZPol.png","url":"https://mdstrm.com/live-stream-playlist/6952e02d19eabace52e2885f.m3u8"},{"name":"Nick Jr. Latin America","group":"Infantil","logo":"https://i.imgur.com/KT4tdQs.png","url":"https://streaming.onnethn.com/NICK_JR/playlist.m3u8"},{"name":"Nickelodeon Latin America","group":"Infantil","logo":"https://i.imgur.com/E84jnP8.png","url":"http://181.78.79.131:8000/play/a0qm"},{"name":"Tooncast SouthAmerica","group":"Infantil","logo":"https://i.imgur.com/3yXRbQy.png","url":"http://190.61.42.218:9000/play/a06i/index.m3u8"},{"name":"Buenisima Radio TV","group":"Música","logo":"https://i.imgur.com/URKDlOZ.png","url":"https://canal.mediaserver.com.co/live/buenisimatv.m3u8"},{"name":"Claro Musica TV","group":"Música","logo":"https://i.imgur.com/vrSFUwv.png","url":"http://45.171.64.30:6060/play/a010"},{"name":"Fiesta TV","group":"Música","logo":"https://i.imgur.com/42wImV2.png","url":"https://panelvideo1.intermediahost.co:3286/live/ruzfpkqklive.m3u8"},{"name":"La Morada Radio TV","group":"Música","logo":"https://i.imgur.com/E3wDEX5.png","url":"https://movil.ejeserver.com/live/lamoradatv.m3u8"},{"name":"MasMusica FM","group":"Música","logo":"https://i.imgur.com/tCg7owd.png","url":"https://movil.ejeserver.com/live/masmusica.m3u8"},{"name":"Parranda Vallenata","group":"Música","logo":"https://i.imgur.com/BzBX7Qx.jpeg","url":"https://backupmaxmedia.hvmultiplay.com/hls/stream3/parrandavallenata.m3u8"},{"name":"Radiola TV","group":"Música","logo":"https://i.imgur.com/3AXjotA.jpg","url":"http://158.172.217.18:8000/play/a01k/index.m3u8"},{"name":"Ranchenato TV","group":"Música","logo":"https://i.imgur.com/TCv5NqN.png","url":"http://181.78.12.119:16123/play/ch15/index.m3u8"},{"name":"Reyali","group":"Música","logo":"https://i.imgur.com/YmFjnsF.png","url":"https://eu1.servers10.com:8081/8090/index.m3u8"},{"name":"Rumba TV","group":"Música","logo":"https://i.imgur.com/WtVpWwI.png","url":"http://38.134.250.110:8000/play/a01p/index.m3u8"},{"name":"Supermusica TV","group":"Música","logo":"https://i.imgur.com/MiVs42N.jpeg","url":"https://backupmaxmedia.hvmultiplay.com/hls/stream4/supermusica.m3u8"},{"name":"Amaga Television","group":"Local","logo":"https://i.imgur.com/hvpbfzG.png","url":"https://viewhn.com/amagatelevision/sdfUYWKegHKRPpSirG/playlist.m3u8"},{"name":"ANC Television","group":"Local","logo":"https://i.imgur.com/xjTU14t.jpg","url":"https://live.amelbatv.co:81/anctvlive/index.m3u8"},{"name":"Aupur Television","group":"Local","logo":"https://i.imgur.com/FTv7zpJ.jpeg","url":"https://canal.aupurtv.co/live/stream/index.m3u8"},{"name":"BUM Television","group":"Local","logo":"https://i.imgur.com/I0eGYI0.png","url":"https://movil.ejeserver.com/live/visiondorada.m3u8"},{"name":"Canal 2 Alpavision Neiva","group":"Local","logo":"https://i.imgur.com/Yv8XIGW.png","url":"https://stmv1.voxtvhd.com.br/alpavision/alpavision/playlist.m3u8"},{"name":"Canal Womtv","group":"Local","logo":"https://i.imgur.com/Nr4muMP.jpeg","url":"https://live.amelbatv.co:81/womtvlive/index.m3u8"},{"name":"Canica TV","group":"Local","logo":"https://i.imgur.com/RuQDwTt.jpeg","url":"https://stmv4.voxtvhd.com.br/canicatv/canicatv/playlist.m3u8"},{"name":"CNC Santander de Quilichao","group":"Local","logo":"https://i.imgur.com/LNl2o9q.jpg","url":"https://movil.ejeserver.com/live/cncsantander.m3u8"},{"name":"CNC Tulua","group":"Local","logo":"https://i.imgur.com/NCzpcqm.png","url":"https://live.amelbatv.co:81/cnctulualive/index.fmp4.m3u8"},{"name":"Eduvision","group":"Local","logo":"https://i.imgur.com/ppBdqel.png","url":"https://stmv3.voxtvhd.com.br/conex2/conex2/playlist.m3u8"},{"name":"El Mundo del Campo","group":"Local","logo":"https://i.imgur.com/xG2apUG.jpeg","url":"http://181.78.21.38:8000/play/a040/index.m3u8"},{"name":"Heliconia Radio TV","group":"Local","logo":"https://i.imgur.com/AJ182BG.png","url":"https://eu1.servers10.com:8081/8178/index.m3u8"},{"name":"Hogar TV","group":"Local","logo":"https://i.imgur.com/zqovMhf.png","url":"http://190.61.47.54:8000/play/a01n/index.m3u8"},{"name":"Marsella TV","group":"Local","logo":"https://i.imgur.com/wwYOa00.png","url":"https://stmv2.voxtvhd.com.br/marsella/marsella/playlist.m3u8"},{"name":"Mas Norte TV","group":"Local","logo":"https://i.imgur.com/NmsWlj6.jpeg","url":"https://live.arnoproducciones.com/hls/norte.m3u8"},{"name":"MCI Television","group":"Local","logo":"https://pbs.twimg.com/profile_images/1836009952420274177/FfYonU6r_400x400.jpg","url":"https://video.ejeserver.com/live/mcitelevision.m3u8"},{"name":"Momento24","group":"Local","logo":"https://i.imgur.com/kLy6w9e.jpeg","url":"https://backupmaxmedia.hvmultiplay.com/hls/stream2/momento24.m3u8"},{"name":"NSTV","group":"Local","logo":"https://i.imgur.com/ES6xFAv.png","url":"https://sistemastr.tropicalmoonmedia.com/live/2C7CA6CECC9B8F8C3A07315FDA110936/21.m3u8"},{"name":"Panche Television","group":"Local","logo":"https://i.imgur.com/BJVlOVA.jpeg","url":"https://vs20.live.opencaster.com/panche_3c70d368/index.m3u8"},{"name":"Soona TV","group":"Local","logo":"https://i.imgur.com/Pk8zzTL.jpeg","url":"https://vs20.live.opencaster.com/soonatv_a1a564a9/index.m3u8"},{"name":"Suram TV","group":"Local","logo":"https://i.imgur.com/2N9LCES.png","url":"https://us.streaminghd.cl/suramtv/index.m3u8"},{"name":"TeveColombia","group":"Local","logo":"https://i.imgur.com/vPwiJTw.png","url":"https://cloud6.livescast.com:3900/live/tevecolombialive.m3u8"},{"name":"TVAgro","group":"Local","logo":"https://i.imgur.com/9nzY7Ch.png","url":"http://190.61.47.54:8000/play/a01k/index.m3u8"},{"name":"Ultra Casanare TV","group":"Local","logo":"https://i.imgur.com/1voWgLI.png","url":"https://eu1.servers10.com:8081/8072/index.m3u8"},{"name":"UMC TV","group":"Local","logo":"https://i.imgur.com/YQUK4wO.png","url":"https://streaming5.globalhostla.com/rtplive/unamirad/playlist.m3u8"},{"name":"Zoom (Colombia)","group":"Local","logo":"https://i.imgur.com/euy5zp6.png","url":"http://138.121.15.230:9002/ZOOM/index.m3u8"},{"name":"Enlace Television","group":"Otros","logo":"https://cdn.colombia.com/canales/enlace-television-3301.jpg","url":"http://181.78.12.119:16123/play/ch33/index.m3u8"},{"name":"Noticiero 90 Minutos","group":"Otros","logo":"https://i.imgur.com/ThaRRCN.png","url":"https://play.cdn.enetres.net/621B146D29C541AFB1507809F038F471021/021/playlist.m3u8"},{"name":"TeleNostalgia","group":"Otros","logo":"https://i.imgur.com/WZeMZNy.png","url":"http://38.134.250.110:8000/play/a01q/index.m3u8"},{"name":"Avivamiento TV","group":"Religioso","logo":"https://i.imgur.com/ydoBp3b.png","url":"https://s1.abntelevision.com/avivamientoabr/stream/avivamientohd/avivamientohd/playlist.m3u8"},{"name":"Bendicion Channel","group":"Religioso","logo":"https://i.imgur.com/yKzV7m7.png","url":"https://s.emisoras.tv:8081/bendicionchannel/index.m3u8"},{"name":"Bethel Colombia","group":"Religioso","logo":"https://i.imgur.com/BYdMsLL.png","url":"http://138.121.15.230:9002/BETHEL/index.m3u8"},{"name":"Canal Oracion Con Son","group":"Religioso","logo":"https://i.imgur.com/rfnFqU3.png","url":"https://canal.mediaserver.com.co/live/oracionconson.m3u8"},{"name":"Canal Telesantiago","group":"Religioso","logo":"https://i.imgur.com/DmkH5p8.jpg","url":"https://stream.canaltelesantiago.com:8000/play/TELESANTIAGO/index.m3u8"},{"name":"CMB Television","group":"Religioso","logo":"https://i.imgur.com/akGKPsk.png","url":"https://cdn1.cmbcolombia.tv/bethesda/video.m3u8"},{"name":"Cristovision","group":"Religioso","logo":"https://i.imgur.com/XIhCUY9.png","url":"https://5fc584f3f19c9.streamlock.net/cristovision/videocristovision/playlist.m3u8"},{"name":"Frecuencia F TV","group":"Religioso","logo":"https://i.imgur.com/Cw5k96N.png","url":"https://tv.frecuenciaf.com/live/envivo_1080p4000kbs/index.m3u8"},{"name":"Oasis TV (Colombia)","group":"Religioso","logo":"https://i.imgur.com/VKYzFpZ.png","url":"https://5e85d90130e77.streamlock.net/6020/6020/playlist.m3u8"},{"name":"Santel TV","group":"Religioso","logo":"https://i.imgur.com/jmJx0jo.png","url":"https://tv3.bitstreaming.net:3540/live/santeltvlive.m3u8"},{"name":"Tu Universo TV","group":"Religioso","logo":"https://i.imgur.com/e6esjLZ.jpg","url":"https://5bf8041cb3fed.streamlock.net/TUUNIVERSOTV/TUUNIVERSOTV/playlist.m3u8"},{"name":"TVGracia","group":"Religioso","logo":"https://i.imgur.com/tMl4ISO.png","url":"https://vs20.live.opencaster.com/diego_57244803/index.m3u8"}];
+
+</script>
+<script>
+// Fuentes remotas. Editar/reemplazar este archivo y la app lo toma al reiniciar.
+// Cada valor es una URL M3U/M3U8 publica. Se puede agregar cualquier id nuevo
+// y luego referenciarlo en app.js (COUNTRIES / GENRES).
+window.IPTV_SOURCES = {
+  "countries": {
+    "co": "https://iptv-org.github.io/iptv/countries/co.m3u",
+    "mx": "https://iptv-org.github.io/iptv/countries/mx.m3u",
+    "ar": "https://iptv-org.github.io/iptv/countries/ar.m3u",
+    "cl": "https://iptv-org.github.io/iptv/countries/cl.m3u",
+    "pe": "https://iptv-org.github.io/iptv/countries/pe.m3u",
+    "ve": "https://iptv-org.github.io/iptv/countries/ve.m3u",
+    "ec": "https://iptv-org.github.io/iptv/countries/ec.m3u",
+    "do": "https://iptv-org.github.io/iptv/countries/do.m3u",
+    "es": "https://iptv-org.github.io/iptv/countries/es.m3u"
+  },
+  "genres": {
+    "sports": "https://iptv-org.github.io/iptv/categories/sports.m3u",
+    "movies": "https://iptv-org.github.io/iptv/categories/movies.m3u",
+    "kids": "https://iptv-org.github.io/iptv/categories/kids.m3u",
+    "music": "https://iptv-org.github.io/iptv/categories/music.m3u",
+    "news": "https://iptv-org.github.io/iptv/categories/news.m3u",
+    "documentary": "https://iptv-org.github.io/iptv/categories/documentary.m3u",
+    "series": "https://iptv-org.github.io/iptv/categories/series.m3u",
+    "entertainment": "https://iptv-org.github.io/iptv/categories/entertainment.m3u"
+  }
+};
+
+</script>
+<script>
+window.__FORCE_WEB = 1;
+/* IPTV LOPEZ 3.2 - webOS (Chromium 53: sin grid, sin inset, sin gap, sin async) */
+(function () {
+  'use strict';
+
+  var CACHE_TTL = 12 * 3600 * 1000;
+  var MAX_RENDER = 600;
+  var ACCENT = '\u00C0-\u00FF';
+
+  var COUNTRIES = [
+    ['co', 'Colombia'], ['mx', 'México'], ['ar', 'Argentina'], ['cl', 'Chile'],
+    ['pe', 'Perú'], ['ve', 'Venezuela'], ['ec', 'Ecuador'], ['do', 'Rep. Dominicana'],
+    ['es', 'España']
+  ];
+  var GENRES = [
+    ['sports', 'Deportes'], ['movies', 'Cine'], ['kids', 'Infantil'],
+    ['music', 'Música'], ['news', 'Noticias'], ['documentary', 'Documental'],
+    ['series', 'Series'], ['entertainment', 'Entretenimiento']
+  ];
+  /* grupo curado -> genero remoto equivalente, para no duplicar categorias */
+  var CURATED_GENRE = {
+    'Deportes': 'sports', 'Cine y Series': 'movies', 'Infantil': 'kids',
+    'Música': 'music', 'Mundo': 'documentary'
+  };
+
+  var state = {
+    tabs: [], tab: 0, index: 0, zone: 'grid', view: [], cols: 4, cardW: 280,
+    favs: {}, byUrl: {}, counts: {}, playing: null, attempt: 0,
+    osdTimer: null, guardTimer: null,
+    web: location.search.indexOf('web=1') > -1 || !!window.__FORCE_WEB
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var grid = $('grid'), tabsEl = $('tabs'), video = $('video');
+  var titleEl = $('title'), countEl = $('count'), statusEl = $('status');
+  var player = $('player'), osd = $('osd'), perr = $('perr'), perrText = $('perrText');
+  var osdName = $('osdName'), osdState = $('osdState');
+
+  window.__lastKey = 0;
+  window.__err = null;
+  window.onerror = function (m, s, l) { window.__err = m + ' @' + l; };
+  window.__dbg = {};
+
+  /* ---------------- utilidades ---------------- */
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function initial(name) {
+    var m = String(name || '?').replace(new RegExp('[^A-Za-z0-9' + ACCENT + ']', 'g'), '');
+    return (m.charAt(0) || '?').toUpperCase();
+  }
+  function trim(s) { return String(s == null ? '' : s).replace(/^\s+|\s+$/g, ''); }
+  function setStatus(txt) { if (statusEl) statusEl.textContent = txt || ''; }
+
+  function loadFavs() {
+    try { state.favs = JSON.parse(localStorage.getItem('iptv.favs') || '{}') || {}; }
+    catch (e) { state.favs = {}; }
+  }
+  function saveFavs() {
+    try { localStorage.setItem('iptv.favs', JSON.stringify(state.favs)); } catch (e) {}
+  }
+  function cacheGet(k) {
+    try {
+      var o = JSON.parse(localStorage.getItem('iptv.cache2.' + k) || 'null');
+      return o ? { t: o.t || 0, ch: o.ch || [] } : null;
+    } catch (e) { return null; }
+  }
+  function cacheSet(k, ch) {
+    try { localStorage.setItem('iptv.cache2.' + k, JSON.stringify({ t: new Date().getTime(), ch: ch })); }
+    catch (e) {}
+  }
+
+  function xhrGet(url, ms, cb) {
+    var x = new XMLHttpRequest(), done = false;
+    var t = setTimeout(function () {
+      if (done) return;
+      done = true;
+      try { x.abort(); } catch (e) {}
+      cb(null);
+    }, ms);
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4 || done) return;
+      done = true;
+      clearTimeout(t);
+      cb(x.status >= 200 && x.status < 300 ? x.responseText : null);
+    };
+    try { x.open('GET', url, true); x.send(); }
+    catch (e) { if (!done) { done = true; clearTimeout(t); cb(null); } }
+  }
+
+  /* ---------------- fuentes ---------------- */
+  function remoteUrl(tab) {
+    var s = window.IPTV_SOURCES || {};
+    if (tab.kind === 'country') return (s.countries || {})[tab.key] || null;
+    if (tab.kind === 'genre') return (s.genres || {})[tab.key] || null;
+    return null;
+  }
+
+  function parseM3U(text, fallbackGroup) {
+    var out = [], lines = String(text).split(/\r?\n/), i, line, cur, name, logo, grp;
+    for (i = 0; i < lines.length; i++) {
+      line = trim(lines[i]);
+      if (!line) continue;
+      if (line.indexOf('#EXTINF') === 0) {
+        name = trim(line.split(',').slice(1).join(','));
+        logo = (line.match(/tvg-logo="([^"]*)"/) || [])[1] || '';
+        grp = (line.match(/group-title="([^"]*)"/) || [])[1] || '';
+        cur = { name: name || 'Canal', logo: logo, group: grp || fallbackGroup, url: null, remote: 1 };
+      } else if (cur && line.charAt(0) !== '#') {
+        cur.url = line;
+        out.push(cur);
+        cur = null;
+      }
+    }
+    return out;
+  }
+
+  function loadRemote(tab, force, done) {
+    var url = remoteUrl(tab);
+    if (!url) { done([]); return; }
+
+    var cached = cacheGet(tab.id);
+    var fresh = cached && (new Date().getTime() - cached.t) < CACHE_TTL;
+    if (cached && fresh && !force) { done(cached.ch); return; }
+    if (cached) { done(cached.ch); }
+
+    var x = new XMLHttpRequest(), finished = false;
+    var timer = setTimeout(function () {
+      if (finished) return;
+      finished = true;
+      try { x.abort(); } catch (e) {}
+      if (!cached) done([]);
+    }, 20000);
+
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4 || finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (x.status >= 200 && x.status < 300 && x.responseText) {
+        var ch = parseM3U(x.responseText, tab.label);
+        cacheSet(tab.id, ch);
+        done(ch);
+      } else if (!cached) {
+        done([]);
+      }
+    };
+    try { x.open('GET', url, true); x.send(); }
+    catch (e) { finished = true; done([]); }
+  }
+
+  /* ---------------- tabs ---------------- */
+  function buildTabs() {
+    var tabs = [], i;
+    tabs.push({ id: 'fav', label: 'Favoritos', sect: 'TU LISTA', kind: 'fav' });
+    for (i = 0; i < COUNTRIES.length; i++) {
+      tabs.push({ id: 'c_' + COUNTRIES[i][0], label: COUNTRIES[i][1], key: COUNTRIES[i][0], sect: 'PAÍSES', kind: 'country' });
+    }
+    for (i = 0; i < GENRES.length; i++) {
+      tabs.push({ id: 'g_' + GENRES[i][0], label: GENRES[i][1], key: GENRES[i][0], sect: 'GÉNEROS', kind: 'genre' });
+    }
+    tabs.push({ id: 'g_rel', label: 'Religioso', sect: 'GÉNEROS', kind: 'religious' });
+    state.tabs = tabs;
+
+    var all = window.CHANNELS || [];
+    for (i = 0; i < all.length; i++) state.byUrl[all[i].url] = all[i];
+  }
+
+  function curatedFor(tab) {
+    var all = window.CHANNELS || [], out = [], i, g;
+    if (tab.kind === 'country') {
+      if (tab.key !== 'co') return [];
+      return all.slice();
+    }
+    if (tab.kind === 'genre') {
+      for (i = 0; i < all.length; i++) {
+        g = CURATED_GENRE[trim(all[i].group)];
+        if (g === tab.key) out.push(all[i]);
+      }
+      return out;
+    }
+    if (tab.kind === 'religious') {
+      for (i = 0; i < all.length; i++) if (trim(all[i].group) === 'Religioso') out.push(all[i]);
+      return out;
+    }
+    return [];
+  }
+
+  function favList() {
+    var out = [], k;
+    for (k in state.favs) if (state.favs[k] && state.byUrl[k]) out.push(state.byUrl[k]);
+    return out;
+  }
+
+  function merge(base, extra) {
+    var seen = {}, out = [], i, c;
+    for (i = 0; i < base.length; i++) { c = base[i]; if (!seen[c.url]) { seen[c.url] = 1; out.push(c); } }
+    for (i = 0; i < extra.length; i++) { c = extra[i]; if (c.url && !seen[c.url]) { seen[c.url] = 1; out.push(c); } }
+    return out;
+  }
+
+  /* ---------------- render ---------------- */
+  function renderTabs() {
+    var html = '', i, t, lastSect = null, n;
+    for (i = 0; i < state.tabs.length; i++) {
+      t = state.tabs[i];
+      if (t.sect !== lastSect) { html += '<div class="sect">' + esc(t.sect) + '</div>'; lastSect = t.sect; }
+      n = state.counts[t.id];
+      html += '<div class="tab' + (i === state.tab ? ' on' : '') +
+              (state.zone === 'side' && i === state.tab ? ' focus' : '') + '">' +
+              esc(t.label) + (n ? '<span class="n">' + n + '</span>' : '') + '</div>';
+    }
+    tabsEl.innerHTML = html;
+  }
+
+  function layout() {
+    var w = grid.clientWidth - 68;
+    var cols = Math.floor(w / 296);
+    if (cols < 1) cols = 1;
+    if (cols > 6) cols = 6;
+    state.cols = cols;
+    state.cardW = Math.floor(w / cols) - 12;
+  }
+
+  function setHeader(t) {
+    titleEl.textContent = t.label;
+    countEl.textContent = '';
+  }
+
+  function renderGrid() {
+    var html = '', i, c, cls, txt, n = state.view.length, limit = Math.min(n, MAX_RENDER);
+    if (!n) {
+      grid.innerHTML = '<div class="empty">' + (state.tabs[state.tab].kind === 'fav'
+        ? 'Todavía no marcaste favoritos.<br>Pulsa VERDE sobre un canal.'
+        : 'Sin canales acá.') + '</div>';
+      setHeader(state.tabs[state.tab]);
+      return;
+    }
+    for (i = 0; i < limit; i++) {
+      c = state.view[i];
+      cls = 'card' + (state.zone === 'grid' && i === state.index ? ' focus' : '') + (state.favs[c.url] ? ' is-fav' : '');
+      txt = '<span class="txt"><span class="nm">' + esc(c.name) + '</span>' +
+            '<span class="gr">' + esc(c.group || '') + '</span></span>';
+      if (c.logo && !c.remote) {
+        html += '<div class="' + cls + '" style="width:' + state.cardW + 'px">' +
+          '<img class="logo" src="' + esc(c.logo) + '" onerror="this.style.visibility=\'hidden\'">' +
+          txt + '<span class="fav">★</span></div>';
+      } else {
+        html += '<div class="' + cls + '" style="width:' + state.cardW + 'px">' +
+          '<span class="ph">' + esc(initial(c.name)) + '</span>' + txt + '<span class="fav">★</span></div>';
+      }
+    }
+    grid.innerHTML = html;
+    grid.scrollTop = 0;
+    paintFocus();
+    setHeader(state.tabs[state.tab]);
+    countEl.textContent = (n > limit ? n + ' canales · ' + limit + ' visibles' : n + ' canales');
+  }
+
+  function paintFocus() {
+    var kids = grid.children, i, el;
+    for (i = 0; i < kids.length; i++) {
+      el = kids[i];
+      if (!el.className || el.className.indexOf('card') !== 0) continue;
+      el.className = el.className.replace(/\s*focus/g, '') + (state.zone === 'grid' && i === state.index ? ' focus' : '');
+    }
+    if (state.zone === 'grid') revealCard(); else revealTab();
+  }
+
+  function revealCard() {
+    var el = grid.children[state.index];
+    if (!el) return;
+    var et = el.offsetTop, eb = et + el.offsetHeight;
+    var st = grid.scrollTop, vh = grid.clientHeight;
+    if (et < st + 4) grid.scrollTop = et - 8;
+    else if (eb > st + vh - 4) grid.scrollTop = eb - vh + 14;
+  }
+
+  function revealTab() {
+    var i, idx = 0, found = null;
+    for (i = 0; i < tabsEl.children.length; i++) {
+      if (tabsEl.children[i].className.indexOf('tab') === 0) {
+        if (idx === state.tab) { found = tabsEl.children[i]; break; }
+        idx++;
+      }
+    }
+    if (!found) return;
+    var top = found.offsetTop, bot = top + found.offsetHeight;
+    var st = tabsEl.scrollTop, vh = tabsEl.clientHeight;
+    if (top < st + 4) tabsEl.scrollTop = top - 12;
+    else if (bot > st + vh - 4) tabsEl.scrollTop = bot - vh + 12;
+  }
+
+  /* ---------------- seleccion ---------------- */
+  function selectTab(i) {
+    if (i < 0 || i >= state.tabs.length) return;
+    state.tab = i;
+    state.index = 0;
+    state.view = [];
+    renderTabs();
+    var tab = state.tabs[i];
+    setStatus('');
+
+    if (tab.kind === 'fav') {
+      state.view = favList();
+      renderGrid();
+      revealTab();
+      return;
+    }
+
+    var base = curatedFor(tab);
+    var url = remoteUrl(tab);
+
+    if (!url) {
+      state.view = base;
+      state.counts[tab.id] = base.length;
+      renderGrid();
+      renderTabs();
+      revealTab();
+      return;
+    }
+
+    if (base.length) {
+      state.view = base;
+      state.counts[tab.id] = base.length;
+      renderGrid();
+    } else {
+      grid.innerHTML = '<div class="empty"><span class="spinner"></span>Cargando ' + esc(tab.label) + '…</div>';
+      setHeader(tab);
+    }
+    setStatus('actualizando…');
+    revealTab();
+
+    var mine = state.tab;
+    loadRemote(tab, false, function (remote) {
+      if (state.tab !== mine) return;
+      var k;
+      for (k = 0; k < remote.length; k++) state.byUrl[remote[k].url] = remote[k];
+      state.view = merge(base, remote);
+      state.counts[tab.id] = state.view.length;
+      setStatus('');
+      renderGrid();
+      renderTabs();
+      revealTab();
+    });
+  }
+
+  function refreshCurrent() {
+    var tab = state.tabs[state.tab];
+    if (!remoteUrl(tab)) { setStatus('lista local'); return; }
+    setStatus('actualizando…');
+    grid.innerHTML = '<div class="empty"><span class="spinner"></span>Actualizando ' + esc(tab.label) + '…</div>';
+    loadRemote(tab, true, function (remote) {
+      var k;
+      for (k = 0; k < remote.length; k++) state.byUrl[remote[k].url] = remote[k];
+      state.view = merge(curatedFor(tab), remote);
+      state.counts[tab.id] = state.view.length;
+      setStatus('');
+      renderGrid();
+      renderTabs();
+    });
+  }
+
+  /* ---------------- navegacion ---------------- */
+  function move(d) {
+    var n = state.view.length;
+    if (!n) return;
+    var i = state.index, c = state.cols;
+    if (d === 'left' && i % c !== 0) i = i - 1;
+    else if (d === 'right' && i % c !== c - 1 && i !== n - 1) i = i + 1;
+    else if (d === 'up' && i - c >= 0) i = i - c;
+    else if (d === 'down') {
+      var nxt = i + c;
+      if (nxt < n) i = nxt;
+      else {
+        var rows = Math.floor((n - 1) / c);
+        if (Math.floor(i / c) < rows) i = Math.min(rows * c + (i % c), n - 1);
+      }
+    }
+    if (i !== state.index) { state.index = i; paintFocus(); }
+  }
+
+  function toggleFav() {
+    var c = state.view[state.index];
+    if (!c) return;
+    if (state.favs[c.url]) delete state.favs[c.url]; else state.favs[c.url] = 1;
+    saveFavs();
+    state.counts['fav'] = favList().length;
+    renderGrid();
+    renderTabs();
+  }
+
+  /* ---------------- player ---------------- */
+  var variantCache = {};
+
+  /* elige la mejor variante <=720p; la TV es 720p y tiene 1 GB de RAM */
+  function pickVariants(text) {
+    var lines = String(text).split(/\r?\n/), i, j, l, t2, bw, h, uri, cands = [], pool = [], best, count;
+    for (i = 0; i < lines.length; i++) {
+      l = trim(lines[i]);
+      if (l.indexOf('#EXT-X-STREAM-INF') !== 0) continue;
+      bw = parseInt((l.match(/BANDWIDTH=(\d+)/) || [])[1] || '0', 10);
+      h = parseInt((l.match(/RESOLUTION=\d+x(\d+)/) || [])[1] || '0', 10);
+      uri = null;
+      for (j = i + 1; j < lines.length; j++) {
+        t2 = trim(lines[j]);
+        if (t2 && t2.charAt(0) !== '#') { uri = t2; break; }
+      }
+      if (uri) cands.push({ bw: bw, h: h, uri: uri });
+    }
+    if (!cands.length) return null;
+    count = cands.length;
+    for (i = 0; i < cands.length; i++) if (!cands[i].h || cands[i].h <= 720) pool.push(cands[i]);
+    if (!pool.length) pool = cands.slice();
+    best = pool[0];
+    for (i = 1; i < pool.length; i++) if (pool[i].bw > best.bw) best = pool[i];
+    return { best: best.uri, count: count };
+  }
+
+  function absolutize(rel, base) {
+    if (/^https?:/i.test(rel)) return rel;
+    try { return new URL(rel, base).href; } catch (e) {}
+    var cut = base.lastIndexOf('/');
+    return cut > 8 ? base.substring(0, cut + 1) + rel : rel;
+  }
+
+  function attach(ch, url) {
+    video.pause();
+    try { video.removeAttribute('src'); video.load(); } catch (e) {}
+    video.src = url;
+    var pr = video.play();
+    if (pr && pr['catch']) pr['catch'](function () {});
+
+    if (state.guardTimer) clearTimeout(state.guardTimer);
+    state.guardTimer = setTimeout(function () {
+      if (state.playing && video.readyState < 2) retryNext('El canal no responde.');
+    }, 9000);
+
+    video.onplaying = function () {
+      if (state.guardTimer) clearTimeout(state.guardTimer);
+      if (!state.playing) return;
+      var q = video.videoWidth ? '  ·  ' + video.videoWidth + 'x' + video.videoHeight : '';
+      showOsd(state.playing.name, (state.playing.group || '') + q);
+    };
+    video.onwaiting = function () {
+      if (state.playing) showOsd(state.playing.name, 'buffering…');
+    };
+    video.onerror = function () { retryNext('El canal no está disponible.'); };
+  }
+
+  function beginStream(ch) {
+    var url = ch.url, cached = variantCache[url];
+    /* intento 0: variante <=720p · intento 1: master original (la TV decide) */
+    if (state.attempt > 0 || !/\.m3u8(\?|$)/i.test(url)) { attach(ch, url); return; }
+    if (cached) { attach(ch, cached.best); return; }
+    xhrGet(url, 5000, function (txt) {
+      if (state.playing !== ch) return;
+      var v = txt ? pickVariants(txt) : null;
+      if (v && v.count > 1) {
+        variantCache[url] = { best: absolutize(v.best, url) };
+        attach(ch, variantCache[url].best);
+      } else {
+        attach(ch, url);
+      }
+    });
+  }
+
+  function retryNext(msg) {
+    if (state.playing && state.attempt === 0) {
+      state.attempt = 1;
+      showOsd(state.playing.name, 'reintentando con el stream original');
+      beginStream(state.playing);
+      return;
+    }
+    fail(msg || 'El canal no está disponible.');
+  }
+
+  function showOsd(text, sub) {
+    osdName.textContent = text;
+    osdState.textContent = sub || '';
+    osd.className = '';
+    if (state.osdTimer) clearTimeout(state.osdTimer);
+    state.osdTimer = setTimeout(function () { osd.className = 'fade'; }, 4500);
+  }
+
+  function fail(msg) {
+    if (state.guardTimer) clearTimeout(state.guardTimer);
+    perrText.textContent = msg;
+    perr.className = '';
+    showOsd(state.playing ? state.playing.name : '', 'sin señal');
+  }
+
+  function play(ch) {
+    if (!ch) return;
+    state.playing = ch;
+    state.attempt = 0;
+    perr.className = 'hidden';
+    player.className = '';
+    showOsd(ch.name, (ch.group || '') + '  ·  conectando');
+    beginStream(ch);
+  }
+
+  function stopPlayer() {
+    state.playing = null;
+    if (state.guardTimer) clearTimeout(state.guardTimer);
+    try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) {}
+    player.className = 'hidden';
+  }
+
+  function zap(dir) {
+    var n = state.view.length;
+    if (!n) return;
+    state.index = (state.index + dir + n) % n;
+    paintFocus();
+    play(state.view[state.index]);
+  }
+
+  /* ---------------- teclado ---------------- */
+  function onGridClick(e) {
+    var el = e.target, kids = grid.children, i;
+    while (el && el !== grid) {
+      if (el.className && String(el.className).indexOf('card') === 0) break;
+      el = el.parentNode;
+    }
+    if (!el || el === grid) return;
+    for (i = 0; i < kids.length; i++) {
+      if (kids[i] === el) { state.index = i; play(state.view[i]); return; }
+    }
+  }
+
+  function onKey(e) {
+    var k = e.keyCode || e.which;
+    window.__lastKey = k;
+    var inPlayer = player.className.indexOf('hidden') === -1;
+
+    if (k === 461 || k === 8 || k === 27 || k === 4) {
+      e.preventDefault();
+      if (inPlayer) { stopPlayer(); return; }
+      if (state.zone === 'side') { state.zone = 'grid'; renderTabs(); paintFocus(); return; }
+      return;
+    }
+
+    if (inPlayer) {
+      if (k === 13) {
+        e.preventDefault();
+        if (perr.className.indexOf('hidden') === -1) play(state.playing);
+        else osd.className = osd.className === 'fade' ? '' : 'fade';
+        return;
+      }
+      if (k === 33) { zap(-1); return; }
+      if (k === 34) { zap(1); return; }
+      if (k === 19 || k === 415) {
+        if (video.paused) video.play(); else video.pause();
+        showOsd(state.playing ? state.playing.name : '', video.paused ? 'pausa' : '');
+        return;
+      }
+      if (k === 40 || k === 38) {
+        showOsd(state.playing ? state.playing.name : '', (state.playing && state.playing.group) || '');
+        return;
+      }
+      return;
+    }
+
+    /* en modo navegador dejamos que las flechas scrolleen la pagina */
+    if (state.web) return;
+
+    if (state.zone === 'side') {
+      if (k === 38) { e.preventDefault(); selectTab(state.tab - 1); return; }
+      if (k === 40) { e.preventDefault(); selectTab(state.tab + 1); return; }
+      if (k === 39 || k === 13) { e.preventDefault(); state.zone = 'grid'; renderTabs(); paintFocus(); return; }
+      if (k === 406) { refreshCurrent(); return; }
+      return;
+    }
+
+    if (k === 37) {
+      e.preventDefault();
+      if (state.index % state.cols === 0) { state.zone = 'side'; renderTabs(); paintFocus(); }
+      else move('left');
+      return;
+    }
+    if (k === 39) { e.preventDefault(); move('right'); return; }
+    if (k === 38) { e.preventDefault(); move('up'); return; }
+    if (k === 40) { e.preventDefault(); move('down'); return; }
+    if (k === 13) { e.preventDefault(); if (state.view.length) play(state.view[state.index]); return; }
+    if (k === 33) { selectTab(state.tab - 1); return; }
+    if (k === 34) { selectTab(state.tab + 1); return; }
+    if (k === 404) { toggleFav(); return; }
+    if (k === 406) { refreshCurrent(); return; }
+    if (k === 405) { state.index = 0; paintFocus(); return; }
+    if (k >= 48 && k <= 57) {
+      var d = k - 48, i = d === 0 ? 9 : d - 1;
+      if (i < state.view.length) { state.index = i; paintFocus(); }
+      return;
+    }
+  }
+
+  /* ---------------- arranque ---------------- */
+  function clock() {
+    var d = new Date(), h = d.getHours(), m = d.getMinutes();
+    $('clock').textContent = (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+
+  function seedFavs() {
+    if (localStorage.getItem('iptv.seeded') === '1') return;
+    var all = window.CHANNELS || [], keys = ['caracol', 'rcn hd2', 'canal 1', 'senal colombia', 'citytv', 'teleantioquia', 'ntn24', 'win sports'], i, j, n, hit;
+    for (i = 0; i < keys.length; i++) {
+      hit = null;
+      for (j = 0; j < all.length; j++) {
+        n = (all[j].name || '').toLowerCase();
+        if (n.indexOf(keys[i]) !== -1) { hit = all[j]; break; }
+      }
+      if (hit) state.favs[hit.url] = 1;
+    }
+    saveFavs();
+    try { localStorage.setItem('iptv.seeded', '1'); } catch (e) {}
+  }
+
+  function boot() {
+    loadFavs();
+    seedFavs();
+    clock();
+    setInterval(clock, 20000);
+    document.addEventListener('keydown', onKey);
+
+    if (state.web) {
+        document.body.className = 'web';
+        grid.addEventListener('click', onGridClick);
+    }
+
+    buildTabs();
+    layout();
+    state.counts['fav'] = favList().length;
+    renderTabs();
+
+    var start = 0, i;
+    for (i = 0; i < state.tabs.length; i++) if (state.tabs[i].id === 'c_co') start = i;
+    selectTab(start);
+  }
+
+  window.__dbg = { play: play, pick: pickVariants, begin: beginStream, src: function () { return video.src; } };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+
+</script>
+</body>
+</html>
