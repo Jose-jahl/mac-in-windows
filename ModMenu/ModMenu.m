@@ -411,7 +411,7 @@ static BOOL g_aim_silent    = NO;   /* 0.24.0: escribir solo en el frame del dis
    hace que la mira salte entre dos enemigos cercanos), se mantiene el objetivo
    elegido con una ventaja de puntaje. Pura logica: no usa ningun offset nuevo. */
 static BOOL   g_aim_track   = YES;
-static void  *g_track_pawn  = NULL;
+static uint64_t g_track_pawn = 0;
 static float mm_def_float(NSString *k, float d);   /* forward (0.9.4) */
 static float g_aim_height = 0.0f;   /* 0.9.9: offset vertical DESDE LA CABEZA (0 = cabeza) */
 static BOOL  g_aim_on = NO;   /* 0.10.2: default OFF (el relay necesita re-aplicarse) */
@@ -4877,11 +4877,11 @@ static void mm_aim_lock(void)
                solo lo desplaza otro que este claramente mas centrado (35% mejor).
                Si el fijado sale del FOV o desaparece, se elige el mejor como antes. */
             float score = ang;
-            if (g_aim_track && g_track_pawn != NULL && g_boxes[i].pawn == g_track_pawn)
+            if (g_aim_track && g_track_pawn != 0 && g_boxes[i].pawn == g_track_pawn)
                 score = ang * 0.65f;
             if (score < bestAng) { bestAng = score; best = i; bpx = px; bpy = py; bpz = pz; }
         }
-        if (best < 0) { g_track_pawn = NULL; g_lock_active = 0; return; }
+        if (best < 0) { g_track_pawn = 0; g_lock_active = 0; return; }
         /* 0.25.0: recordar a quien estamos siguiendo. Se limpia solo cuando el
            objetivo deja de existir en las cajas (muerto, fuera de rango, invisible). */
         if (best >= 0) g_track_pawn = g_boxes[best].pawn;
