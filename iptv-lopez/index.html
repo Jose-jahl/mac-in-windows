@@ -262,6 +262,15 @@ body.web #grid { overflow: visible; height: auto; padding: 10px 24px 60px 24px; 
 body.web .card { cursor: pointer; }
 body.web #hints, body.web #sidenote { display: none; }
 
+/* modo control remoto sobre web */
+body.tv #hints {
+  display: block;
+  position: fixed; left: 0; right: 0; bottom: 0;
+  background: #0a0d12; border-top: 1px solid #1a222c;
+  padding: 6px 16px; font-size: 10px; color: #7c8a9c; z-index: 5;
+}
+body.tv .card.focus { outline: 3px solid #22d3ee; outline-offset: -3px; }
+
 
 </style>
 </head>
@@ -1009,7 +1018,7 @@ window.__FORCE_TV = 1;
     document.addEventListener('keydown', onKey);
 
     if (state.web) {
-        document.body.className = 'web';
+        document.body.className = state.tv ? 'web tv' : 'web';
         grid.addEventListener('click', onGridClick);
     }
 
