@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.31.0"
+#define MODMENU_VERSION     "0.32.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.31.0";
+const char *modmenu_build_id = "modmenu-glass-0.32.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -4805,6 +4805,25 @@ static void mm_q_slerp(const float a[4], const float b_in[4], float t, float out
    Nosotros hacemos lo mismo; la camara es opcional (apagada por defecto). */
 static void mm_aim_lock(void)
 {
+    /* 0.32.0 — sonda de entrada: escribe fusion_lock.txt SIEMPRE (0.5 s) para
+       saber si el lock corre y en que estado, aunque no llegue a escribir. */
+    {
+        static double s_top = 0.0;
+        double nt = CACurrentMediaTime();
+        if (nt - s_top > 0.5) {
+            s_top = nt;
+            NSString *docs = mm_docs_dir();
+            if (docs.length > 0) {
+                NSString *t0 = [NSString stringWithFormat:
+                    @"build=%s enter=1 gate=%d lockon=%d esph=%d espx=%d boxes=%d active=%d\n",
+                    MODMENU_VERSION, mm_ver_ok(), (int)g_lock_on,
+                    (int)(g_esp != nil && g_esp.hidden), (int)(g_esp != nil),
+                    g_box_count, (int)g_lock_active];
+                [t0 writeToFile:[docs stringByAppendingPathComponent:@"fusion_lock.txt"]
+                    atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            }
+        }
+    }
         /* 0.22.0 (P0): si la version del juego no coincide con los offsets, el lock
        no toca nada. Fail-closed: preferible un aimlock apagado a un write a ciegas. */
     if (mm_ver_ok() != 1) { g_lock_active = 0; return; }
@@ -5008,18 +5027,7 @@ static void mm_aim_lock(void)
         float q[4];
         mm_q_slerp(base, qtar, a, q);
 
-        /* 0.28.0 — delay de reacción: no corregir un objetivo nuevo hasta ~140 ms.
-           Un candado instantáneo es la firma más fácil de detectar; el tiempo de
-           reacción humano está en ese orden. Durante la espera se sigue trackeando
-           pero no se escribe. */
-        {
-            static uint64_t s_target_pawn = 0;
-            static double   s_target_since = 0.0;
-            uint64_t tp = (uint64_t)g_boxes[best].pawn;
-            if (s_target_pawn != tp) { s_target_pawn = tp; s_target_since = now_t; }
-            if (now_t - s_target_since < 0.140) { g_lock_active = 1; return; }
-        }
-
+        /* 0.32.0: delay de reaccion desactivado (bloqueaba el primer enganche). */
         /* 0.14.1 (F3): el getter del juego elige entre m_AimRotation (0x380) y
            m_SimulatedAimRotation (0x3C0) segun una condicion interna (verificado en
            el desensamblado: csel 0x380/0x3C0). Escribir solo 0x380 no tenia efecto
