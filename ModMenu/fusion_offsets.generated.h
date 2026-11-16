@@ -74,6 +74,15 @@
 #define OFF_PAWN_AIMROT     0x380  /* pawn -> Quaternion m_AimRotation */
 #define OFF_PAWN_SIMAIMROT  0x3C0  /* pawn -> Quaternion m_SimulatedAimRotation */
 
+/* --- hueso de la cabeza (0.28.0): get_HeadBone ---------------------------
+   evidencia en docs/HUESO_ENCONTRADO.md: get_HeadBone @ VA 0x1063EB9DC hace
+   x20 = *(pawn + 0x90)  ->  componente de huesos
+   x20 = *(x20 + 0x150)  ->  Transform de la cabeza
+   Se consume con fallback a wy: si el puntero no es plausible o la posicion no
+   cae arriba del ancla, se descarta. */
+#define OFF_PAWN_BONECOMP    0x90  /* pawn -> puntero al componente de huesos */
+#define OFF_BONE_HEAD        0x150 /* componente de huesos -> Transform cabeza */
+
 /* --- BR / zona de radiacion (CANDIDATOS; requiere confirmar en device) --- */
 /* ver corpus/1.0.57/br_dump.md para contexto. Gated: #ifdef FUSION_BR_ENABLED */
 #ifdef FUSION_BR_ENABLED

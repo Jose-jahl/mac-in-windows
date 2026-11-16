@@ -1,4 +1,4 @@
-﻿/*=============================================================================
+/*=============================================================================
  *  ModMenu.m  -  menu runtime del proyecto fusion
  *  ---------------------------------------------------------------------------
  *  Este archivo se compila como ModMenu.dylib y la herramienta lo mete en el
@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.26.0"
+#define MODMENU_VERSION     "0.28.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.26.0";
+const char *modmenu_build_id = "modmenu-glass-0.28.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -4877,7 +4877,13 @@ static void mm_aim_lock(void)
             float dot = fwd[0]*vx + fwd[1]*vy + fwd[2]*vz;
             if (dot < 0.15f) continue;
             float ang = acosf(fminf(1.0f, dot)) * 180.0f / (float)M_PI;
-            if (ang > halfFov) continue;
+            /* 0.28.0 histéresis: soltar cuesta más que adquirir. El objetivo ya
+               fijado se conserva hasta 1.6x del FOV; el resto entra solo dentro
+               de halfFov. Evita el parpadeo entre dos targets. */
+            float limit = halfFov;
+            if (g_aim_track && g_track_pawn != 0 && g_boxes[i].pawn == g_track_pawn)
+                limit = halfFov * 1.6f;
+            if (ang > limit) continue;
             /* 0.25.0 auto-track: el objetivo ya fijado corre con ventaja, asi que
                solo lo desplaza otro que este claramente mas centrado (35% mejor).
                Si el fijado sale del FOV o desaparece, se elige el mejor como antes. */
@@ -4891,6 +4897,33 @@ static void mm_aim_lock(void)
            objetivo deja de existir en las cajas (muerto, fuera de rango, invisible). */
         if (best >= 0) g_track_pawn = g_boxes[best].pawn;
 
+        /* 0.28.0 — AIM A LA CABEZA CON HUESO REAL.
+           Evidencia: get_HeadBone lee *(*(pawn+0x90)+0x150) como Transform de la
+           cabeza (docs/HUESO_ENCONTRADO.md). Si el puntero es plausible y la
+           posicion cae arriba del ancla de la caja, usamos esa posicion como
+           punto de mira; si no, fallback a wy. Nunca empeora el aim. */
+        float aim_wy = bpy;   /* ancla original, para el diag */
+        int   head_src = 0;
+        {
+            uint64_t hpa = (uint64_t)g_boxes[best].pawn;
+            uint64_t bc = 0, hb = 0;
+            if (hpa != 0 && mm_r64((uintptr_t)hpa + OFF_PAWN_BONECOMP, &bc) && bc != 0 &&
+                mm_r64((uintptr_t)bc + OFF_BONE_HEAD, &hb) && hb != 0 &&
+                (hb & 0x7ULL) == 0 && hb > 0x100000000ULL && hb < 0x800000000ULL) {
+                float hp[3] = { 0.0f, 0.0f, 0.0f };
+                g_fp_trpos((void *)(uintptr_t)hb, hp);
+                if (isfinite(hp[0]) && isfinite(hp[1]) && isfinite(hp[2])) {
+                    float dx = hp[0] - bpx, dy = hp[1] - bpy, dz = hp[2] - bpz;
+                    float d2h = dx*dx + dy*dy + dz*dz;
+                    /* cabeza = arriba del ancla y a menos de ~1.2 m */
+                    if (d2h < 1.5f && dy > -0.4f && dy < 1.0f) {
+                        bpx = hp[0]; bpy = hp[1]; bpz = hp[2];
+                        head_src = 1;
+                    }
+                }
+            }
+        }
+
         float dv[3] = { bpx - o[0], bpy - o[1], bpz - o[2] };
         float dl = sqrtf(dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2]);
         if (dl < 0.5f) { g_lock_active = 0; return; }
@@ -4900,7 +4933,7 @@ static void mm_aim_lock(void)
         dot = fmaxf(-1.0f, fminf(1.0f, dot));
         float ang = acosf(dot);
         float angDeg = ang * 180.0f / (float)M_PI;
-        if (angDeg < 0.10f) { g_lock_active = 0; return; }
+        if (angDeg < 0.25f) { g_lock_active = 0; return; }  /* 0.28.0: deadzone 0.25° */
 
         float ax[3] = {
             fwd[1]*dv[2] - fwd[2]*dv[1],
@@ -4934,13 +4967,34 @@ static void mm_aim_lock(void)
         if (degPerSec < 30.0f) degPerSec = 30.0f;
         float maxDeg = degPerSec * dt;
 
-        float a = 1.0f - g_aim_smooth * 0.90f;
-        if (a * angDeg > maxDeg) a = maxDeg / angDeg;
+        /* 0.28.0: suavizado POR TIEMPO (1 - exp(-lambda*dt)). El alpha por frame
+           dependia de los FPS; con dt el tiempo caracteristico es el mismo a
+           30/60/120 Hz. smooth 0 = snap, smooth 1 = suave (lambda 4 s^-1). */
+        float a;
+        if (g_aim_smooth < 0.02f) {
+            a = 1.0f;
+        } else {
+            float lambda = 4.0f + (1.0f - g_aim_smooth) * 56.0f;   /* 4 .. 60 s^-1 */
+            a = 1.0f - expf(-lambda * dt);
+        }
+        if (a * angDeg > maxDeg) a = maxDeg / angDeg;   /* tope de grados/segundo */
         if (a < 0.02f) a = 0.02f;
         if (a > 1.0f) a = 1.0f;
 
         float q[4];
         mm_q_slerp(base, qtar, a, q);
+
+        /* 0.28.0 — delay de reacción: no corregir un objetivo nuevo hasta ~140 ms.
+           Un candado instantáneo es la firma más fácil de detectar; el tiempo de
+           reacción humano está en ese orden. Durante la espera se sigue trackeando
+           pero no se escribe. */
+        {
+            static uint64_t s_target_pawn = 0;
+            static double   s_target_since = 0.0;
+            uint64_t tp = (uint64_t)g_boxes[best].pawn;
+            if (s_target_pawn != tp) { s_target_pawn = tp; s_target_since = now_t; }
+            if (now_t - s_target_since < 0.140) { g_lock_active = 1; return; }
+        }
 
         /* 0.14.1 (F3): el getter del juego elige entre m_AimRotation (0x380) y
            m_SimulatedAimRotation (0x3C0) segun una condicion interna (verificado en
@@ -4994,12 +5048,13 @@ static void mm_aim_lock(void)
                 if (docs.length > 0) {
                     NSString *t = [NSString stringWithFormat:
                         @"build=%s\nmodo=write-struct\n"
-                        @"origen=%.2f,%.2f,%.2f src=%d\ntarget=%.2f,%.2f,%.2f\n"
+                        @"origen=%.2f,%.2f,%.2f src=%d cabeza=%d dy=%.2f\ntarget=%.2f,%.2f,%.2f\n"
                         @"fwd=%.3f,%.3f,%.3f des=%.3f,%.3f,%.3f\n"
                         @"dot=%.4f angDeg=%.2f alpha=%.3f tipo=%d frames=%ld dt=%.4f "
                         @"stuck=%ld pisan=%ld\n"
                         @"q_base=%.4f,%.4f,%.4f,%.4f\nq_lock=%.4f,%.4f,%.4f,%.4f\n",
                         MODMENU_VERSION, (double)o[0], (double)o[1], (double)o[2], o_src,
+                        head_src, (double)(bpy - aim_wy),
                         (double)bpx, (double)bpy, (double)bpz,
                         (double)fwd[0], (double)fwd[1], (double)fwd[2],
                         (double)dv[0], (double)dv[1], (double)dv[2],
