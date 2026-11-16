@@ -319,8 +319,11 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <mach/vm_region.h>
 
-#define MODMENU_VERSION     "0.34.0"
+#define MODMENU_VERSION     "0.35.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +387,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.34.0";
+const char *modmenu_build_id = "modmenu-glass-0.35.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -7863,6 +7866,82 @@ static void mm_write_usage(void)
     } @catch (NSException *e) {}
 }
 
+/* 0.35.0 — DUMPER de la metadata IL2CPP descifrada en memoria.
+   El juego deja global-metadata.dat PLANO en RAM (magic 0xFAB11BAF). Escaneamos
+   las regiones legibles, lo encontramos y lo escribimos a Documents/meta_dump.dat.
+   Corre UNA vez, en background. Sirve para reconstruir el corpus tras un update
+   que cifra la metadata en disco. */
+static void mm_meta_dump(void)
+{
+    @try {
+        NSString *docs = mm_docs_dir();
+        if (docs.length == 0) return;
+        NSString *out = [docs stringByAppendingPathComponent:@"meta_dump.dat"];
+        FILE *fp = fopen([out UTF8String], "wb");
+        if (fp == NULL) return;
+        unsigned long long total = 0;
+        int hit = 0;
+        vm_address_t a = 0;
+        while (!hit) {
+            vm_size_t sz = 0;
+            vm_region_basic_info_data_64_t info;
+            mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t obj = MACH_PORT_NULL;
+            kern_return_t kr = vm_region_64(mach_task_self(), &a, &sz,
+                VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj);
+            if (kr != KERN_SUCCESS || sz == 0) break;
+            if ((info.protection & VM_PROT_READ) && sz >= (1u << 20) && sz <= (vm_size_t)(384ull << 20)) {
+                uint8_t *tmp = (uint8_t *)malloc(1u << 20);
+                if (tmp != NULL) {
+                    vm_address_t p = a, end = a + sz;
+                    while (p < end && !hit) {
+                        vm_size_t want = (vm_size_t)MIN((vm_address_t)(1u << 20), end - p);
+                        vm_size_t got = 0;
+                        if (vm_read_overwrite(mach_task_self(), p, want, (vm_address_t)tmp, &got) == KERN_SUCCESS && got >= 16) {
+                            for (size_t i = 0; i + 16 <= got; i++) {
+                                uint32_t m; memcpy(&m, tmp + i, 4);
+                                if (m != 0xFAB11BAFu) continue;
+                                uint32_t v; memcpy(&v, tmp + i + 4, 4);
+                                uint32_t o1; memcpy(&o1, tmp + i + 8, 4);
+                                if (v >= 16 && v <= 64 && o1 > 0x20 && o1 < 0x400) {
+                                    unsigned long long cap = 96ull << 20;
+                                    vm_address_t q = p + i;
+                                    while (total < cap && q < end) {
+                                        vm_size_t w = (vm_size_t)MIN((vm_address_t)(1u << 20), end - q);
+                                        vm_size_t g2 = 0;
+                                        if (vm_read_overwrite(mach_task_self(), q, w, (vm_address_t)tmp, &g2) == KERN_SUCCESS && g2 > 0)
+                                            fwrite(tmp, 1, g2, fp);
+                                        q += w; total += g2;
+                                    }
+                                    hit = 1;
+                                    break;
+                                }
+                            }
+                        }
+                        p += want;
+                    }
+                    free(tmp);
+                }
+            }
+            a += sz;
+        }
+        fclose(fp);
+        NSString *r = [NSString stringWithFormat:@"hit=%d bytes=%llu\n", hit, total];
+        [r writeToFile:[docs stringByAppendingPathComponent:@"meta_dump.txt"]
+            atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    } @catch (NSException *e) {}
+}
+
+static void mm_meta_dump_async(void)
+{
+    static int s_done = 0;
+    if (s_done || mm_uptime() < 10.0) return;
+    s_done = 1;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        mm_meta_dump();
+    });
+}
+
 static void mm_health_update(void)
 {
     @try {
@@ -7876,6 +7955,8 @@ static void mm_health_update(void)
         }
         if (@available(iOS 11.0, *))
             g_captured = UIScreen.mainScreen.isCaptured ? 1 : 0;
+
+        mm_meta_dump_async();   /* 0.35.0: dump de metadata una vez */
 
         int st = mm_stream_effective() ? 1 : 0;
         if (st != s_last_stream) {
