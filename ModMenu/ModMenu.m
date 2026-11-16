@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.30.0"
+#define MODMENU_VERSION     "0.31.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.30.0";
+const char *modmenu_build_id = "modmenu-glass-0.31.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -585,6 +585,10 @@ static BOOL g_hardening_hid_panel = NO;
 
 static void mm_apply_capture_hide(void)
 {
+    /* 0.31.0: si el guard de captura esta OFF (default), no ocultamos nada.
+       Para transmitir/promocionar en vivo (TikTok) el panel y el boton quedan
+       visibles; el usuario lo prende si quiere el anti-captura. */
+    if (!mm_def_bool(@"mm_guard_capture", NO)) return;
     BOOL captured = NO;
     if (@available(iOS 11.0, *)) {
         captured = UIScreen.mainScreen.isCaptured;
@@ -6781,7 +6785,7 @@ static void mm_cloud_build_radar(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(b, @"Contador JUG / BOT", @"mm_esp_count", NO, 38.0, NO);
     mm_cloud_row(b, @"Vibracion al tocar", @"mm_haptics", YES, 66.0, NO);
-    mm_cloud_row(b, @"Guard de captura", @"mm_guard_capture", NO, 94.0, NO);
+    mm_cloud_row(b, @"Ocultar si me graban", @"mm_guard_capture", NO, 94.0, NO);
     mm_cloud_row(b, @"Stream Mode", @"mm_stream", NO, 122.0, NO);
     mm_cloud_row(b, @"FPS en pantalla", @"mm_x_fps", NO, 150.0, NO);
     /* 0.27.0: la recarga rapida existia desde C-18 pero NO tenia control: el
@@ -7835,6 +7839,9 @@ static void mm_mark_action(const char *a)
 static BOOL mm_stream_effective(void)
 {
     if (mm_def_bool(@"mm_stream", NO)) return YES;
+    /* 0.31.0: el auto-stream solo oculta si el guard de captura esta ON.
+       Default OFF = el ESP se ve en vivo (promocion). */
+    if (!mm_def_bool(@"mm_guard_capture", NO)) return NO;
     return (mm_def_bool(@"mm_auto_stream", YES) && g_captured) ? YES : NO;
 }
 
