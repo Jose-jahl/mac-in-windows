@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.32.0"
+#define MODMENU_VERSION     "0.33.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.32.0";
+const char *modmenu_build_id = "modmenu-glass-0.33.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -462,7 +462,7 @@ static void mm_lock_opts_sync(void)
        franco y escopeta, con el punto de mira fijo (altura 0 = cuello/pecho).
        No se lee de preferencias a proposito: asi ningun switch viejo, ni un
        ajuste guardado de una version anterior, lo puede apagar ni cambiar. */
-    g_lock_on      = YES;
+    g_lock_on      = NO;   /* 0.33.0: lock por rotacion retirado (el juego pisa el angulo) */
     g_lock_rifle   = NO;
     g_lock_smg     = NO;
     g_lock_shotgun = YES;
@@ -6677,12 +6677,9 @@ static void mm_cloud_build_aim(UIView *page)
        que queda es el PUNTO DE MIRA. La altura se mide desde el ancla de la caja,
        que es el cuello: +0.10 m queda en la cabeza, -0.30 m en el pecho. No es un
        offset de memoria, es una altura en metros, asi que no puede romper nada. */
-    UIView *a = mm_cloud_card(@"AIM LOCK", 0.0, MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-                mm_cloud_static_row(a, @"Armas", @"Franco + Escopeta", 30.0);
-    mm_cloud_static_row(a, @"Estado", @"Siempre activo", 58.0);
-    [page addSubview:a];
+    /* 0.33.0: tarjeta AIM LOCK retirada (el lock ya no se usa). */
 
-    UIView *c = mm_cloud_card(@"ASISTENCIA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP),
+    UIView *c = mm_cloud_card(@"ASISTENCIA", 0.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Aimbot (asist)", @"mm_x_aim_on", g_aim_on, 30.0, NO);
     mm_cloud_card_caption(c, @"Fuerza de aim", 58.0);
@@ -6690,18 +6687,8 @@ static void mm_cloud_build_aim(UIView *page)
                                    @selector(onAimStrength:), iw);
     as.frame = CGRectMake(MM_CLOUD_CARD_INNER, 68.0, iw, 22.0);
     [c addSubview:as];
-    mm_cloud_card_caption(c, @"FOV de aim", 92.0);
-    UISlider *af = mm_cloud_slider(5.0f, 180.0f, g_aim_fov, @"mm_x_aim_fov",
-                                   @selector(onAimFov:), iw);
-    af.frame = CGRectMake(MM_CLOUD_CARD_INNER, 102.0, iw, 22.0);
-    [c addSubview:af];
-    mm_cloud_card_caption(c, @"Suavizado de aim", 126.0);
-    UISlider *as2 = mm_cloud_slider(0.0f, 1.0f, g_aim_smooth, @"mm_x_aim_smooth",
-                                    @selector(onAimSmooth:), iw);
-    as2.frame = CGRectMake(MM_CLOUD_CARD_INNER, 136.0, iw, 22.0);
-    [c addSubview:as2];
-    UILabel *cn = mm_cloud_caption(@"El lock usa FOV y Suavizado. El asist va siempre.", iw);
-    cn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 166.0, iw, 20.0);
+    UILabel *cn = mm_cloud_caption(@"Subi la fuerza hasta que enganche fuerte.", iw);
+    cn.frame = CGRectMake(MM_CLOUD_CARD_INNER, 100.0, iw, 20.0);
     cn.numberOfLines = 2;
     cn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
     [c addSubview:cn];
@@ -6710,10 +6697,7 @@ static void mm_cloud_build_aim(UIView *page)
     /* 0.27.0 — tercera tarjeta de AIM: control del lock y filtro de objetivo.
        Son dos switches REALES (mm_x_aim_key, mm_x_ignore_down); antes la
        columna quedaba vacia y el panel parecia inacabado. */
-    UIView *d = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
-                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(d, @"Ignorar caidos", @"mm_x_ignore_down", NO, 38.0, NO);
-    [page addSubview:d];
+    /* 0.33.0: tarjeta CONTROL retirada (era filtro del lock). */
 }
 
 static void mm_cloud_build_visual(UIView *page)
