@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.29.0"
+#define MODMENU_VERSION     "0.30.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.29.0";
+const char *modmenu_build_id = "modmenu-glass-0.30.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -6700,8 +6700,7 @@ static void mm_cloud_build_aim(UIView *page)
        columna quedaba vacia y el panel parecia inacabado. */
     UIView *d = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(d, @"Aim Key (mantener)", @"mm_x_aim_key", NO, 38.0, NO);
-    mm_cloud_row(d, @"Ignorar caidos", @"mm_x_ignore_down", NO, 66.0, NO);
+    mm_cloud_row(d, @"Ignorar caidos", @"mm_x_ignore_down", NO, 38.0, NO);
     [page addSubview:d];
 }
 
@@ -6975,8 +6974,7 @@ static void mm_cloud_build_info(UIView *page)
         forControlEvents:UIControlEventValueChanged];
     [b addSubview:lgs];
 
-    /* C-3: Aim Key (mantener el boton AIM flotante para que asista). */
-    mm_cloud_row(b, @"Aim Key (mantener)", @"mm_x_aim_key", NO, 186.0, NO);
+    /* 0.30.0: Aim Key eliminado (boton AIM flotante fuera). */
 
     g_lic_label = [[UILabel alloc] initWithFrame:CGRectMake(14.0, 162.0, 196.0, 22.0)];
     g_lic_label.numberOfLines = 2;
@@ -8669,7 +8667,7 @@ __attribute__((constructor)) static void modmenu_init(void)
     g_aim_on = mm_def_bool(@"mm_x_aim_on", NO);
     mm_reload_apply();   /* C-18 */
     mm_lock_opts_sync(); /* 0.9.1: aim lock */
-    g_aim_key_mode = mm_def_bool(@"mm_x_aim_key", NO);
+    g_aim_key_mode = NO;   /* 0.30.0: Aim Key eliminado */
     {   /* C-4: el relay lleva el estado del suavizado en +0xF8; arranca en 0. */
         const struct mach_header *h0 = _dyld_get_image_header(0);
         if (h0 != NULL) *(float *)((uintptr_t)h0 + (uintptr_t)0x0DC639F8ULL) = 0.0f;
