@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.33.0"
+#define MODMENU_VERSION     "0.34.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.33.0";
+const char *modmenu_build_id = "modmenu-glass-0.34.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -6679,9 +6679,9 @@ static void mm_cloud_build_aim(UIView *page)
        offset de memoria, es una altura en metros, asi que no puede romper nada. */
     /* 0.33.0: tarjeta AIM LOCK retirada (el lock ya no se usa). */
 
-    UIView *c = mm_cloud_card(@"ASISTENCIA", 0.0,
+    UIView *c = mm_cloud_card(@"AIMBOT", 0.0,
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
-    mm_cloud_row(c, @"Aimbot (asist)", @"mm_x_aim_on", g_aim_on, 30.0, NO);
+    mm_cloud_row(c, @"Aimbot", @"mm_x_aim_on", g_aim_on, 30.0, NO);
     mm_cloud_card_caption(c, @"Fuerza de aim", 58.0);
     UISlider *as = mm_cloud_slider(0.0f, 28.0f, g_aim_strength, @"mm_x_aim_strength",
                                    @selector(onAimStrength:), iw);
