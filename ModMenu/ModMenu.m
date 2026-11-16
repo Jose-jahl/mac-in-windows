@@ -320,7 +320,7 @@
 #include <math.h>
 #include <string.h>
 
-#define MODMENU_VERSION     "0.28.0"
+#define MODMENU_VERSION     "0.29.0"
 /* v0.7.0: indice del acento custom en mm_theme_accent. Debe coincidir con el
    tamano de g_mm_themes (se verifica con _Static_assert al definir la tabla). */
 #define MM_THEME_CUSTOM     5
@@ -384,7 +384,7 @@ static const uint8_t MM_LIC_PUBKEY[65] = {
 
 /* Marcador global: el CI lo verifica para confirmar que este fuente llego al
    binario (el constructor es static y no sirve como prueba de presencia). */
-const char *modmenu_build_id = "modmenu-glass-0.28.0";
+const char *modmenu_build_id = "modmenu-glass-0.29.0";
 
 /* Fase C (ADR 0008): aim configurable via relay en cod.__DATA.
    El pack reemplaza el parche fijo del aim (0x1026FEC24) por un relay:
@@ -519,6 +519,10 @@ static UIView   *g_p_misc = nil;
 static UIButton *g_dbgbtn = nil;  /* v0.6.1: Debug como boton de fila completa */
 static UIView   *g_p_info = nil;
 static UIView   *g_p_more = nil;  /* v0.4.0: pagina EXTRA (features nuevas)    */
+/* 0.27.0 — PANEL MINIMAL: SYS (ajustes) vive detras del engranaje, fuera del
+   flujo de funciones. g_gear_btn se pinta aparte de g_nav_btns. */
+static UIScrollView *g_p_sys = nil;
+static UIButton *g_gear_btn = nil;
 static UILabel  *g_info   = nil;  /* texto vivo de la pagina INFO             */
 static UIScrollView *g_info_scroll = nil; /* v0.8.0: INFO en tarjeta scrolleable */
 static UILabel  *g_range_val = nil;
@@ -3024,11 +3028,15 @@ static void mm_haptic(int style)
 - (void)onSeg:(UISegmentedControl *)s
 {
     NSInteger i = s.selectedSegmentIndex;
-    if (g_p_esp   != nil) g_p_esp.hidden   = (i != 0);
-    if (g_p_aim   != nil) g_p_aim.hidden   = (i != 1);
-    if (g_p_vis   != nil) g_p_vis.hidden   = (i != 2);
-    if (g_p_misc  != nil) g_p_misc.hidden  = (i != 3);
-    if (g_p_info  != nil) g_p_info.hidden  = (i != 4);
+    /* 0.27.0 — el orden ahora es el del uso: AIM (0) · ESP (1) · EXTRA (2) ·
+       SYS (3, engranaje). VISUAL/INFO dejaron de ser pestanas: su contenido se
+       fue a SYS o se elimino. */
+    if (g_p_aim   != nil) g_p_aim.hidden   = (i != 0);
+    if (g_p_esp   != nil) g_p_esp.hidden   = (i != 1);
+    if (g_p_misc  != nil) g_p_misc.hidden  = (i != 2);
+    if (g_p_sys   != nil) g_p_sys.hidden   = (i != 3);
+    if (g_p_vis   != nil) g_p_vis.hidden   = YES;
+    if (g_p_info  != nil) g_p_info.hidden  = YES;
     /* v0.8.0: el selector real es horizontal; g_seg queda solo como estado
        para conservar los gestos y la persistencia existente. */
     for (NSUInteger n = 0; n < g_nav_btns.count; n++) {
@@ -3044,6 +3052,18 @@ static void mm_haptic(int style)
         [b setTitleColor:(on ? [UIColor whiteColor]
                             : [UIColor colorWithWhite:0.64 alpha:1.0])
                 forState:UIControlStateNormal];
+    }
+    /* 0.27.0: el engranaje no esta en g_nav_btns (no es pestana), se pinta aca. */
+    if (g_gear_btn != nil) {
+        BOOL on = (i == 3);
+        g_gear_btn.backgroundColor = on
+            ? [mm_neon_green() colorWithAlphaComponent:0.16]
+            : [UIColor colorWithWhite:1.0 alpha:0.035];
+        g_gear_btn.layer.borderColor = (on
+            ? [mm_neon_green() colorWithAlphaComponent:0.72]
+            : [UIColor colorWithWhite:1.0 alpha:0.07]).CGColor;
+        g_gear_btn.tintColor = on ? [UIColor whiteColor]
+                                  : [UIColor colorWithWhite:0.64 alpha:1.0];
     }
 }
 
@@ -6622,9 +6642,10 @@ static void mm_cloud_build_combat(UIView *page)
     ms.frame = CGRectMake(MM_CLOUD_CARD_INNER, 90.0, iw, 24.0);
     [c addSubview:ms];
 
-    mm_cloud_static_row(c, @"No recoil", @"ACTIVO", 122.0);
-    mm_cloud_static_row(c, @"No spread", @"ACTIVO", 150.0);
-    mm_cloud_static_row(c, @"Fast reload", @"ACTIVO", 178.0);
+    /* 0.27.0 — PANEL MINIMAL: se fueron las tres filas fijas "No recoil / No
+       spread / Fast reload = ACTIVO". No eran funciones: eran etiquetas que
+       decian ACTIVO sin escribir una sola direccion. Un panel de producto no
+       muestra lo que no hace. */
     [page addSubview:c];
 }
 
@@ -6673,6 +6694,15 @@ static void mm_cloud_build_aim(UIView *page)
     cn.textColor = [UIColor colorWithWhite:0.48 alpha:1.0];
     [c addSubview:cn];
     [page addSubview:c];
+
+    /* 0.27.0 — tercera tarjeta de AIM: control del lock y filtro de objetivo.
+       Son dos switches REALES (mm_x_aim_key, mm_x_ignore_down); antes la
+       columna quedaba vacia y el panel parecia inacabado. */
+    UIView *d = mm_cloud_card(@"CONTROL", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
+                              MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
+    mm_cloud_row(d, @"Aim Key (mantener)", @"mm_x_aim_key", NO, 38.0, NO);
+    mm_cloud_row(d, @"Ignorar caidos", @"mm_x_ignore_down", NO, 66.0, NO);
+    [page addSubview:d];
 }
 
 static void mm_cloud_build_visual(UIView *page)
@@ -6728,9 +6758,7 @@ static void mm_cloud_build_visual(UIView *page)
                               MM_CLOUD_CARD_W, MM_CLOUD_BODY_H);
     mm_cloud_row(c, @"Estelas (ultimos 2 s)", @"mm_x_trails", NO, 38.0, YES);
     mm_cloud_row(c, @"Brujula de bearings", @"mm_x_bearings", NO, 66.0, YES);
-    /* 2026-11: lecturas RE nuevas (team / estado / municion). Default OFF hasta
-       validar en device (docs/re-lecturas-1057.md). */
-    mm_cloud_row(c, @"Ignorar caidos (aim)", @"mm_x_ignore_down", NO, 122.0, NO);
+    /* 0.27.0: "Ignorar caidos" vive solo en AIM > CONTROL (un control, un lugar). */
     [page addSubview:c];
 }
 
@@ -6757,6 +6785,10 @@ static void mm_cloud_build_radar(UIView *page)
     mm_cloud_row(b, @"Guard de captura", @"mm_guard_capture", NO, 94.0, NO);
     mm_cloud_row(b, @"Stream Mode", @"mm_stream", NO, 122.0, NO);
     mm_cloud_row(b, @"FPS en pantalla", @"mm_x_fps", NO, 150.0, NO);
+    /* 0.27.0: la recarga rapida existia desde C-18 pero NO tenia control: el
+       panel mostraba una fila fija "Fast reload = ACTIVO" que mentia (el default
+       es OFF). Ahora es un switch de verdad; onSwitch ya llama mm_reload_apply. */
+    mm_cloud_row(b, @"Recarga rapida", @"mm_x_fast_reload", NO, 178.0, NO);
     [page addSubview:b];
 
     UIView *c = mm_cloud_card(@"PANTALLA", (MM_CLOUD_CARD_W + MM_CLOUD_CARD_GAP) * 2.0,
@@ -7436,9 +7468,12 @@ static void mm_build_ui(void)
     [g_panel addSubview:sep];
 
     /* Navegacion horizontal real. g_seg queda oculto solo como estado para
-       conservar el swipe y los metodos que ya existian. */
-    NSArray *navTitles = @[ @"ESP", @"AIM", @"VISUAL", @"RADAR", @"CONFIG" ];
-    CGFloat navW = (MM_PANEL_W - 36.0 - 8.0 * ((CGFloat)navTitles.count - 1.0)) / (CGFloat)navTitles.count;
+       conservar el swipe y los metodos que ya existian.
+       0.27.0 — PANEL MINIMAL: tres pestanas de funcion (AIM · ESP · EXTRA) y el
+       resto de los ajustes detras de un engranaje. Antes habia cinco. */
+    NSArray *navTitles = @[ @"AIM", @"ESP", @"EXTRA" ];
+    CGFloat navW = (MM_PANEL_W - 36.0 - 8.0 * ((CGFloat)navTitles.count - 1.0) - 34.0) /
+                   (CGFloat)navTitles.count;
     g_nav_btns = [NSMutableArray array];
     for (NSUInteger i = 0; i < navTitles.count; i++) {
         UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -7469,7 +7504,35 @@ static void mm_build_ui(void)
         [g_nav_btns addObject:b];
     }
 
-    g_seg = [[UISegmentedControl alloc] initWithItems:navTitles];
+    /* 0.27.0: engranaje de sistema, alineado a la derecha de la nav. Tag 3 =
+       SYS. No se suma a g_nav_btns: onSeg lo pinta aparte. */
+    g_gear_btn = [UIButton buttonWithType:UIButtonTypeCustom];
+    g_gear_btn.frame = CGRectMake(MM_PANEL_W - 18.0 - 26.0, MM_CLOUD_NAV_Y + 4.0,
+                                  26.0, 30.0);
+    g_gear_btn.tag = 3;
+    g_gear_btn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.035];
+    g_gear_btn.layer.cornerRadius = 9.0;
+    g_gear_btn.layer.borderWidth = 0.7;
+    g_gear_btn.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.07].CGColor;
+    g_gear_btn.tintColor = [UIColor colorWithWhite:0.64 alpha:1.0];
+    g_gear_btn.accessibilityLabel = @"Ajustes";
+    {
+        UIImage *gi = nil;
+        if (@available(iOS 13.0, *)) gi = [UIImage systemImageNamed:@"gearshape"];
+        if (gi != nil) {
+            [g_gear_btn setImage:[gi imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]
+                        forState:UIControlStateNormal];
+        } else {
+            [g_gear_btn setTitle:@"···" forState:UIControlStateNormal];
+            [g_gear_btn setTitleColor:[UIColor colorWithWhite:0.64 alpha:1.0]
+                             forState:UIControlStateNormal];
+        }
+    }
+    [g_gear_btn addTarget:[MMTargets shared] action:@selector(onNav:)
+         forControlEvents:UIControlEventTouchUpInside];
+    [g_panel addSubview:g_gear_btn];
+
+    g_seg = [[UISegmentedControl alloc] initWithItems:@[ @"AIM", @"ESP", @"EXTRA", @"SYS" ]];
     g_seg.frame = CGRectZero;
     g_seg.hidden = YES;
     g_seg.selectedSegmentIndex = 0;
@@ -7494,37 +7557,43 @@ static void mm_build_ui(void)
         g_p_esp = sc;
     }
     g_p_aim  = [[UIView alloc] initWithFrame:body];
-    g_p_vis  = [[UIView alloc] initWithFrame:body];
     g_p_misc = [[UIView alloc] initWithFrame:body];
-    g_p_info = [[UIView alloc] initWithFrame:body];
+    /* 0.27.0 — SYS: ajustes fuera del flujo. Dos filas de tarjetas en un scroll
+       vertical (estilo/perfiles arriba, soporte/cuenta abajo). */
+    {
+        UIScrollView *sysc = [[UIScrollView alloc] initWithFrame:body];
+        sysc.contentSize = CGSizeMake(body.size.width, MM_CLOUD_BODY_H * 2.0 + 14.0);
+        sysc.alwaysBounceVertical = YES;
+        sysc.showsVerticalScrollIndicator = YES;
+        sysc.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+        sysc.clipsToBounds = YES;
+        sysc.delaysContentTouches = NO;
+        sysc.canCancelContentTouches = YES;
+        g_p_sys = sysc;
+    }
     g_p_aim.hidden = YES;
-    g_p_vis.hidden = YES;
     g_p_misc.hidden = YES;
-    g_p_info.hidden = YES;
-    [g_panel addSubview:g_p_esp];
+    g_p_sys.hidden = YES;
     [g_panel addSubview:g_p_aim];
-    [g_panel addSubview:g_p_vis];
+    [g_panel addSubview:g_p_esp];
     [g_panel addSubview:g_p_misc];
-    [g_panel addSubview:g_p_info];
+    [g_panel addSubview:g_p_sys];
 
     g_sub_switches = [NSMutableArray array];
-    mm_cloud_build_combat(g_p_esp);
+    /* Orden de uso: AIM primero, despues ESP y EXTRA. */
     mm_cloud_build_aim(g_p_aim);
-    mm_cloud_build_visual(g_p_vis);
+    mm_cloud_build_combat(g_p_esp);
     mm_cloud_build_radar(g_p_misc);
-    mm_cloud_build_info(g_p_info);
-
-    UILabel *foot = mm_cloud_label(@"FUSION  ·  STEALTH  ·  AIM",
-                                   7.4, UIFontWeightSemibold,
-                                   [UIColor colorWithWhite:0.34 alpha:1.0]);
-    foot.frame = CGRectMake(18.0, 342.0, 300.0, 10.0);
-    [g_panel addSubview:foot];
-    UILabel *footR = mm_cloud_label(@"DRAG HEADER  ·  2-FINGER PROFILE",
-                                    7.4, UIFontWeightSemibold,
-                                    [UIColor colorWithWhite:0.30 alpha:1.0]);
-    footR.textAlignment = NSTextAlignmentRight;
-    footR.frame = CGRectMake(MM_PANEL_W - 320.0, 342.0, 302.0, 10.0);
-    [g_panel addSubview:footR];
+    {
+        UIView *sysA = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0,
+                             body.size.width, MM_CLOUD_BODY_H)];
+        UIView *sysB = [[UIView alloc] initWithFrame:CGRectMake(0.0, MM_CLOUD_BODY_H + 14.0,
+                             body.size.width, MM_CLOUD_BODY_H)];
+        mm_cloud_build_visual(sysA);
+        mm_cloud_build_info(sysB);
+        [g_p_sys addSubview:sysA];
+        [g_p_sys addSubview:sysB];
+    }
 
     mm_apply_esp_lock();
     mm_apply_safe_mode();
